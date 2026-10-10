@@ -166,6 +166,40 @@ def color_close(actual, expected, tolerance=1.5 / 255.0):
     return all(abs(a - e) <= tolerance for a, e in zip(actual, expected))
 
 
+def exact_color_equal(actual, expected, tolerance=1e-6):
+    """逐项比较的严格版：默认参数下要的是"位级相同"，不是"8 位量化内相同"。"""
+    if actual is None or expected is None or len(actual) != len(expected):
+        return False
+    return all(abs(float(a) - float(e)) <= tolerance for a, e in zip(actual, expected))
+
+
+def select_target(theme, preferences, path, context=None):
+    """按**两级选择器**的语义选中一个颜色项。
+
+    第二级（``theme_target``）的枚举条目只列当前分组里的项，所以直接写一个别组的
+    路径会被 RNA 拒绝（``enum "..." not found in (...)``）—— 这正是"两级选择器只写
+    theme_target"这条契约的落地方式：测试也得先切第一级、再写第二级。
+    """
+    context = context if context is not None else bpy.context
+    group = theme.group_of(path)
+    groups = [item[0] for item in theme.target_group_items(preferences, context)]
+    if group in groups:
+        preferences.theme_group = group
+    preferences.theme_target = path
+    return getattr(preferences, "theme_target", "") == path
+
+
+class _SimplePrefs(object):
+    """只带 simple_mode 的假偏好设置。
+
+    枚举回调在 ``self`` 上没有 ``theme_group`` 时**不按分组过滤**，所以它问的是
+    "简洁模式这一档下的全部条目"（不受当前选中的分组影响）。
+    """
+
+    def __init__(self, simple):
+        self.simple_mode = bool(simple)
+
+
 # --------------------------------------------------------------- 安装与启用
 
 
@@ -1320,7 +1354,8 @@ def test_theme(module):
 
     # 通过偏好设置属性走一遍：验证「实时写入主题」的回调
     preferences = module.compat.get_preferences()
-    preferences.theme_target = rgb_path
+    check(select_target(theme, preferences, rgb_path),
+          "两级选择器能选中视口背景（第一级自动切到「{}」）".format(theme.group_of(rgb_path)))
     preferences.theme_color = (0.11, 0.22, 0.33, 1.0)
     check(color_close(theme.get_color(current, rgb_path), (0.11, 0.22, 0.33, 1.0)),
           "改偏好设置里的颜色会实时写进主题", theme.get_color(current, rgb_path))
@@ -1590,7 +1625,7 @@ def test_theme(module):
     # ---- 调色盘 / 十六进制 / 应用颜色 ----
     preferences.simple_mode = False   # 下面要按单个家族名设置，先关掉简洁模式
     preferences.family = prefix
-    preferences.theme_target = grey_path
+    check(select_target(theme, preferences, grey_path), "两级选择器能选中普通按钮底色")
     check(module.ui.load_family_parts(context, preferences) >= 4, "能把家族颜色读进面板属性")
     preferences.palette_color = (0.5, 0.25, 0.75, 1.0)
     preferences.custom_hex = ""
@@ -1699,11 +1734,11 @@ def test_theme(module):
           "直接给家族名也认（精调时用）")
     check(theme.families_for_key("__none__") == (), "无效键返回空")
 
-    simple_paths = [item[0] for item in theme.target_items(preferences, context)]
+    simple_paths = [item[0] for item in theme.target_items(_SimplePrefs(True), context)]
     check(len(simple_paths) <= 40, "简洁模式下颜色项 <= 40 个", len(simple_paths))
     check("outliner.selected_highlight" in simple_paths, "简洁模式保留了常用的全局选中高亮")
     preferences.simple_mode = False
-    full_paths = [item[0] for item in theme.target_items(preferences, context)]
+    full_paths = [item[0] for item in theme.target_items(_SimplePrefs(False), context)]
     check(len(full_paths) > len(simple_paths) * 3,
           "关掉简洁模式后能看到全部颜色项", (len(simple_paths), len(full_paths)))
     preferences.simple_mode = True
@@ -1818,7 +1853,7 @@ def test_theme(module):
     # 先在两个不同分组里各造一处改动：视口组 与「按钮 底色」组
     theme.set_color(current, rgb_path, (0.05, 0.05, 0.05, 1.0))
     theme.set_color(current, grey_path, (0.05, 0.05, 0.05, 1.0))
-    preferences.theme_target = rgb_path
+    check(select_target(theme, preferences, rgb_path), "两级选择器能选中视口背景")
     preferences.restore_scope = 'CURRENT'
     result = bpy.ops.hhz.theme_restore_default(scope=preferences.restore_scope)
     check(result == {'FINISHED'}, "选「本项」时恢复可用", result)
@@ -1844,7 +1879,11 @@ def test_theme(module):
     check(result == {'FINISHED'}, "选「全部」时恢复可用", result)
     check(theme.color_close(theme.get_color(current, grey_path), theme.default_of(grey_path)),
           "「全部」把别组的改动也恢复了")
-    preferences.theme_target = orig_target
+    if orig_target:
+        try:
+            select_target(theme, preferences, orig_target)
+        except Exception:
+            pass
     preferences.restore_scope = orig_scope
 
     # 还原测试前的颜色
@@ -2531,10 +2570,14 @@ def test_target_item_labels(module):
           repeated[:5])
 
     by_path = dict((item[0], item[1]) for item in items)
-    icon_label = by_path.get("user_interface.icon_object")
-    if icon_label is not None:
-        check(icon_label.startswith("图标颜色 "),
-              "非控件家族的条目仍然带分组前缀（改动只作用于控件家族那批）", icon_label)
+    # 两级选择器之后：分组由**第一级**下拉承担，第二级的标签一律不带分组前缀。
+    prefixed = [label for path, label in by_path.items()
+                if theme.group_of(path) and label.startswith(theme.group_of(path) + " ")]
+    check(not prefixed,
+          "第二级的标签一律不再拼分组前缀（分组已由第一级选定）", prefixed[:5])
+    wrong = [path for path, label in by_path.items() if label != theme.label_of(path)]
+    check(not wrong,
+          "第二级标签与明文「当前项」用的是同一份标签（两处不会说法不一）", wrong[:5])
 
     old_labels = ["{} {}".format(group, label) for path, label, group in theme.TARGETS
                   if theme.resolve(current, path) is not None]
@@ -2559,6 +2602,648 @@ def test_target_item_labels(module):
           "简洁模式的短列表仍然 <= 40 项（没有被这次改动影响）", len(simple_labels))
     check(not [label for label in simple_labels if label.startswith("按钮 ")],
           "简洁模式下的控件家族条目同样不再重复分组名")
+
+
+# ------------------------------------------------- A0：色相 / 饱和度 / 明度调整
+#
+# 关键的两条护栏（用户原话）：
+#   1. 默认参数下输出与预设**逐项完全相同** —— 纯函数上是位级相等（adjust_colors 在
+#      三个参数都是"原样"时直接返回原值、不做 HSV 往返），真机主题上是 8 位量化容差内相同；
+#   2. 200% 时对应颜色的饱和度 = 1.0（容差 1e-6）。
+
+
+def test_theme_adjust_colors(module):
+    section("配色预设：色相 / 饱和度 / 明度三个调整滑杆")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    preferences = module.compat.get_preferences()
+    check(current is not None and preferences is not None, "能取到当前主题与偏好设置")
+    if current is None or preferences is None:
+        return
+
+    preset = theme.preset_names()[0]
+    base = theme.preset_colors(preset) or {}
+    check(bool(base), "取到「{}」的色表（{} 项）".format(preset, len(base)))
+
+    # ---- 1. 默认参数 == 预设原样（逐项，位级相等）----
+    identical = theme.adjust_colors(base, 0.0, 1.0, 1.0)
+    check(set(identical) == set(base)
+          and all(identical[path] == base[path] for path in base),
+          "默认参数（0 度 / 100% / 100%）下逐项与预设完全相同（位级相等，不做 HSV 往返）")
+    check(theme.adjust_colors(base) == base, "默认参数等价于直接返回原表")
+    check(theme.adjust_colors(None) == {}, "批量调整对空输入返回空字典（不炸）")
+    same_after = theme.preset_colors(preset) or {}
+    check(all(same_after[path] == base[path] for path in base),
+          "调整是纯函数：预设表数据本身没有被改动（再取一次仍然一样）")
+    for name in theme.preset_names():
+        colors = theme.preset_colors(name) or {}
+        adjusted = theme.adjust_colors(colors, 0.0, 1.0, 1.0)
+        check(all(adjusted[path] == colors[path] for path in colors),
+              "预设「{}」在默认参数下逐项相同".format(name))
+
+    # ---- 2. 色相 ----
+    probe = (0.7765, 1.0, 0.0, 1.0)   # 酸性黄绿：饱和度高、明度也高
+    grey = (0.5, 0.5, 0.5, 0.35)      # 纯灰：S == 0
+    shifted = theme.adjust_color(probe, hue_shift=180.0)
+    check(abs(theme.saturation_of(shifted) - theme.saturation_of(probe)) < 1e-9
+          and not color_close(shifted, probe, 0.05),
+          "色相 +180 度：饱和度不变、色值明显不同",
+          (theme.color_to_hex(probe), theme.color_to_hex(shifted)))
+    check(exact_color_equal(theme.adjust_color(probe, hue_shift=-180.0),
+                            theme.adjust_color(probe, hue_shift=180.0)),
+          "-180 度与 +180 度落在同一个色相上（环绕正确）")
+    grey_shifted = theme.adjust_color(grey, hue_shift=137.0)
+    check(grey_shifted[:3] == grey[:3],
+          "S == 0 的灰色在任何色相偏移下都不受影响", grey_shifted)
+    print("  色相 +180 度：{} -> {}".format(
+        theme.color_to_hex(probe), theme.color_to_hex(shifted)))
+
+    # ---- 3. 饱和度：分段映射 ----
+    half = theme.adjust_color(probe, saturation_scale=0.5)
+    check(abs(theme.saturation_of(half) - theme.saturation_of(probe) * 0.5) < 1e-9,
+          "t <= 1 时 S' = S * t（50% 正好是原来的一半）",
+          (theme.saturation_of(probe), theme.saturation_of(half)))
+    full = theme.adjust_color(probe, saturation_scale=2.0)
+    check(abs(theme.saturation_of(full) - 1.0) <= 1e-6,
+          "200% 时 S' 推到 1.0（分段补足，而不是 S*2 溢出再夹）",
+          theme.saturation_of(full))
+    middle = (0.2, 0.4, 0.6, 1.0)
+    base_s = theme.saturation_of(middle)
+    boosted = theme.adjust_color(middle, saturation_scale=1.5)
+    check(abs(theme.saturation_of(boosted) - (base_s + 0.5 * (1.0 - base_s))) < 1e-9,
+          "150% 走的是 S + (t-1)(1-S) 这一段（实测 {:.4f}）".format(theme.saturation_of(boosted)),
+          (base_s, theme.saturation_of(boosted)))
+    grey_full = theme.adjust_color(grey, saturation_scale=2.0)
+    grey_zero = theme.adjust_color(grey, saturation_scale=0.0)
+    check(grey_full[:3] == grey[:3] and grey_zero[:3] == grey[:3],
+          "S == 0 的颜色在 200% 与 0% 下都保持 0（纯灰不会被推成脏色）",
+          (grey_full, grey_zero))
+    check(theme.saturation_of(theme.adjust_color(probe, saturation_scale=0.0)) < 1e-9,
+          "0% 时高饱和颜色变成灰")
+    print("  饱和度：预设原样 {:.3f} -> 50% {:.3f} / 150% {:.3f} / 200% {:.3f}".format(
+        theme.saturation_of(probe), theme.saturation_of(half),
+        theme.saturation_of(boosted), theme.saturation_of(full)))
+
+    # ---- 4. 明度 ----
+    darker = theme.adjust_color(probe, value_scale=0.5)
+    check(abs(max(darker[:3]) - max(probe[:3]) * 0.5) < 1e-9,
+          "明度 50%：V 减半", (probe, darker))
+    brighter = theme.adjust_color(probe, value_scale=2.0)
+    check(abs(max(brighter[:3]) - 1.0) < 1e-9,
+          "明度 200%：V 夹到 1.0（clamp 而不是溢出）", brighter)
+
+    # ---- 5. alpha 原样保留 ----
+    check(abs(theme.adjust_color(probe, 30.0, 1.6, 0.8)[3] - 1.0) < 1e-9
+          and abs(theme.adjust_color(grey, 30.0, 1.6, 0.8)[3] - 0.35) < 1e-9
+          and theme.adjust_color((0.2, 0.4, 0.6), 0.0, 1.0, 1.0)[3] == 1.0,
+          "只改 HSV：alpha 原样保留（RGB 三通道项读进来补的 1.0 照旧返回）")
+
+    # ---- 6. 滑杆本身的默认值与范围 ----
+    props = type(preferences).bl_rna.properties
+    check(props["preset_hue"].default == 0.0
+          and round(props["preset_hue"].hard_min, 3) == -180.0
+          and round(props["preset_hue"].hard_max, 3) == 180.0,
+          "色相滑杆：默认 0 度、范围 -180…+180",
+          (props["preset_hue"].default, props["preset_hue"].hard_min, props["preset_hue"].hard_max))
+    check(props["preset_saturation"].default == 1.0
+          and round(props["preset_saturation"].hard_min, 3) == 0.0
+          and round(props["preset_saturation"].hard_max, 3) == 2.0,
+          "饱和度滑杆：默认 100%（= 预设原样）、范围 0…200%",
+          (props["preset_saturation"].default, props["preset_saturation"].hard_max))
+    check(props["preset_value"].default == 1.0
+          and round(props["preset_value"].hard_max, 3) == 2.0,
+          "明度滑杆：默认 100%、范围 0…200%",
+          (props["preset_value"].default, props["preset_value"].hard_max))
+    sliders = sorted(name for name in props.keys()
+                     if name.startswith("preset_") or name == "selection_saturation")
+    check(sliders == ["preset_hue", "preset_saturation", "preset_value", "selection_saturation"],
+          "这一批就这四个滑杆属性（没有多出别的设置项）", sliders)
+
+    # ---- 7. 旧值兼容：0…1 的旧倍数语义一个字都没变 ----
+    mismatched = [path for path, color in base.items()
+                  if not exact_color_equal(theme.desaturate_color(color, 0.4),
+                                           theme.adjust_color(color, saturation_scale=0.4))]
+    check(not mismatched,
+          "desaturate_color 与 adjust_color 是同一个公式（旧的 0…1 倍数语义没变）",
+          mismatched[:5])
+    worse = [path for path, color in base.items()
+             if theme.saturation_of(color) > 0.2
+             and theme.saturation_of(theme.desaturate_color(color, 0.4))
+             >= theme.saturation_of(color) * 0.6]
+    check(not worse,
+          "旧的 40% 倍数在新公式下仍然只降不升（老用户不会看到颜色突然变灰或反跳）",
+          worse[:5])
+
+    # ---- 8. 真滑杆：走算符与面板回调同一条链（theme.render_preset_colors）----
+    original = (float(preferences.preset_hue), float(preferences.preset_saturation),
+                float(preferences.preset_value), float(preferences.selection_saturation))
+    blue_path = "user_interface.wcol_regular.inner_sel"
+    present = [path for path in base if theme.resolve(current, path) is not None]
+    try:
+        preferences.preset_hue = 0.0
+        preferences.preset_saturation = 1.0
+        preferences.preset_value = 1.0
+        preferences.selection_saturation = 1.0
+        preferences.last_preset = preset
+        result = bpy.ops.hhz.theme_apply_preset(preset=preset)
+        check(result == {'FINISHED'}, "默认滑杆下「应用预设」可用", result)
+        differed = [path for path in present
+                    if not color_close(theme.get_color(current, path), base[path])]
+        check(not differed,
+              "默认参数下套用预设：主题里逐项与预设相同（{} 项，8 位量化容差内）".format(len(present)),
+              differed[:8])
+        settings_before = theme.get_color(current, blue_path)
+
+        preferences.preset_value = 0.5
+        result = bpy.ops.hhz.theme_apply_preset(preset=preset)
+        dimmed = theme.get_color(current, blue_path)
+        check(result == {'FINISHED'} and dimmed is not None
+              and abs(max(dimmed[:3]) - max(base[blue_path][:3]) * 0.5) < 3.0 / 255.0,
+              "明度滑到 50% 真的落到主题上（V 大约减半）",
+              (settings_before, dimmed, base[blue_path]))
+        again = theme.apply_colors(current, theme.render_preset_colors(preset, preferences))
+        check(again and color_close(theme.get_color(current, blue_path), dimmed),
+              "同一组滑杆重复套用结果一致（从预设表重算，不累积）",
+              (dimmed, theme.get_color(current, blue_path)))
+
+        preferences.preset_hue = 90.0
+        bpy.ops.hhz.theme_apply_preset(preset=preset)
+        turned = theme.get_color(current, blue_path)
+        check(turned is not None and not color_close(turned, dimmed, 0.03),
+              "色相滑杆也真的落在主题上（+90 度后色值明显不同）", (dimmed, turned))
+        preferences.preset_hue = 0.0
+        preferences.preset_value = 1.0
+        bpy.ops.hhz.theme_apply_preset(preset=preset)
+        check(color_close(theme.get_color(current, blue_path), base[blue_path]),
+              "滑杆全部回默认后，主题里的颜色也回到预设原样",
+              (theme.get_color(current, blue_path), base[blue_path]))
+    finally:
+        (preferences.preset_hue, preferences.preset_saturation,
+         preferences.preset_value, preferences.selection_saturation) = original
+        preferences.last_preset = preset
+        bpy.ops.hhz.theme_apply_preset(preset=preset)
+
+
+# ------------------------------------------------------- A1：选中几何独立饱和度
+
+
+def test_selection_saturation(module):
+    section("视口选中几何：独立饱和度滑杆（只作用于 4 条选中路径）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    preferences = module.compat.get_preferences()
+    check(current is not None and preferences is not None, "能取到当前主题与偏好设置")
+    if current is None or preferences is None:
+        return
+
+    props = type(preferences).bl_rna.properties
+    check(props["selection_saturation"].default == 1.0
+          and round(props["selection_saturation"].hard_min, 3) == 0.0
+          and round(props["selection_saturation"].hard_max, 3) == 2.0,
+          "选中几何饱和度：默认 100%（= 原样）、范围 0…200%",
+          (props["selection_saturation"].default, props["selection_saturation"].hard_min,
+           props["selection_saturation"].hard_max))
+    check(tuple(theme.VIEWPORT_SELECTION_PATHS) == (
+        "view_3d.editmesh_active", "view_3d.vertex_select",
+        "view_3d.edge_select", "view_3d.face_select"),
+        "它只作用于这 4 条选中路径", theme.VIEWPORT_SELECTION_PATHS)
+
+    preset = theme.preset_names()[0]
+    base = theme.preset_colors(preset) or {}
+    others = [path for path in base if path not in theme.VIEWPORT_SELECTION_PATHS]
+    check(len(others) >= 20, "色表里除这 4 条之外还有 {} 项可以做护栏对比".format(len(others)))
+
+    # ---- 1. 默认值：逐项与预设完全相同 ----
+    untouched = theme.selection_saturation_colors(base, 1.0)
+    check(set(untouched) == set(base)
+          and all(untouched[path] == base[path] for path in base),
+          "默认 100% 时整份色表逐项与预设完全相同（位级相等）")
+
+    # ---- 2. 200%：4 条路径 S = 1.0（容差 1e-6）----
+    boosted = theme.selection_saturation_colors(base, 2.0)
+    for path in theme.VIEWPORT_SELECTION_PATHS:
+        check(abs(theme.saturation_of(boosted[path]) - 1.0) <= 1e-6,
+              "200% 时 {} 的饱和度 = 1.0".format(path),
+              theme.saturation_of(boosted[path]))
+    check(all(abs(boosted[path][3] - base[path][3]) < 1e-9
+              for path in theme.VIEWPORT_SELECTION_PATHS),
+          "推饱和度时 alpha 原样保留")
+
+    # ---- 3. 0%：变灰 ----
+    greyed = theme.selection_saturation_colors(base, 0.0)
+    still_colorful = [path for path in theme.VIEWPORT_SELECTION_PATHS
+                      if theme.saturation_of(greyed[path]) > 1e-9
+                      or max(greyed[path][:3]) - min(greyed[path][:3]) > 1e-6]
+    check(not still_colorful, "0% 时这 4 条路径变灰（三通道相等）", still_colorful)
+
+    # ---- 4. 关键护栏：其它任何路径在任何取值下都不变 ----
+    for scale in (0.0, 0.5, 1.0, 1.5, 2.0):
+        sampled = theme.selection_saturation_colors(base, scale)
+        moved = [path for path in others if sampled[path] != base[path]]
+        check(not moved,
+              "选中几何饱和度 {}%：其它 {} 条路径逐项不变".format(
+                  int(round(scale * 100)), len(others)),
+              moved[:5])
+
+    # ---- 5. 真算符：主题里只有那 4 条动，其它一条都不动 ----
+    original = float(preferences.selection_saturation)
+    try:
+        preferences.preset_hue = 0.0
+        preferences.preset_saturation = 1.0
+        preferences.preset_value = 1.0
+        preferences.selection_saturation = 1.0
+        preferences.last_preset = preset
+        bpy.ops.hhz.theme_apply_preset(preset=preset)
+        present = [path for path in base if theme.resolve(current, path) is not None]
+        live_others = [path for path in present
+                       if path not in theme.VIEWPORT_SELECTION_PATHS]
+        untouched_paths = [path for path in theme.available_paths(bpy.context)
+                           if path not in base][:20]
+        before = dict((path, theme.get_color(current, path))
+                      for path in live_others + untouched_paths)
+
+        preferences.selection_saturation = 2.0
+        result = bpy.ops.hhz.theme_apply_preset(preset=preset)
+        check(result == {'FINISHED'}, "选中几何饱和度 200% 时套用预设可用", result)
+        live = {}
+        for path in theme.VIEWPORT_SELECTION_PATHS:
+            color = theme.get_color(current, path)
+            if color is not None:
+                live[path] = theme.saturation_of(color)
+        check(len(live) >= 1,
+              "实际主题里读得到选中几何（{} / {} 条在本版本存在）".format(
+                  len(live), len(theme.VIEWPORT_SELECTION_PATHS)), sorted(live))
+        below = {path: round(value, 6) for path, value in sorted(live.items())
+                 if value < 1.0 - 1e-6}
+        check(not below,
+              "200% 后实际主题里这 4 条的饱和度都 = 1.0（容差 1e-6）",
+              below or sorted(live.items()))
+        changed = [path for path in before
+                   if not color_close(theme.get_color(current, path), before[path])]
+        check(not changed,
+              "200% 后其它 {} 条颜色在主题里一动没动（逐项核对）".format(len(before)),
+              changed[:8])
+        print("  实际主题：{}".format({path: round(value, 4) for path, value in sorted(live.items())}))
+    finally:
+        preferences.selection_saturation = original
+        preferences.last_preset = preset
+        bpy.ops.hhz.theme_apply_preset(preset=preset)
+
+
+# ------------------------------------------- B0：第 4 个预设「自定义预设」
+
+
+def test_custom_preset(module):
+    section("第 4 个预设「自定义预设」（保存 / 覆盖 / 套用）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    preferences = module.compat.get_preferences()
+    check(current is not None and preferences is not None, "能取到当前主题与偏好设置")
+    if current is None or preferences is None:
+        return
+
+    check(theme.CUSTOM_PRESET_NAME == "自定义预设",
+          "保留名就是「自定义预设」", theme.CUSTOM_PRESET_NAME)
+    check(theme.preset_names() == ["马拉松 建模 低干扰", "马拉松 浅灰卡", "死亡搁浅"],
+          "内置预设仍然是 3 套（自定义预设不塞进 PRESETS，既有的按名字判断都不受影响）",
+          theme.preset_names())
+    check(theme.preset_button_names() == theme.preset_names() + [theme.CUSTOM_PRESET_NAME],
+          "预设区按钮 = 3 套内置预设 + 第 4 个「自定义预设」（列表顺序就是按钮顺序）",
+          theme.preset_button_names())
+    check(theme.preset_colors(theme.CUSTOM_PRESET_NAME) is None
+          and theme.custom_preset_colors("") is None,
+          "从没保存过时取不到自定义预设色表（返回 None，调用方据此给友好提示）")
+    check(theme.preset_sizes(theme.CUSTOM_PRESET_NAME) == {},
+          "自定义预设不写视口线宽（线宽只对两套马拉松生效）")
+
+    # 数据存放位置：复用既有的 theme_custom（一个 JSON 字符串），不新增文件 / 设置项
+    custom_props = sorted(name for name in type(preferences).bl_rna.properties.keys()
+                          if "custom" in name)
+    check(custom_props == ["custom_choice", "custom_hex", "custom_name", "theme_custom"],
+          "没有新增任何存自定义预设的偏好设置项（就复用既有这 4 个属性）", custom_props)
+
+    source = source_of(module, "ops.py")
+    static = class_source(source, "HHZ_OT_theme_apply_preset")
+    check("CUSTOM_PRESET_NAME" in static and "还没有保存过自定义预设" in static,
+          "没保存过时算符给出明确的下一步提示（不是一句莫名的失败）")
+    save_source = class_source(source, "HHZ_OT_theme_custom_save")
+    check("preset_mode" in save_source and "CUSTOM_PRESET_NAME" in save_source,
+          "「保存当前为自定义预设」复用既有算符 hhz.theme_custom_save（没有另写一套存储）")
+    check("custom_save" in save_source and "theme_custom" in save_source,
+          "存进既有的自定义配色 JSON（同一个 theme_custom 字符串）")
+
+    original_text = getattr(preferences, "theme_custom", "")
+    original_last = getattr(preferences, "last_preset", "")
+    original_sliders = (float(preferences.preset_hue), float(preferences.preset_saturation),
+                        float(preferences.preset_value), float(preferences.selection_saturation))
+    try:
+        # ---- 从没保存过：友好提示而不是莫名 CANCELLED ----
+        preferences.theme_custom = ""
+        preferences.last_preset = ""
+        result = bpy.ops.hhz.theme_apply_preset(preset=theme.CUSTOM_PRESET_NAME)
+        check(result != {'FINISHED'}, "从没保存过时点「自定义预设」不会报成功", result)
+        check(result == {'CANCELLED'}, "返回 CANCELLED（同时 report 里给的是明确的下一步）", result)
+
+        # ---- 保存：当前预设 + 当前三个滑杆调整后的色表 ----
+        preset = theme.preset_names()[2]
+        preferences.last_preset = preset
+        preferences.preset_hue = 120.0
+        preferences.preset_saturation = 1.4
+        preferences.preset_value = 1.2
+        expected = theme.render_preset_colors(preset, preferences)
+        check(bool(expected), "先算出「{} + 当前调整」的期望色表（{} 项）".format(preset, len(expected)))
+        result = bpy.ops.hhz.theme_custom_save(preset_mode=True)
+        check(result == {'FINISHED'}, "「保存当前为自定义预设」可用", result)
+        text = getattr(preferences, "theme_custom", "")
+        stored = theme.custom_preset_colors(text)
+        check(stored is not None, "保存后能按保留名从既有 JSON 里读回来")
+        if stored is None:
+            return
+        mismatched = [path for path in expected
+                      if path not in stored
+                      or not exact_color_equal(stored[path], expected[path])]
+        check(not mismatched,
+              "存下来的就是「当前预设 + 当前调整」的色表（{} 项逐项比对）".format(len(expected)),
+              mismatched[:5])
+        check(abs(float(preferences.preset_hue)) < 1e-9
+              and abs(float(preferences.preset_saturation) - 1.0) < 1e-9
+              and abs(float(preferences.preset_value) - 1.0) < 1e-9
+              and abs(float(preferences.selection_saturation) - 1.0) < 1e-9,
+              "保存后四个滑杆归位到原样（这份表已经含了调整，不再叠加第二次）")
+        check(getattr(preferences, "last_preset", "") == theme.CUSTOM_PRESET_NAME,
+              "保存后「最近使用的预设」切到自定义预设（紧接着套用的就是它）")
+        check(theme.CUSTOM_PRESET_NAME in theme.custom_names(text)
+              and theme.CUSTOM_PRESET_NAME not in theme.custom_scheme_names(text),
+              "保留名只活在同一份 JSON 里，不出现在「自定义配色」下拉（界面上是两件事）")
+
+        # ---- 套用：复用 apply_colors 的既有链路写回主题 ----
+        grey_path = "user_interface.wcol_regular.inner"
+        theme.set_color(current, grey_path, (0.01, 0.02, 0.03, 1.0))
+        result = bpy.ops.hhz.theme_apply_preset(preset=theme.CUSTOM_PRESET_NAME)
+        check(result == {'FINISHED'}, "套用「自定义预设」可用", result)
+        live = theme.get_color(current, grey_path)
+        check(color_close(live, stored[grey_path]),
+              "套用后主题里写回的是保存时的色值", (live, stored.get(grey_path)))
+        first = theme.get_color(current, grey_path)
+        bpy.ops.hhz.theme_apply_preset(preset=theme.CUSTOM_PRESET_NAME)
+        check(color_close(theme.get_color(current, grey_path), first),
+              "重复套用结果一致（写的是固化色表，不累积）",
+              (first, theme.get_color(current, grey_path)))
+
+        # ---- 覆盖：再存一次同名覆盖，不是新增一条记录 ----
+        preferences.preset_hue = 0.0
+        preferences.preset_saturation = 0.5
+        preferences.preset_value = 1.0
+        preferences.last_preset = preset
+        overwrite_expected = theme.render_preset_colors(preset, preferences)
+        result = bpy.ops.hhz.theme_custom_save(preset_mode=True)
+        check(result == {'FINISHED'}, "同名再存一次会覆盖（不是报错）", result)
+        overwritten = theme.custom_preset_colors(getattr(preferences, "theme_custom", ""))
+        check(overwritten is not None
+              and exact_color_equal(overwritten[grey_path], overwrite_expected[grey_path])
+              and not exact_color_equal(overwritten[grey_path], stored[grey_path]),
+              "覆盖后的色表是新调整的结果（与上一次存的不一样，且逐项等于期望表）",
+              (overwritten.get(grey_path) if overwritten else None,
+               overwrite_expected[grey_path], stored[grey_path]))
+        check(theme.custom_names(getattr(preferences, "theme_custom", ""))
+              == [theme.CUSTOM_PRESET_NAME],
+              "JSON 里始终只有这一条保留名记录（覆盖而不是堆积）",
+              theme.custom_names(getattr(preferences, "theme_custom", "")))
+
+        # ---- 保存出来的自定义预设也能被四个滑杆继续调（仍然从 JSON 重算，不累积）----
+        preferences.last_preset = theme.CUSTOM_PRESET_NAME
+        preferences.preset_saturation = 1.0
+        preferences.preset_value = 0.5
+        bpy.ops.hhz.theme_apply_preset(preset=theme.CUSTOM_PRESET_NAME)
+        once = theme.get_color(current, grey_path)
+        bpy.ops.hhz.theme_apply_preset(preset=theme.CUSTOM_PRESET_NAME)
+        check(color_close(theme.get_color(current, grey_path), once)
+              and once is not None and abs(max(once[:3]) - max(overwritten[grey_path][:3]) * 0.5)
+              < 3.0 / 255.0,
+              "在自定义预设上继续调滑杆：从 JSON 重算、重复套用不累积",
+              (overwritten[grey_path], once, theme.get_color(current, grey_path)))
+    finally:
+        preferences.theme_custom = original_text
+        preferences.last_preset = original_last
+        (preferences.preset_hue, preferences.preset_saturation,
+         preferences.preset_value, preferences.selection_saturation) = original_sliders
+        bpy.ops.hhz.theme_apply_preset(preset=theme.preset_names()[0])
+
+
+# ------------------------------------------- C：两级短选择 + 可达性不变式
+
+
+def test_target_selector(module):
+    section("颜色项两级短选择（分组 -> 本组内的项，可达集合 == 可用集合）")
+    theme = module.theme
+    context = bpy.context
+    preferences = module.compat.get_preferences()
+    current = theme.current_theme(context)
+    check(current is not None and preferences is not None, "能取到当前主题与偏好设置")
+    if current is None or preferences is None:
+        return
+
+    full = _SimplePrefs(False)          # 不按分组过滤、也不开简洁模式
+    available = theme.available_paths(context)
+    check(len(available) >= 150, "本版本可用颜色项 >= 150（这就是「可用集合」）", len(available))
+
+    # ---- 第一级：分组（短词）----
+    group_items = theme.target_group_items(full, context)
+    groups = [item[0] for item in group_items]
+    check(bool(groups), "第一级有分组（{} 个）".format(len(groups)))
+    check(all(item[1] == item[0] for item in group_items),
+          "第一级条目的显示文本就是分组名本身（短词，不拼前缀）")
+    check(all("\u00b7" not in group for group in groups), "分组名里没有中点号")
+    check(max(len(group) for group in groups) <= 10,
+          "最长的分组名不超过 10 个字符（实测 {}）".format(
+              max(len(group) for group in groups)))
+    check(groups == theme.group_names(available),
+          "第一级分组就是 TARGETS 里的分组顺序（与「恢复本组」用的是同一套分组）")
+
+    # ---- 第二级：逐组的条目 ----
+    members = {}
+    for group in groups:
+        probe = _SimplePrefs(False)
+        probe.theme_group = group
+        members[group] = [item[0] for item in theme.target_items(probe, context)]
+    sizes = sorted(members.items(), key=lambda pair: -len(pair[1]))
+    print("  第一级 {} 组；第二级条目数（前 8）：{}".format(
+        len(groups), [(name, len(paths)) for name, paths in sizes[:8]]))
+    check(not [name for name, paths in members.items() if not paths],
+          "逐组检查第二级非空（每个分组都至少有一项）",
+          [name for name, paths in members.items() if not paths])
+    check(max(len(paths) for paths in members.values()) <= 30,
+          "第二级最长 {} 项（结构上不再是两百多项的长列表，弹出框不必截断）".format(
+              max(len(paths) for paths in members.values())))
+
+    foreign = []
+    for group, paths in members.items():
+        foreign.extend(path for path in paths if theme.group_of(path) != group)
+    check(not foreign, "第二级只列第一级选中的那一组（没有串组）", foreign[:5])
+
+    prefixed = []
+    for group, paths in members.items():
+        for path in paths:
+            if path not in theme.TARGET_INDEX:
+                continue
+            label = theme.TARGET_INDEX[path][0]
+            if theme.group_of(path) and label.startswith(theme.group_of(path) + " "):
+                prefixed.append(path)
+    check(not prefixed, "第二级的标签不再带分组前缀（分组已由第一级选定）", prefixed[:5])
+
+    # ---- 可达性不变式：可达集合 == 可用集合 ----
+    reachable = []
+    for paths in members.values():
+        reachable.extend(paths)
+    check(len(reachable) == len(set(reachable)),
+          "第二级的路径互不重复（每组各管自己那批）",
+          len(reachable) - len(set(reachable)))
+    missing = sorted(set(available) - set(reachable))
+    extra = sorted(set(reachable) - set(available))
+    check(not missing and not extra,
+          "可达集合 == 可用集合（本版本每条可用路径都能被两级选到，没有多也没有少）",
+          (missing[:5], extra[:5]))
+
+    # ---- 简洁模式：非控件项仍然可达 ----
+    simple = _SimplePrefs(True)
+    simple_groups = [item[0] for item in theme.target_group_items(simple, context)]
+    simple_reachable = []
+    for group in simple_groups:
+        probe = _SimplePrefs(True)
+        probe.theme_group = group
+        simple_reachable.extend(item[0] for item in theme.target_items(probe, context))
+    simple_available = theme.selector_paths(True, "", context)
+    check(set(simple_reachable) == set(simple_available),
+          "简洁模式下可达集合 == 可用集合（分组过滤不会挡住任何一条）",
+          (sorted(set(simple_available) - set(simple_reachable))[:5],
+           sorted(set(simple_reachable) - set(simple_available))[:5]))
+    check(len(simple_reachable) <= 40, "简洁模式总条目仍然 <= 40", len(simple_reachable))
+    for path in ("outliner.selected_highlight", "file_browser.selected_file",
+                 "user_interface.editor_outline"):
+        check(path in simple_reachable,
+              "简洁模式下 {} 仍然可达（非控件项没有被分组挡住）".format(path))
+
+    # ---- 真偏好设置（RNA）：中文 + 空格的分组标识能写进去、读回来一致 ----
+    original_simple = bool(preferences.simple_mode)
+    original_group = getattr(preferences, "theme_group", "")
+    original_target = getattr(preferences, "theme_target", "")
+    try:
+        preferences.simple_mode = False
+        check(theme.sync_selector(preferences, context), "两级选择器能在真偏好设置上收敛")
+        live_group = getattr(preferences, "theme_group", "")
+        check(live_group in groups,
+              "第一级写进 RNA 后读回来的就是同一个分组名（中文 + 空格没问题）",
+              (live_group, groups[:3]))
+        live_members = [item[0] for item in theme.target_items(preferences, context)]
+        check(getattr(preferences, "theme_target", "") in live_members,
+              "第二级当前值一定落在第一级的这一组里",
+              (getattr(preferences, "theme_target", ""), live_members[:3]))
+        check(live_members == members.get(live_group, []),
+              "真偏好设置读出来的第二级条目与假偏好设置逐项一致（RNA 没有额外过滤）",
+              (len(live_members), len(members.get(live_group, []))))
+        check(select_target(theme, preferences, "view_3d.grid"),
+              "真偏好设置上能按两级语义选中「视口」里的网格线")
+        check(getattr(preferences, "theme_group", "") == theme.group_of("view_3d.grid")
+              and getattr(preferences, "theme_target", "") == "view_3d.grid",
+              "两级的值都写对了", (getattr(preferences, "theme_group", ""),
+                                   getattr(preferences, "theme_target", "")))
+    finally:
+        try:
+            preferences.simple_mode = original_simple
+            if original_target:
+                select_target(theme, preferences, original_target)
+            elif original_group:
+                preferences.theme_group = original_group
+        except Exception:
+            pass
+
+
+# ------------------------------------------- B：主题页 UI 改动（ZML_LAB 约定）
+
+
+def test_theme_ui_conventions(module):
+    section("主题页 UI：采纳 ZML_LAB 的约定（不动关键按钮位置）")
+    source = source_of(module, "ui.py")
+    panel = class_source(source, "HHZ_PT_theme")
+    check(bool(panel), "取到主题面板的源码段")
+    preferences = module.compat.get_preferences()
+    check(preferences is not None, "取到偏好设置对象")
+    if preferences is None:
+        return
+
+    # draw() 在无头环境里跑不了（没有窗口 / 没有 layout），所以换一条等价的静态防线：
+    # 面板里引用的**每个偏好设置属性**与**每个算符**都真的存在 —— 拼错名字在 GUI 里
+    # 就是"面板画不出来"或"点了没反应"，这是无头测试唯一能提前拦住的形式。
+    # 只取写死的属性名（`preferences, "part_" + member` 这种动态拼接要排除）
+    prop_names = sorted(set(re.findall(
+        r'preferences,\s*"([A-Za-z_][A-Za-z0-9_]*)"(?!\s*\+)', panel)))
+    missing_props = [name for name in prop_names if not hasattr(preferences, name)]
+    check(not missing_props,
+          "面板引用的偏好设置属性全都存在（{} 个）".format(len(prop_names)), missing_props)
+    for token in ("theme_group", "theme_target", "preset_hue", "preset_saturation",
+                  "preset_value", "selection_saturation"):
+        check(token in prop_names, "面板确实画了新加的 {}".format(token))
+    op_names = sorted(set(re.findall(r'"(hhz\.[a-z_]+)"', panel)))
+    missing_ops = [name for name in op_names
+                   if operator_class(module, name.split(".", 1)[1]) is None]
+    check(not missing_ops,
+          "面板引用的算符全都已注册（{} 个）".format(len(op_names)), missing_ops)
+    check("hhz.theme_custom_save" in op_names,
+          "「保存当前为自定义预设」用的是既有算符 hhz.theme_custom_save（没有新算符）")
+
+    # 采纳 1：状态行 + 前置条件不满足时整列 enabled=False（operations/panels.py:153-168, 186-199, 325-337）
+    check("row.enabled = bool(group_paths)" in panel,
+          "恢复框：这一组没有出厂默认值记录时整列禁用（前置条件不满足）")
+    check("box.label(text=status, icon=status_icon)" in panel,
+          "同一块里保留状态行（禁用了也看得出为什么）")
+    # 采纳 2：主行动按钮放大点击区（:192, :220, :329）
+    check("grid.scale_y = 1.2" in panel, "预设按钮（主行动）放大点击区：grid.scale_y = 1.2")
+    check("primary.scale_y = 1.5" in panel,
+          "「应用到全部按钮」放大点击区：scale_y = 1.5")
+    # 采纳 3：折叠头惯用法（:235）—— 本项目原有写法与它一致，保持
+    check("icon='TRIA_DOWN' if preferences.theme_advanced else 'TRIA_RIGHT'" in panel
+          and 'emboss=False' in panel,
+          "进阶折叠头就是 ZML_LAB 那个惯用法（TRIA_DOWN / TRIA_RIGHT + emboss=False）")
+    # 采纳 4：use_property_split / use_property_decorate（:36-37）
+    check("box.use_property_split = True" in panel
+          and "box.use_property_decorate = False" in panel,
+          "字体设置块用 use_property_split + use_property_decorate（属性行左右对齐）")
+    # 采纳 5：段间 separator()，不层层嵌套 box（:257, :277, :297）
+    check(panel.count(".separator()") >= 5,
+          "段间用 separator()（{} 处），没有新增层层嵌套的 box".format(panel.count(".separator()")))
+    # 不采纳项
+    check("bl_parent_id" not in panel, "没有引入 ZML_LAB 的子面板做法（本项目禁止 bl_parent_id）")
+    check("DEFAULT_CLOSED" not in panel, "没有采用 ZML_LAB 对关键面板用 DEFAULT_CLOSED 的做法")
+    check("workspace_is" not in panel and "ZML_WORKSPACE" not in panel,
+          "没有采用 ZML_LAB 按工作区切面板的 poll（不改用户的操作模型）")
+    check(".menu(" not in panel, "没有引入 ZML_LAB 的外部链接菜单按钮")
+
+    # 关键按钮位置：三套内置预设仍在最前，「自定义预设」排在其后，滑杆再往后
+    first_presets = panel.find("for name in theme.preset_names()")
+    custom_button = panel.find("theme.CUSTOM_PRESET_NAME")
+    sliders = panel.find('"preset_hue"')
+    reapply = panel.find('"hhz.theme_reapply_preset"')
+    save_custom = panel.find("theme_custom_save")
+    check(0 <= first_presets < custom_button < sliders < reapply < save_custom,
+          "顺序仍是：3 套内置预设 -> 自定义预设 -> 四个调整滑杆 -> 重新套用 -> 保存自定义预设",
+          (first_presets, custom_button, sliders, reapply, save_custom))
+    check(panel.count('"hhz.theme_apply_preset"') == 2,
+          "预设按钮仍然是同一个算符（3 套预设循环 + 1 个自定义预设），没有另写一套应用逻辑",
+          panel.count('"hhz.theme_apply_preset"'))
+    check("theme.preset_names()" in panel and "theme.CUSTOM_PRESET_NAME" in panel,
+          "按钮清单来自 theme（ui.py 不自己维护预设名单）")
+    # 说明压到 1 行
+    check("调到 60% 左右最耐看：强调色会整体压灰，反复调也不会越调越灰" not in panel,
+          "旧的预设说明（长句）已删掉")
+    check(panel.count("默认 0 度 / 100% / 100% 就是预设原样；反复调不会越调越灰") == 1,
+          "预设区说明压到 1 行")
+    # 两级选择器
+    check('column.prop(preferences, "theme_group", text="")' in panel
+          and 'column.prop(preferences, "theme_target", text="")' in panel,
+          "逐项微调里是两级：先分组（theme_group）再项（theme_target）")
+    check(panel.find('"theme_group", text=""') < panel.find('"theme_target", text=""'),
+          "第一级在第二级之前（先选组，再选组内的项）")
+    check("\u00b7" not in panel, "面板源码里没有中点号（避免字体缺字变乱码）")
 
 
 def test_save_preferences(module):
@@ -3652,6 +4337,11 @@ def main():
     run("预设：视口辅助元素", test_preset_viewport_helpers, module)
     run("预设：深档强调的三个家族", test_preset_deep_accent_families, module)
     run("预设：视口选中几何用鲜亮档", test_viewport_selection_accent, module)
+    run("预设：色相 / 饱和度 / 明度调整", test_theme_adjust_colors, module)
+    run("视口选中几何：独立饱和度滑杆", test_selection_saturation, module)
+    run("第 4 个预设「自定义预设」", test_custom_preset, module)
+    run("颜色项两级短选择（可达性不变式）", test_target_selector, module)
+    run("主题页 UI 约定（ZML_LAB）", test_theme_ui_conventions, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)

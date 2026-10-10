@@ -806,11 +806,12 @@ class HHZ_OT_theme_read(bpy.types.Operator):
 class HHZ_OT_theme_apply_preset(bpy.types.Operator):
     bl_idname = "hhz.theme_apply_preset"
     bl_label = "应用配色预设"
-    bl_description = "一键套用一套配色（若按钮常态 / 选中色 / 状态色）"
+    bl_description = "一键套用一套配色（若按钮常态 / 选中色 / 状态色），或套用自己保存的「自定义预设」"
 
     preset: bpy.props.EnumProperty(
         name="预设",
-        items=[(name, name, "套用「{}」配色".format(name)) for name in theme.preset_names()],
+        items=[(name, name, "套用「{}」配色".format(name))
+               for name in theme.preset_button_names()],
     )
 
     def execute(self, context):
@@ -820,18 +821,26 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
             return {'CANCELLED'}
 
         preferences = compat.get_preferences(context)
-        # 饱和度：永远从预设表重算再写入，所以反复调整不会累积变灰
-        factor = float(getattr(preferences, "preset_saturation", 1.0)) if preferences else 1.0
-        colors = theme.preset_colors(self.preset) or {}
-        if factor < 1.0:
-            colors = theme.desaturate_colors(colors, factor)
+        # 色相 / 饱和度 / 明度 / 选中几何饱和度：统一走 theme.render_preset_colors，
+        # 每次都从预设表（或已保存的自定义预设 JSON）重算，所以反复调整不会累积。
+        colors = theme.render_preset_colors(self.preset, preferences)
+        if not colors:
+            if self.preset == theme.CUSTOM_PRESET_NAME:
+                # 从没保存过时给一条明确的下一步，而不是一句莫名的失败
+                self.report({'WARNING'},
+                            "还没有保存过自定义预设：先套一套预设、用四个滑杆调好，"
+                            "再点「保存当前为自定义预设」")
+            else:
+                self.report({'WARNING'}, "这套预设没有可用颜色")
+            return {'CANCELLED'}
+
         changed = theme.apply_colors(current, colors)
-        # 视口尺寸（不是颜色）：两套马拉松预设会把编辑模式选中边画粗一档
-        # —— 颜色已经拉到调色板最高饱和度，剩下的可见性只能靠线宽。
-        changed_sizes = theme.apply_sizes(current, theme.preset_sizes(self.preset))
         if not changed:
             self.report({'WARNING'}, "这套预设没有可用颜色")
             return {'CANCELLED'}
+        # 视口尺寸（不是颜色）：两套马拉松预设会把编辑模式选中边画粗一档
+        # —— 颜色已经拉到调色板最高饱和度，剩下的可见性只能靠线宽。
+        changed_sizes = theme.apply_sizes(current, theme.preset_sizes(self.preset))
 
         if preferences is not None:
             preferences.last_preset = self.preset
@@ -846,8 +855,9 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
 
 class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
     bl_idname = "hhz.theme_reapply_preset"
-    bl_label = "按当前饱和度重新套用"
-    bl_description = "用现在的饱和度重新套用最近一次用过的预设（从预设表重算，不会累积）"
+    bl_label = "按当前调整重新套用"
+    bl_description = ("用现在的色相 / 饱和度 / 明度 / 选中几何饱和度重新套用最近一次用过的预设"
+                      "（从预设表重算，不会累积）")
 
     def execute(self, context):
         preferences = compat.get_preferences(context)
@@ -857,20 +867,21 @@ class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
             return {'CANCELLED'}
 
         name = getattr(preferences, "last_preset", "") or theme.preset_names()[0]
-        colors = theme.preset_colors(name)
+        colors = theme.render_preset_colors(name, preferences)
         if not colors:
             self.report({'WARNING'}, "没有可重新套用的预设")
             return {'CANCELLED'}
 
-        factor = float(getattr(preferences, "preset_saturation", 1.0))
-        colors = theme.desaturate_colors(colors, factor) if factor < 1.0 else colors
         applied = theme.apply_colors(current, colors)
         # 视口尺寸与颜色一样"从预设表重算"，所以重复点击同样不累积
         theme.apply_sizes(current, theme.preset_sizes(name))
         preferences.last_preset = name
         theme.read_into_preferences(context, preferences)
-        self.report({'INFO'}, "已按 {}% 饱和度重新套用「{}」（{} 项）".format(
-            int(round(factor * 100)), name, applied))
+        self.report({'INFO'}, "已按 色相 {:+.0f} 度 / 饱和度 {}% / 明度 {}% 重新套用「{}」（{} 项）".format(
+            theme.preference_number(preferences, "preset_hue", 0.0),
+            int(round(theme.preference_number(preferences, "preset_saturation", 1.0) * 100)),
+            int(round(theme.preference_number(preferences, "preset_value", 1.0) * 100)),
+            name, applied))
         compat.tag_redraw(context)
         return {'FINISHED'}
 
@@ -1112,12 +1123,25 @@ class HHZ_OT_theme_custom_save(bpy.types.Operator):
     bl_label = "保存为自定义配色"
     bl_description = "把当前所有可用颜色存成一套自定义配色（同名会覆盖）"
 
+    #: 由面板「保存当前为自定义预设」按钮传进来的输入（**不画在界面上、不进偏好设置**，
+    #: 所以没有新增设置项）：为 True 时存的是「当前预设 + 当前四个调整」的色表，
+    #: 用保留名 :data:`theme.CUSTOM_PRESET_NAME` 写进**既有的**自定义配色 JSON。
+    preset_mode: bpy.props.BoolProperty(
+        name="存为自定义预设",
+        description="把当前预设与四个滑杆的调整存成第 4 个预设「自定义预设」（复用同一份自定义配色数据）",
+        default=False,
+        options={'HIDDEN'},
+    )
+
     def execute(self, context):
         preferences = compat.get_preferences(context)
         current = theme.current_theme(context)
         if preferences is None or current is None:
             self.report({'ERROR'}, "读不到偏好设置或主题")
             return {'CANCELLED'}
+
+        if self.preset_mode:
+            return self._save_preset_mode(context, preferences)
 
         name = getattr(preferences, "custom_name", "").strip()
         if not name:
@@ -1133,6 +1157,39 @@ class HHZ_OT_theme_custom_save(bpy.types.Operator):
         preferences.theme_custom = text
         preferences.custom_choice = name
         self.report({'INFO'}, "已保存自定义配色「{}」（{} 项颜色）".format(name, len(colors)))
+        return {'FINISHED'}
+
+    def _save_preset_mode(self, context, preferences):
+        """「保存当前为自定义预设」：当前预设（或当前自定义预设）+ 四个滑杆 -> 保留名。
+
+        存的是**调整之后的最终色表**，所以套用它就是把这份表原样写回去（不会累积）。
+        为了不让"这份表已经含了调整"和"滑杆还在原处"叠加两次，保存后把四个滑杆
+        **归位到原样**（0 度 / 100% / 100%）—— 之后再拖滑杆是在这份固化色表之上再调，
+        重复拖仍然从 JSON 重算，不会越调越灰。
+        """
+        name = getattr(preferences, "last_preset", "") or theme.preset_names()[0]
+        colors = theme.render_preset_colors(name, preferences)
+        if not colors:
+            self.report({'WARNING'},
+                        "没有可保存的配色：先套一套预设（或先保存一次自定义预设），再点这个按钮")
+            return {'CANCELLED'}
+
+        text, ok = theme.custom_save(getattr(preferences, "theme_custom", ""),
+                                     theme.CUSTOM_PRESET_NAME, colors)
+        if not ok:
+            self.report({'WARNING'}, "保存失败（颜色为空）")
+            return {'CANCELLED'}
+
+        preferences.theme_custom = text
+        preferences.preset_hue = 0.0
+        preferences.preset_saturation = 1.0
+        preferences.preset_value = 1.0
+        preferences.selection_saturation = 1.0
+        preferences.last_preset = theme.CUSTOM_PRESET_NAME
+        theme.read_into_preferences(context, preferences)
+        self.report({'INFO'}, "已把「{}」+ 当前调整存为自定义预设（{} 项颜色）；调整滑杆已归位".format(
+            name, len(colors)))
+        compat.tag_redraw(context)
         return {'FINISHED'}
 
 

@@ -147,8 +147,12 @@ def _on_theme_target_update(self, context):
 
 
 def custom_items(self, context):
-    """自定义配色的下拉项（动态，跟着已保存的名字走）。"""
-    names = theme.custom_names(getattr(self, "theme_custom", ""))
+    """自定义配色的下拉项（动态，跟着已保存的名字走）。
+
+    保留名「自定义预设」不出现在这里 —— 它是上面预设区的第 4 个按钮，
+    虽然和数据存在同一份 JSON 里，但在界面上是两件事。
+    """
+    names = theme.custom_scheme_names(getattr(self, "theme_custom", ""))
     if not names:
         return [("__none__", "（还没有）", "还没有保存过自定义配色")]
     return [(name, name, "套用或删除「{}」".format(name)) for name in names]
@@ -183,7 +187,13 @@ def family_keys(preferences):
 
 
 def load_family_parts(context, preferences):
-    """把当前选择（可能是分组）的代表家族颜色读进面板属性，返回读到的项数。"""
+    """把当前选择（可能是分组）的代表家族颜色读进面板属性，返回读到的项数。
+
+    顺带收敛一次两级选择器（``theme.sync_selector``）：这个函数正好是"注册时 /
+    用户刚改了面板选择"的时刻，而两级选择器的分组与颜色项都可能因为版本差异或
+    简洁模式开关而失效。纯只读 + 幂等，放在这里不用改 ``__init__.py`` 的注册流程。
+    """
+    theme.sync_selector(preferences, context)
     current = theme.current_theme(context)
     members = family_keys(preferences)
     if current is None or not members:
@@ -229,20 +239,38 @@ def _on_part_update(self, context):
     theme.read_into_preferences(context, self)
 
 
-def _on_saturation_update(self, context):
-    """饱和度一改就用它重算最近一次的预设（永远从预设表出发，不累积）。"""
+def _on_theme_adjust_update(self, context):
+    """四个调整（色相 / 饱和度 / 明度 / 选中几何饱和度）一改就用它重算最近一次的预设。
+
+    走 ``theme.render_preset_colors``（**唯一**的入口）：永远从预设表（或已保存的
+    自定义预设 JSON）出发，所以反复拖动不会累积 —— 不会越拖越灰。
+    """
     current = theme.current_theme(context)
     name = getattr(self, "last_preset", "")
     if current is None or not name:
         return
-    colors = theme.preset_colors(name)
+    colors = theme.render_preset_colors(name, self)
     if not colors:
         return
-    factor = float(getattr(self, "preset_saturation", 1.0))
-    if factor < 1.0:
-        colors = theme.desaturate_colors(colors, factor)
     theme.apply_colors(current, colors)
     theme.read_into_preferences(context, self)
+
+
+def _on_theme_group_update(self, context):
+    """换分组（两级选择器的第一级）-> 第二级的条目变了，把当前项切到本组第一项。
+
+    第二级（``theme_target``）的枚举条目只列当前分组里的颜色项，所以换组之后
+    原来那一项可能已经不在列表里 —— 必须先落一个本组有效值，否则明文「当前项」
+    与调色盘会停在一个选不到的项上。
+    """
+    paths = [item[0] for item in theme.target_items(self, context)
+             if item[0] not in ("__unavailable__", "__none__")]
+    if not paths:
+        return
+    if getattr(self, "theme_target", "") not in paths:
+        self.theme_target = paths[0]
+    else:
+        theme.read_into_preferences(context, self)
 
 
 def _on_hex_update(self, context):
@@ -257,6 +285,9 @@ def _on_simple_mode_update(self, context):
 
     必须返回 None。以前这里写成返回元组的 lambda，Blender 4.x 每次拖这个开关
     都会往控制台打一条 "ValueError: the return value must be None"。
+
+    两级选择器的条目也跟着模式变，所以顺带收敛一次（``load_family_parts`` 里已经调了
+    ``theme.sync_selector``，这里不用再调一遍）。
     """
     load_family_parts(context, self)
     theme.read_into_preferences(context, self)
@@ -515,20 +546,38 @@ class HHZ_PT_theme(bpy.types.Panel):
         if theme.resolve(current, path) is None:
             layout.label(text="当前 Blender 没有这一项颜色", icon='INFO')
 
-        # ---- 常驻 1：配色预设 + 饱和度 ----
+        # ---- 常驻 1：配色预设 + 四个调整滑杆 ----
+        # 采纳 ZML_LAB 的两条约定（operations/panels.py）：
+        #   * 主行动按钮放大点击区：`col.scale_y = 1.2 / 1.5`（:192, :220, :329）
+        #   * 段间用 `col.separator()`、不层层嵌套 box（:257, :277, :297）
+        # 按钮位置保持原样：三套内置预设仍在最前（顺序不变），「自定义预设」跟在后面。
         box = layout.box()
         box.label(text="配色预设（按钮 / 状态 / 当前帧）")
         grid = box.grid_flow(row_major=True, columns=2, align=True)
+        grid.scale_y = 1.2
         for name in theme.preset_names():
             operation = grid.operator("hhz.theme_apply_preset", text=name)
             operation.preset = name
-        box.prop(preferences, "preset_saturation", text="饱和度", slider=True)
+        custom = grid.operator("hhz.theme_apply_preset", text=theme.CUSTOM_PRESET_NAME)
+        custom.preset = theme.CUSTOM_PRESET_NAME
+        box.separator()
+        sliders = box.column(align=True)
+        sliders.scale_y = 1.2
+        sliders.prop(preferences, "preset_hue", text="色相", slider=True)
+        sliders.prop(preferences, "preset_saturation", text="饱和度", slider=True)
+        sliders.prop(preferences, "preset_value", text="明度", slider=True)
+        sliders.prop(preferences, "selection_saturation", text="选中线 / 面 饱和度", slider=True)
         box.operator("hhz.theme_reapply_preset", icon='FILE_REFRESH')
-        box.label(text="调到 60% 左右最耐看：强调色会整体压灰，反复调也不会越调越灰", icon='INFO')
+        save_custom = box.operator("hhz.theme_custom_save",
+                                   text="保存当前为自定义预设", icon='ADD')
+        save_custom.preset_mode = True
+        box.label(text="默认 0 度 / 100% / 100% 就是预设原样；反复调不会越调越灰", icon='INFO')
 
         # ---- 常驻 2：恢复（一个范围下拉 + 一个按钮 + 一条状态）----
         # 三个恢复范围的语义各不相同，但都由同一个算符的 scope 属性承担，
         # 所以这里只画一个下拉去驱动它，不再摆三个按钮。
+        # 采纳 ZML_LAB 的约定：前置条件不满足时整列 `enabled=False`，
+        # 并在上面留一行状态说明"为什么点不了"（operations/panels.py:153-168, 186-199, 325-337）。
         group = theme.group_of(path)
         group_paths = [item for item in theme.paths_in_group(group, available)
                        if theme.has_default(item)]
@@ -537,6 +586,7 @@ class HHZ_PT_theme(bpy.types.Panel):
         box = layout.box()
         box.label(text="恢复出厂颜色")
         row = box.row(align=True)
+        row.enabled = bool(group_paths)
         row.prop(preferences, "restore_scope", text="")
         operation = row.operator("hhz.theme_restore_default", text="恢复", icon='LOOP_BACK')
         operation.scope = preferences.restore_scope
@@ -555,22 +605,26 @@ class HHZ_PT_theme(bpy.types.Panel):
         box.label(text=status, icon=status_icon)
 
         # ---- 常驻 3：控件颜色分开设置：每一项旁边都有自己的小调色盘 ----
+        # 采纳 ZML_LAB 的约定：段间用 separator()，不层层嵌套 box（operations/panels.py:257, 277, 297）。
         box = layout.box()
         box.label(text="控件颜色分开设置")
         box.prop(preferences, "simple_mode")
         prefix = getattr(preferences, "family", "")
         box.prop(preferences, "family", text="")
+        parts = box.column(align=True)
+        parts.separator()
         shown_parts = 0
         for member, label, _group in theme.PART_MEMBERS:
             if theme.resolve(current, theme.family_path(prefix, member)) is None:
                 continue
-            row = box.row(align=True)
+            row = parts.row(align=True)
             row.label(text=label)
             row.prop(preferences, "part_" + member, text="")
             shown_parts += 1
         if not shown_parts:
-            box.label(text="这个版本上没有可分开设置的项", icon='INFO')
-        row = box.row(align=True)
+            parts.label(text="这个版本上没有可分开设置的项", icon='INFO')
+        parts.separator()
+        row = parts.row(align=True)
         row.operator("hhz.theme_part_load", text="从当前主题读回", icon='FILE_REFRESH')
         row.operator("hhz.theme_auto_contrast", text="自动配文字色", icon='COLOR')
         # 对比度清单只在真的有问题时才占位置（没问题就不加一行"一切正常"）
@@ -578,16 +632,22 @@ class HHZ_PT_theme(bpy.types.Panel):
             box.label(text=text + "（字会看不清）", icon='ERROR')
 
         # ---- 进阶：精调项全部收进这个折叠头，默认收起 ----
+        # 折叠头惯用法与 ZML_LAB 一致：prop(x, 'expand', icon=TRIA_DOWN/TRIA_RIGHT,
+        # text="", emboss=False)（operations/panels.py:235）。
         header = layout.row(align=True)
         header.prop(preferences, "theme_advanced",
                     icon='TRIA_DOWN' if preferences.theme_advanced else 'TRIA_RIGHT',
                     emboss=False)
         if preferences.theme_advanced:
-            # 1) 逐项微调：颜色项下拉 + 明文当前值 + 自定义颜色 + 应用颜色
+            # 1) 逐项微调：两级短选择（分组 -> 本组内的项）+ 明文当前值 + 自定义颜色 + 应用颜色
             box = layout.box()
             box.label(text="逐项微调")
             column = box.column(align=True)
+            # 第一级：分组（短词）；第二级：只列该组内的项。两级都只**写** theme_target，
+            # 应用颜色 / 恢复 / 调色盘 / 明文当前值这些既有链路一个都没动。
+            column.prop(preferences, "theme_group", text="")
             column.prop(preferences, "theme_target", text="")
+            column.separator()
             # 明文写清当前选的是哪一项：即使下拉框本身显示异常，也一眼能看出选了什么
             box.label(text="当前项 {}".format(theme.label_of(path)))
             row = column.row(align=True)
@@ -604,6 +664,7 @@ class HHZ_PT_theme(bpy.types.Panel):
             else:
                 box.label(text="这一项在当前版本上不存在", icon='INFO')
 
+            box.separator()
             box.label(text="自定义颜色")
             row = box.row(align=True)
             row.prop(preferences, "palette_color", text="")
@@ -612,6 +673,7 @@ class HHZ_PT_theme(bpy.types.Panel):
             box.operator("hhz.theme_apply_color", text="应用颜色", icon='CHECKMARK')
 
             # 2) 全局按钮配色：一次改掉所有按钮（含预选中项）
+            # 采纳 ZML_LAB 的「主行动按钮放大点击区」（operations/panels.py:329 用 1.5）。
             box = layout.box()
             box.label(text="全局按钮配色")
             row = box.row(align=True)
@@ -625,8 +687,10 @@ class HHZ_PT_theme(bpy.types.Panel):
                 row = box.row(align=True)
                 row.label(text="文字色")
                 row.prop(preferences, "global_text", text="")
-            box.operator("hhz.theme_apply_global", text="应用到全部按钮（含预选中项）",
-                         icon='CHECKMARK')
+            primary = box.column(align=True)
+            primary.scale_y = 1.5
+            primary.operator("hhz.theme_apply_global", text="应用到全部按钮（含预选中项）",
+                             icon='CHECKMARK')
             box.label(text="会写 {} 个控件家族，外加大纲、文件浏览器、属性、信息、控制台、编辑器图标的选中高亮".format(
                 len(theme.WIDGET_FAMILIES)), icon='INFO')
 
@@ -636,7 +700,7 @@ class HHZ_PT_theme(bpy.types.Panel):
             row = box.row(align=True)
             row.prop(preferences, "custom_name", text="")
             row.operator("hhz.theme_custom_save", text="", icon='ADD')
-            if theme.custom_names(getattr(preferences, "theme_custom", "")):
+            if theme.custom_scheme_names(getattr(preferences, "theme_custom", "")):
                 box.prop(preferences, "custom_choice", text="")
                 row = box.row(align=True)
                 row.operator("hhz.theme_custom_apply", text="套用", icon='CHECKMARK')
@@ -646,8 +710,13 @@ class HHZ_PT_theme(bpy.types.Panel):
                 box.label(text="起个名字点 + 就能把当前配色存下来", icon='INFO')
 
             # 4) 字体设置（Blender 偏好设置里的项）
+            # 采纳 ZML_LAB 的 `layout.use_property_split = True` +
+            # `use_property_decorate = False`（operations/panels.py:36-37）：
+            # 这一块全是"标签 + 值"的属性行，正是它适用的场合（标签左、值右对齐）。
             box = layout.box()
             box.label(text="字体设置（写进 Blender 偏好设置）")
+            box.use_property_split = True
+            box.use_property_decorate = False
             for key, label, _owner_name, _default, _tip in theme.font_items(context):
                 target = theme.font_target(context, key)
                 if target is None:
@@ -747,9 +816,15 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         default=True,
         update=_on_preferences_update,
     )
+    theme_group: EnumProperty(
+        name="颜色分组",
+        description="两级选择器的第一级：先选一个分组（短词），第二级只列这一组里的颜色项",
+        items=theme.target_group_items,
+        update=_on_theme_group_update,
+    )
     theme_target: EnumProperty(
         name="颜色项",
-        description="要修改的主题颜色；只列出当前 Blender 版本真实存在的项",
+        description="要修改的主题颜色；只列出**当前分组**里、当前 Blender 版本真实存在的项",
         items=theme.target_items,
         update=_on_theme_target_update,
     )
@@ -842,18 +917,44 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         subtype='COLOR', size=4, min=0.0, max=1.0,
         default=(0.776, 1.0, 0.0, 1.0),
     )
+    preset_hue: FloatProperty(
+        name="色相",
+        description="正在使用的预设整体转多少度色相：0 度原样，±180 度是转半圈（-180 与 +180 等价）",
+        default=0.0,
+        min=-180.0,
+        max=180.0,
+        update=_on_theme_adjust_update,
+    )
     preset_saturation: FloatProperty(
         name="饱和度",
-        description="正在使用的预设里所有高饱和颜色的强度：1.0 原样，越低越灰（适合长时间工作）",
+        description="正在使用的预设里所有颜色的饱和度：100% 原样，0% 变灰，200% 推满（纯灰在任何取值下都保持纯灰）",
         default=1.0,
         min=0.0,
-        max=1.0,
+        max=2.0,
         subtype='PERCENTAGE',
-        update=_on_saturation_update,
+        update=_on_theme_adjust_update,
+    )
+    preset_value: FloatProperty(
+        name="明度",
+        description="正在使用的预设整体的明度：100% 原样，低于 100% 变暗，高于 100% 提亮（最高夹到 1.0）",
+        default=1.0,
+        min=0.0,
+        max=2.0,
+        subtype='PERCENTAGE',
+        update=_on_theme_adjust_update,
+    )
+    selection_saturation: FloatProperty(
+        name="选中几何饱和度",
+        description="只作用于视口里被选中的几何（活动元素 / 顶点 / 边 / 面 四条路径）：100% 原样，200% 推满，0% 变灰；界面控件与其它任何颜色都不受影响",
+        default=1.0,
+        min=0.0,
+        max=2.0,
+        subtype='PERCENTAGE',
+        update=_on_theme_adjust_update,
     )
     last_preset: StringProperty(
         name="最近使用的预设",
-        description="用来在调整饱和度时重新套用（自动维护）",
+        description="用来在调整色相 / 饱和度 / 明度 / 选中几何饱和度时重新套用（自动维护，也可能是「自定义预设」）",
         default="",
     )
     custom_hex: StringProperty(

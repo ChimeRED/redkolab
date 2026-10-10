@@ -806,28 +806,76 @@ def saturation_of(color):
     return colorsys.rgb_to_hsv(*(max(0.0, min(1.0, float(v))) for v in values))[1]
 
 
-def desaturate_color(color, factor=1.0):
-    """按倍数缩放饱和度：factor=1 原样、0 变灰。
+def scaled_saturation(saturation, scale):
+    """饱和度的**分段映射**（0-2 的倍数语义，唯一的一份公式）。
 
-    只动饱和度、保留色相与明度 —— 所以降饱和不会把界面调暗，也不会串色系。
+    * ``scale <= 1``：``S' = S * scale``（与旧的"只降不升"语义**逐位等价**，
+      所以偏好设置里历史留下的 0…1 旧值读出来行为完全不变，不需要迁移、也不会突然变灰）；
+    * ``scale > 1``：``S' = S + (scale - 1) * (1 - S)``，``scale = 2`` 时正好推到 1.0；
+    * ``S == 0``：**任何倍数下都保持 0** —— 纯灰没有色相可推，硬推上去只会变成脏色。
+    """
+    # 先夹到 0-1；负的倍数按 0 处理（= 变灰），避免算出色域外的值
+    saturation = max(0.0, min(1.0, float(saturation)))
+    scale = max(0.0, float(scale))
+    if saturation <= 0.0:
+        return 0.0
+    if scale <= 1.0:
+        return max(0.0, min(1.0, saturation * scale))
+    return max(0.0, min(1.0, saturation + (scale - 1.0) * (1.0 - saturation)))
+
+
+def adjust_color(color, hue_shift=0.0, saturation_scale=1.0, value_scale=1.0):
+    """按「色相偏移 / 饱和度倍数 / 明度倍数」调一个颜色。
+
+    只改 HSV 三个数值，**alpha 原样保留**；RGB 项（3 分量）读进来补的 alpha=1.0 照旧返回。
     """
     if color is None:
         return None
-    values = [float(v) for v in color]
+    values = [float(component) for component in color]
     while len(values) < 3:
         values.append(0.0)
-    red, green, blue = (max(0.0, min(1.0, v)) for v in values[:3])
+    red, green, blue = (max(0.0, min(1.0, component)) for component in values[:3])
     hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
-    saturation = max(0.0, min(1.0, saturation * float(factor)))
+    if hue_shift:
+        # -180…+180 度 -> 0-1 的色相环偏移；取模保证绕回正确
+        hue = (hue + float(hue_shift) / 360.0) % 1.0
+    saturation = scaled_saturation(saturation, saturation_scale)
+    value = max(0.0, min(1.0, value * float(value_scale)))
     red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
     alpha = values[3] if len(values) > 3 else 1.0
     return (red, green, blue, alpha)
 
 
+def adjust_colors(colors, hue_shift=0.0, saturation_scale=1.0, value_scale=1.0):
+    """批量调整一组 ``{路径: 颜色}``（**纯函数**）。
+
+    不改任何色表数据、也不改传进来的字典（返回值是新字典）；三个参数都是"原样"
+    时**直接返回原值、不做 HSV 往返** —— 这样"默认参数下输出与预设逐项完全相同"
+    是位级相等，而不是"差一点点"。
+    """
+    source = dict(colors or {})
+    if not source:
+        return {}
+    if (float(hue_shift) == 0.0 and float(saturation_scale) == 1.0
+            and float(value_scale) == 1.0):
+        return dict(source)
+    return {path: adjust_color(color, hue_shift, saturation_scale, value_scale)
+            for path, color in source.items()}
+
+
+def desaturate_color(color, factor=1.0):
+    """按倍数缩放饱和度：factor=1 原样、0 变灰。
+
+    只动饱和度、保留色相与明度 —— 所以降饱和不会把界面调暗，也不会串色系。
+    现在它就是 :func:`adjust_color` 的饱和度那一路（**同一个公式，不再各写一份**），
+    所以长度 0…1 的旧倍数语义完全不变。
+    """
+    return adjust_color(color, saturation_scale=factor)
+
+
 def desaturate_colors(colors, factor=1.0):
     """批量降饱和（"把正在用的预设整体压灰"就靠它）。"""
-    return {path: desaturate_color(color, factor)
-            for path, color in dict(colors or {}).items()}
+    return adjust_colors(colors, saturation_scale=factor)
 
 
 def readable_text_color(background, threshold=0.45):
@@ -1017,6 +1065,27 @@ VIEWPORT_SELECTION_PATHS = (
     "view_3d.edge_select",
     "view_3d.face_select",
 )
+
+
+def selection_saturation_colors(colors, scale=1.0):
+    """**只**对 :data:`VIEWPORT_SELECTION_PATHS` 那 4 条路径应用饱和度倍数。
+
+    与界面控件的饱和度分开：界面降饱和是为了长时间耐看，"视口里哪些东西被选中"
+    必须一眼看清，所以它有自己的滑杆（``preferences.selection_saturation``）。
+
+    **其它任何路径在任何取值下都不变** —— 不是"算出来刚好一样"，而是这些键
+    原对象直接沿用（连浮点往返都不做）；``scale == 1.0`` 时整份表原样返回。
+    """
+    source = dict(colors or {})
+    if float(scale) == 1.0:
+        return source
+    wanted = {path: source[path] for path in VIEWPORT_SELECTION_PATHS
+              if source.get(path) is not None}
+    if not wanted:
+        return source
+    source.update(adjust_colors(wanted, saturation_scale=scale))
+    return source
+
 
 # ------------------------------------------------- 视口「粗细 / 尺寸」类项（不是颜色）
 #
@@ -1650,6 +1719,11 @@ PRESETS = (
     ("死亡搁浅", _stranding_preset()),
 )
 
+#: 第 4 个预设按钮「自定义预设」在**既有的自定义配色存储**
+#: （``preferences.theme_custom``，一个 JSON 字符串）里用的**保留名**。
+#: 不新增配置文件 / 设置项 / 面板 —— 只是同一份 JSON 里的一个保留键，
+#: 所以它跟着偏好设置一起保存，也跟既有的「自定义配色」列表同一个生命周期。
+CUSTOM_PRESET_NAME = "自定义预设"
 
 
 # ------------------------------------------------------------------- 基础操作
@@ -1822,46 +1896,147 @@ def restore_size_defaults(theme, paths=None):
 WIDGET_GROUPS = tuple(group for _member, _label, group in WIDGET_MEMBERS)
 
 
-def item_label(label, group):
+def _primary_targets():
+    """按路径去重后的颜色项清单（**取第一次出现的那一条**）。
+
+    同一条路径在 :data:`TARGETS` 里可能列了两次（历史上先归到"选中态 全局"、
+    后来又加进"文本与控制台"，例如 ``text_editor.selected_text``；``wcol_state.
+    inner_changed`` 也一样）。:func:`label_of` / :func:`group_of` 早就是"第一次出现
+    的那条说了算"，两级选择器必须用同一口径 —— 否则同一条路径会出现在两个分组的
+    第二级里（"串组"），"可达集合"也会多出重复项。
+    """
+    seen = set()
+    result = []
+    for path, label, group in TARGETS:
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append((path, label, group))
+    return tuple(result)
+
+
+#: 去重后的 (路径, 标签, 分组)：两级选择器、分组统计、第二级条目都用它。
+PRIMARY_TARGETS = _primary_targets()
+
+#: 路径 -> (标签, 分组) 的索引（两级选择器第二级用，避免每次都线性扫清单）。
+TARGET_INDEX = {path: (label, group) for path, label, group in PRIMARY_TARGETS}
+
+
+def item_label(label, group=""):
     """颜色项下拉里那一行的显示文本。
 
-    默认是 ``分组 标签``；**控件家族那一批只留标签**：它们的标签已经写明家族与部位
-    （「普通按钮 底色」），再拼上「按钮 底色」纯属重复，而且让条目变得很长。
+    **就是标签本身，不带分组前缀**：分组由两级选择器的**第一级**（分组下拉）承担，
+    第二级再拼一次分组名就是把同一个词说两遍，而且让条目变长。
 
     为什么要短：弹出的条目框列宽有限，Blender 会把放不下的条目标签**按像素宽度
     从中间截断**（``interface_widgets.cc`` 的 ``text_clip_middle`` / ``text_clip_middle_ex``），
     中文字被切在半个字上时，落单的多字节会被当成无效序列画成乱码（那个函数里就有
-    ``TODO: proper handling of non UTF8 strings`` 的注释）。标签短一点，需要截断的条目就少一点、
-    截得更靠后一点 —— 这是**缓解**，不是根治（根治在他的 Blender / 字体侧）。
+    ``TODO: proper handling of non UTF8 strings`` 的注释）。两级选择器把"一次要画
+    两百多项的长列表"拆成"≤21 个短分组名 + 每组最多二十几项"的**短列表**，
+    从结构上避免长列表被截断 —— 但**这是结构性消除，不是"乱码已修复"**：
+    无头环境测不了那个弹出框的绘制层，观感仍需用户在 GUI 里确认。
+
+    ``group`` 参数保留（调用方仍在传）是为了不动调用点；本函数现在只返回标签。
     """
-    if not group or group in WIDGET_GROUPS:
-        return label
-    return "{} {}".format(group, label)
+    return label
+
+
+def selector_group_items(simple=False, context=None):
+    """两级选择器第一级（分组）的**候选分组名**：按 TARGETS 顺序、只要有项的组。"""
+    paths = selector_paths(simple, "", context)
+    return [group for group in group_names(paths) if paths_in_group(group, paths)]
+
+
+def target_group_items(self=None, context=None):
+    """给 EnumProperty 用的动态条目：两级选择器的**第一级**（分组，短词）。
+
+    只列出本版本真的有颜色项、且在当前模式下没被"简洁模式"滤空的分组；
+    分组的定义与 :func:`group_of` 完全一致 —— 所以「恢复本组」恢复的就是
+    第一级里选中的那一组，不另起一套分组。
+    """
+    simple = bool(getattr(self, "simple_mode", False))
+    items = []
+    for group in selector_group_items(simple, context):
+        count = len(paths_in_group(group, selector_paths(simple, "", context)))
+        items.append((group, group,
+                      "第二级只列「{}」这一组（本版本 {} 项）".format(group, count)))
+    if not items:
+        items.append(("__none__", "（没有可用分组）", "这个 Blender 版本读不到颜色项"))
+    return items
 
 
 def target_items(self=None, context=None):
-    """给 EnumProperty 用的动态条目：只列出当前 Blender 真的有的颜色。
+    """给 EnumProperty 用的动态条目：两级选择器的**第二级**（本组内的颜色项）。
 
-    简洁模式（``preferences.simple_mode``）下只留下常用项，避免两百多项把人绕晕；
-    关掉简洁模式就能看到全部条目。条目标签的拼法见 :func:`item_label`。
+    只列出 ``self.theme_group`` 那一组、当前 Blender 真的有的颜色，标签不带分组前缀。
+    ``self is None``（或没设 :attr:`theme_group`）时**不按分组过滤** ——
+    :func:`available_paths` 与"可达集合 == 可用集合"这条不变式都靠这个口径拿到全部可用项。
     """
     simple = bool(getattr(self, "simple_mode", False))
-    theme = current_theme(context if context is not None else bpy.context)
+    group = getattr(self, "theme_group", "") if self is not None else ""
+    paths = selector_paths(simple, group, context)
     items = []
-    for path, label, group in TARGETS:
+    for path in paths:
+        label, item_group = TARGET_INDEX.get(path, (path, ""))
+        items.append((path, item_label(label, item_group), path))
+    if not items:
+        items.append(("__unavailable__", "（这一组没有可用颜色项）", ""))
+    return items
+
+
+def selector_paths(simple=False, group="", context=None):
+    """两级选择器在给定条件下能选到的全部路径（**可达性断言的唯一口径**）。
+
+    本版本不存在的颜色项（例如 5.x 删掉的时间线色）不会出现，所以
+    「可达集合」按定义就等于「可用集合」；两级选择器只是把它切成两段展示。
+    """
+    theme = current_theme(context if context is not None else bpy.context)
+    paths = []
+    for path, _label, _group in PRIMARY_TARGETS:
         if simple and not is_simple_path(path):
             continue
         if resolve(theme, path) is None:
             continue
-        items.append((path, item_label(label, group), path))
-    if not items:
-        items.append(("__unavailable__", "（当前版本没有可用颜色项）", ""))
-    return items
+        paths.append(path)
+    if group:
+        paths = paths_in_group(group, paths)
+    return paths
 
 
 def available_paths(context=None):
     """当前版本可用的颜色项路径列表。"""
     return [item[0] for item in target_items(None, context)]
+
+
+def sync_selector(preferences, context=None):
+    """两级选择器自愈：把「分组」与「颜色项」收敛到本版本真实可选的范围内。
+
+    简洁模式开关、Blender 版本差异、旧偏好设置都会让已记下的选择失效（例如
+    记着 4.x 才有的「时间线 当前帧」，到了 5.x 就没有这一组了）。收敛规则：
+    分组取第一个有项的分组，颜色项取该组第一项。返回是否收敛成功。
+    """
+    if preferences is None:
+        return False
+    simple = bool(getattr(preferences, "simple_mode", False))
+    groups = selector_group_items(simple, context)
+    if not groups:
+        return False
+    group = getattr(preferences, "theme_group", "")
+    if group not in groups:
+        try:
+            preferences.theme_group = groups[0]
+        except Exception:
+            return False
+        group = groups[0]
+    members = selector_paths(simple, group, context)
+    if not members:
+        return False
+    if getattr(preferences, "theme_target", "") not in members:
+        try:
+            preferences.theme_target = members[0]
+        except Exception:
+            return False
+    return True
 
 
 def defaults_table(version=None):
@@ -1936,19 +2111,90 @@ def preset_names():
     return [name for name, _ in PRESETS]
 
 
-def preset_colors(name):
-    """预设 ``{路径: 颜色}``。
+def preset_button_names():
+    """N 面板预设区要画的按钮：3 套内置预设 + 第 4 个「自定义预设」。
 
-    每次都会把「必须写回出厂默认值」的视口辅助元素（:func:`viewport_helper_colors`）
-    合并进来，所以三套预设、以及"按当前饱和度重新套用"这条路径都会自愈，
-    也保证以后新增预设不会再漏掉它们。
+    单独一个函数（而不是把「自定义预设」塞进 :data:`PRESETS`）：内置预设的
+    "名字 -> 色表"是硬编码的，自定义预设来自偏好设置里的 JSON，两者来源不同；
+    :func:`preset_names` 仍然只报内置那三套，既有断言与"线宽只对马拉松生效"
+    这类按名字判断的逻辑都不用改。
     """
+    return preset_names() + [CUSTOM_PRESET_NAME]
+
+
+def custom_preset_colors(text):
+    """已保存的自定义预设色表（没保存过返回 None）。"""
+    return custom_colors(text, CUSTOM_PRESET_NAME)
+
+
+def preset_colors(name, custom_text=""):
+    """预设 ``{路径: 颜色}``；``name`` 也可以是保留名 :data:`CUSTOM_PRESET_NAME`。
+
+    内置预设每次都会把「必须写回出厂默认值」的视口辅助元素
+    （:func:`viewport_helper_colors`）合并进来，所以三套预设、自定义预设、
+    以及"按当前调整重新套用"这条路径都会自愈，也保证以后新增预设不会再漏掉它们。
+
+    自定义预设从**已保存的 JSON**（``custom_text``）里读，没保存过就返回 None
+    —— 调用方据此给友好提示，而不是让"没东西可套"变成一个莫名的失败。
+    """
+    if name == CUSTOM_PRESET_NAME:
+        stored = custom_colors(custom_text, CUSTOM_PRESET_NAME)
+        if not stored:
+            return None
+        merged = {path: tuple(color) for path, color in stored.items()}
+        merged.update(viewport_helper_colors())
+        return merged
     for preset_name, colors in PRESETS:
         if preset_name == name:
             merged = dict(colors)
             merged.update(viewport_helper_colors())
             return merged
     return None
+
+
+def preference_number(preferences, name, default):
+    """从偏好设置里安全读一个数值（缺失 / 不是数字时给默认值）。"""
+    value = getattr(preferences, name, None)
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def adjusted_preset_colors(name, custom_text="", hue_shift=0.0, saturation_scale=1.0,
+                           value_scale=1.0, selection_saturation=1.0):
+    """「预设（或自定义预设） + 四个调整」的最终色表。
+
+    每次都从**固定的底表**重算（三套内置预设读 :data:`PRESETS`，自定义预设读已保存的
+    JSON），所以反复拖滑杆 / 反复套用都**不会累积**。
+
+    顺序：先把色相 / 饱和度 / 明度作用到全部颜色，再把「选中几何饱和度」
+    只作用到 :data:`VIEWPORT_SELECTION_PATHS` 那 4 条 —— 这样 A1 的护栏
+    （其它路径在任何取值下都不变）天然成立。
+    """
+    colors = preset_colors(name, custom_text)
+    if not colors:
+        return None
+    colors = adjust_colors(colors, hue_shift, saturation_scale, value_scale)
+    return selection_saturation_colors(colors, selection_saturation)
+
+
+def render_preset_colors(name, preferences):
+    """面板回调与算符**唯一**的「预设 + 滑杆」入口（不要另写一套应用逻辑）。
+
+    偏好设置里那四个值：``preset_hue``（-180…180 度）、``preset_saturation``、
+    ``preset_value``（都是 0…2 的倍数，1.0 = 原样）、``selection_saturation``。
+    """
+    return adjusted_preset_colors(
+        name,
+        custom_text=getattr(preferences, "theme_custom", "") if preferences is not None else "",
+        hue_shift=preference_number(preferences, "preset_hue", 0.0),
+        saturation_scale=preference_number(preferences, "preset_saturation", 1.0),
+        value_scale=preference_number(preferences, "preset_value", 1.0),
+        selection_saturation=preference_number(preferences, "selection_saturation", 1.0),
+    )
 
 
 def preset_sizes(name):
@@ -2027,7 +2273,7 @@ def group_names(paths=None):
     """当前版本下存在的分组（保持 TARGETS 里的顺序）。"""
     wanted = set(paths) if paths is not None else None
     names = []
-    for path, _label, group in TARGETS:
+    for path, _label, group in PRIMARY_TARGETS:
         if wanted is not None and path not in wanted:
             continue
         if group not in names:
@@ -2036,14 +2282,16 @@ def group_names(paths=None):
 
 
 def paths_in_group(group, paths=None):
-    """某个分组里当前版本存在的颜色项。"""
+    """某个分组里当前版本存在的颜色项（一条路径只算一次，归它第一次出现的那个组）。"""
     wanted = set(paths) if paths is not None else None
     result = []
-    for path, _label, item_group in TARGETS:
-        if item_group != group:
+    seen = set()
+    for path, _label, item_group in PRIMARY_TARGETS:
+        if item_group != group or path in seen:
             continue
         if wanted is not None and path not in wanted:
             continue
+        seen.add(path)
         result.append(path)
     return result
 
@@ -2118,6 +2366,16 @@ def dump_custom(items):
 
 def custom_names(text):
     return sorted(load_custom(text).keys())
+
+
+def custom_scheme_names(text):
+    """「自定义配色」列表（**不含**保留名「自定义预设」）。
+
+    两者共用同一份 JSON，但在界面上是两件事：自定义配色是用户自己起名的方案，
+    自定义预设是第 4 个预设按钮的固化色表。分开列，免得用户在自定义配色下拉里
+    看到一个自己没起过的名字。
+    """
+    return [name for name in custom_names(text) if name != CUSTOM_PRESET_NAME]
 
 
 def custom_colors(text, name):
