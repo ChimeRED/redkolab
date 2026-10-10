@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab (REDKO_LAB) · Blender 插件（4.0 ~ 最新版通用）
+"""红红子lab (REDKO_LAB) Blender 插件（4.0 ~ 最新版通用）
 
 功能：
     1. 一键删除选中物体的所有材质
@@ -37,7 +37,7 @@
 bl_info = {
     "name": "红红子lab (REDKO_LAB)",
     "author": "Red04",
-    "version": (2, 2, 0),
+    "version": (2, 3, 0),
     "blender": (4, 0, 0),
     "location": "3D 视图 ▸ 侧栏(N) ▸ 红红子lab（建模 / 工具 / 主题 三页）；饼菜单默认快捷键 Ctrl+E",
     "description": "一键删材质、应用/删除修改器、一键楼梯；主题控件配色与字体、页面布局、面板顺序（REDKO_LAB）",
@@ -64,6 +64,7 @@ _classes = (
     ops.HHZ_OT_theme_apply_preset,
     ops.HHZ_OT_theme_restore_default,
     ops.HHZ_OT_theme_apply_color,
+    ops.HHZ_OT_theme_apply_global,
     ops.HHZ_OT_theme_part_load,
     ops.HHZ_OT_theme_auto_contrast,
     ops.HHZ_OT_theme_custom_save,

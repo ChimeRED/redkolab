@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · 一键楼梯
+"""红红子lab 一键楼梯
 
 把选中的体块整成台阶，再加一个**相对偏移阵列**（Array 修改器）复制出楼梯：
 

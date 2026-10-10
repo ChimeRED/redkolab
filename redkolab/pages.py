@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · 分页（建模 / 工具 / 主题）
+"""红红子lab 分页（建模 / 工具 / 主题）
 
 样式参考插件库里 ZML_LAB（椎木兰LAB）的分页做法，一共三件事：
 

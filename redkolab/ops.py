@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · 功能算符
+"""红红子lab 功能算符
 
 三个核心功能（都作用在「选中的物体」，没选中时作用在活动物体）：
 
@@ -384,7 +384,7 @@ class HHZ_OT_stairs(bpy.types.Operator):
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             self._set_status(context, None)
             compat.tag_redraw(context)
-            self.report({'INFO'}, "楼梯 {} 节 · {}".format(
+            self.report({'INFO'}, "楼梯 {} 节 {}".format(
                 stairs.clamp_count(self.count), self._direction_label()))
             return {'FINISHED'}
 
@@ -421,8 +421,8 @@ class HHZ_OT_stairs(bpy.types.Operator):
         }.get(self._direction, self._direction)
 
     def _hint(self):
-        return ("楼梯 {} 节 · {}（0.3 沿 {} 轴，另一条水平轴保持原尺寸）"
-                " ｜ 移动鼠标换方向 · 滚轮改节数 · 左键确认 · 右键/Esc 取消").format(
+        return ("楼梯 {} 节 {}（0.3 沿 {} 轴，另一条水平轴保持原尺寸）"
+                " ｜ 移动鼠标换方向 滚轮改节数 左键确认 右键/Esc 取消").format(
             stairs.clamp_count(self.count), self._direction_label(),
             stairs.axis_for_direction(self._direction))
 
@@ -801,6 +801,39 @@ class HHZ_OT_theme_auto_contrast(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HHZ_OT_theme_apply_global(bpy.types.Operator):
+    bl_idname = "hhz.theme_apply_global"
+    bl_label = "应用到全部按钮"
+    bl_description = "把全局按钮配色写到所有控件家族与各编辑器的选中高亮上（含预选中项）"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        current = theme.current_theme(context)
+        if preferences is None or current is None:
+            self.report({'ERROR'}, "读不到偏好设置或主题")
+            return {'CANCELLED'}
+
+        base = tuple(getattr(preferences, "global_base", (0.09, 0.10, 0.07, 1.0)))
+        accent = tuple(getattr(preferences, "global_accent", (0.776, 1.0, 0.0, 1.0)))
+        auto_text = bool(getattr(preferences, "global_auto_text", True))
+        text = None if auto_text else tuple(
+            getattr(preferences, "global_text", (0.94, 0.96, 0.90, 1.0)))
+
+        colors = theme.global_button_colors(base, accent, text=text, auto_text=auto_text)
+        applied = theme.apply_colors(current, colors)
+        if not applied:
+            self.report({'WARNING'}, "没有可写入的颜色项")
+            return {'CANCELLED'}
+
+        inner = theme.get_color(current, theme.family_path("wcol_regular", "inner"))
+        if inner is not None:
+            preferences.theme_color = inner
+        self.report({'INFO'}, "已全局应用 {} 项（{} 个控件家族 + 各编辑器选中高亮）".format(
+            applied, len(theme.WIDGET_FAMILIES)))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
 class HHZ_OT_theme_custom_save(bpy.types.Operator):
     bl_idname = "hhz.theme_custom_save"
     bl_label = "保存为自定义配色"
@@ -1088,9 +1121,9 @@ class _DragReorderBase(bpy.types.Operator):
             return {'CANCELLED'}
 
         if self._confirm_on_release:
-            self._set_status(context, "拖动中：上下移动鼠标换位 · 松开确认 · Esc 取消")
+            self._set_status(context, "拖动中：上下移动鼠标换位 松开确认 Esc 取消")
         else:
-            self._set_status(context, "拖动中：上下移动鼠标换位 · 再点一下确认 · Esc 取消")
+            self._set_status(context, "拖动中：上下移动鼠标换位 再点一下确认 Esc 取消")
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):

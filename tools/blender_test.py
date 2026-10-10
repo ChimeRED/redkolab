@@ -910,15 +910,15 @@ def test_theme(module):
 
     # ---- 分组：底色 / 文字与图标 / 边框 是分开的 ----
     groups = theme.group_names(listed)
-    check("按钮·底色" in groups and "按钮·文字与图标" in groups and "按钮·边框" in groups,
+    check("按钮 底色" in groups and "按钮 文字与图标" in groups and "按钮 边框" in groups,
           "按钮的底色 / 文字与图标 / 边框是三个独立分组", groups[:6])
-    check(theme.group_of(grey_path) == "按钮·底色", "普通按钮底色归到「按钮·底色」",
+    check(theme.group_of(grey_path) == "按钮 底色", "普通按钮底色归到「按钮 底色」",
           theme.group_of(grey_path))
-    check(theme.group_of("user_interface.wcol_regular.text") == "按钮·文字与图标",
-          "按钮文字与图标归到「按钮·文字与图标」")
-    check(theme.group_of("user_interface.wcol_regular.outline") == "按钮·边框",
-          "按钮边框归到「按钮·边框」")
-    border_paths = theme.paths_in_group("按钮·边框", listed)
+    check(theme.group_of("user_interface.wcol_regular.text") == "按钮 文字与图标",
+          "按钮文字与图标归到「按钮 文字与图标」")
+    check(theme.group_of("user_interface.wcol_regular.outline") == "按钮 边框",
+          "按钮边框归到「按钮 边框」")
+    border_paths = theme.paths_in_group("按钮 边框", listed)
     check(len(border_paths) >= 3 and all(path.endswith(".outline") for path in border_paths),
           "「按钮·边框」组里全是 outline 项", border_paths[:4])
     check(isinstance(theme.differing_paths(current, theme.default_paths()), list),
@@ -1082,12 +1082,69 @@ def test_theme(module):
     result = bpy.ops.hhz.theme_part_load()
     check(result == {'FINISHED'}, "「从当前主题读回」算符可用", result)
 
+    # ---- 全局按钮配色：一次覆盖所有家族 + 各编辑器的选中高亮 ----
+    listed_set = set(listed)
+    accents = ("outliner.selected_highlight", "outliner.active", "file_browser.selected_file",
+               "properties.active_modifier", "user_interface.editor_outline")
+    present = [path for path in accents if path in listed_set]
+    check(len(present) >= 3, "全局选中高亮条目在当前版本可用", present)
+    check("outliner.selected_highlight" in listed_set,
+          "大纲视图选中行（默认偏蓝的那个）终于进了颜色列表")
+
+    global_colors = theme.global_button_colors((0.09, 0.10, 0.07, 1.0), (0.776, 1.0, 0.0, 1.0))
+    check(len(global_colors) >= len(theme.WIDGET_FAMILIES) * 7,
+          "全局配色覆盖每个家族的 7 个成员", len(global_colors))
+    check(all(theme.family_path(family_prefix, "inner_sel") in global_colors
+              for family_prefix, _label in theme.WIDGET_FAMILIES),
+          "全局配色含每个家族的选中底色")
+    low_contrast_global = []
+    for family_prefix, _label in theme.WIDGET_FAMILIES:
+        for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+            background = global_colors.get(theme.family_path(family_prefix, background_key))
+            text_color = global_colors.get(theme.family_path(family_prefix, text_key))
+            if background is None or text_color is None:
+                continue
+            if abs(theme.luminance(background) - theme.luminance(text_color)) < 0.3:
+                low_contrast_global.append(family_prefix)
+    check(not low_contrast_global, "全局配色的文字/底色对比也够", low_contrast_global[:5])
+
+    before_outliner = theme.get_color(current, "outliner.selected_highlight")
+    applied_global = theme.apply_colors(current, global_colors)
+    check(applied_global >= 100, "全局配色一次写进很多项", applied_global)
+    after_outliner = theme.get_color(current, "outliner.selected_highlight")
+    expected_tint = theme.scale_color((0.776, 1.0, 0.0, 1.0), 0.35)
+    check(color_close(after_outliner, expected_tint),
+          "大纲选中行 = 调暗后的选中色", (after_outliner, expected_tint))
+    check(not color_close(after_outliner, (0.114, 0.192, 0.302)),
+          "大纲选中行不再是 Blender 默认那个偏蓝",
+          (after_outliner, (0.114, 0.192, 0.302)))
+    check(theme.luminance(after_outliner) < 0.35,
+          "大纲选中行用调暗的选中色（上面的浅色文字仍看得清）", after_outliner)
+    check(not theme.family_contrast_report(current, prefix),
+          "全局配色之后按钮文字对比度正常",
+          theme.family_contrast_report(current, prefix))
+
+    result = bpy.ops.hhz.theme_apply_global()
+    check(result == {'FINISHED'}, "「应用到全部按钮」算符可用", result)
+    check(theme.label_of(grey_path).startswith("普通按钮"),
+          "label_of 能取到中文标签", theme.label_of(grey_path))
+
+    # ---- 标签里不用 · 这类符号（有些自定义界面字体画不出来会变乱码）----
+    check("\u00b7" not in source_of(module, "theme.py")
+          and "\u00b7" not in source_of(module, "ui.py"),
+          "主题配置与面板代码里都没有中点号（避免字体缺字变乱码）")
+    bad_labels = [label for _path, label, _group in theme.TARGETS if "\u00b7" in label]
+    check(not bad_labels, "颜色项标签里没有中点号这类符号", bad_labels[:5])
+    bad_groups = [group for _path, _label, group in theme.TARGETS if "\u00b7" in group]
+    check(not bad_groups, "分组名里也没有中点号", bad_groups[:5])
+
     # ---- 面板里这些东西都要有（静态检查）----
     panel_source = source_of(module, "ui.py")
     for token in ('"palette_color"', '"custom_hex"', "应用颜色", "控件颜色分开设置",
                   "当前值 {}", "自动配文字色", "从当前主题读回",
                   "part_inner:", "part_text:", "part_outline:",
-                  '"part_" + member'):
+                  '"part_" + member', "全局按钮配色", "应用到全部按钮", '"global_base"',
+                  "当前项 {}"):
         check(token in panel_source, "主题面板里有 {}".format(token))
 
     # 还原测试前的颜色

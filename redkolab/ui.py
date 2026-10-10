@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · 界面层
+"""红红子lab 界面层
 
 包含三部分：
 
@@ -299,7 +299,7 @@ class HHZ_PT_main(bpy.types.Panel):
 
         column.separator()
         column.operator("hhz.stairs", icon='MOD_ARRAY')
-        layout.label(text="一键楼梯：鼠标换方向 · 滚轮改节数", icon='INFO')
+        layout.label(text="一键楼梯：鼠标换方向 滚轮改节数", icon='INFO')
 
         layout.separator()
         if context.mode != 'OBJECT':
@@ -317,7 +317,7 @@ class HHZ_PT_main(bpy.types.Panel):
             slot_count += len(getattr(obj, "material_slots", ()) or ())
             modifier_count += len(getattr(obj, "modifiers", ()) or ())
         layout.label(
-            text="选中 {} 个物体 · 材质槽 {} · 修改器 {}".format(
+            text="选中 {} 个物体 材质槽 {} 修改器 {}".format(
                 len(targets), slot_count, modifier_count),
             icon='INFO',
         )
@@ -380,8 +380,8 @@ class HHZ_PT_settings(bpy.types.Panel):
         layout.operator("hhz.open_preferences", icon='SETTINGS')
 
         column = layout.column(align=True)
-        column.label(text="{} · {}".format(compat.ADDON_NAME, compat.ADDON_NAME_EN))
-        column.label(text="支持 Blender {}+ · 当前 {}".format(
+        column.label(text="{} {}".format(compat.ADDON_NAME, compat.ADDON_NAME_EN))
+        column.label(text="支持 Blender {}+ 当前 {}".format(
             ".".join(str(part) for part in compat.MIN_BLENDER_VERSION),
             compat.VERSION_STRING,
         ))
@@ -425,7 +425,7 @@ class HHZ_PT_order(bpy.types.Panel):
         box = layout.box()
         box.label(text="侧栏标签页")
         for name in panels.tab_names():
-            box.label(text="· {}".format(name))
+            box.label(text="  {}".format(name))
         box.label(text="标签页顺序 Blender 不开放给插件", icon='ERROR')
         box.label(text="（详见 README 的说明）")
 
@@ -465,6 +465,8 @@ class HHZ_PT_theme(bpy.types.Panel):
 
         column = layout.column(align=True)
         column.prop(preferences, "theme_target", text="")
+        # 明文写清当前选的是哪一项：即使下拉框本身显示异常，也一眼能看出选了什么
+        layout.label(text="当前项 {}".format(theme.label_of(path)))
         row = column.row(align=True)
         row.prop(preferences, "theme_color", text="")
         row.operator("hhz.theme_read", text="", icon='FILE_REFRESH')
@@ -534,6 +536,25 @@ class HHZ_PT_theme(bpy.types.Panel):
                 box.label(text=text + "（字会看不清）", icon='ERROR')
         elif shown_parts:
             box.label(text="文字与底色的对比度正常", icon='CHECKMARK')
+
+        # ---- 全局按钮配色：一次改掉所有按钮（含预选中项）----
+        box = layout.box()
+        box.label(text="全局按钮配色")
+        row = box.row(align=True)
+        row.label(text="底色")
+        row.prop(preferences, "global_base", text="")
+        row = box.row(align=True)
+        row.label(text="选中色")
+        row.prop(preferences, "global_accent", text="")
+        box.prop(preferences, "global_auto_text")
+        if not getattr(preferences, "global_auto_text", True):
+            row = box.row(align=True)
+            row.label(text="文字色")
+            row.prop(preferences, "global_text", text="")
+        box.operator("hhz.theme_apply_global", text="应用到全部按钮（含预选中项）",
+                     icon='CHECKMARK')
+        box.label(text="会写 {} 个控件家族，外加大纲、文件浏览器、属性、信息、控制台、编辑器图标的选中高亮".format(
+            len(theme.WIDGET_FAMILIES)), icon='INFO')
 
         # ---- 配色预设 ----
         box = layout.box()
@@ -744,6 +765,26 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         description="像 #C6FF00；改这里会同步到调色盘",
         default="#C6FF00",
         update=_on_hex_update,
+    )
+    global_base: FloatVectorProperty(
+        name="全局底色", description="所有按钮的底色",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.09, 0.10, 0.07, 1.0),
+    )
+    global_accent: FloatVectorProperty(
+        name="全局选中色", description="所有按钮被选中/预选中时的颜色，也用于大纲等处的选中高亮",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.776, 1.0, 0.0, 1.0),
+    )
+    global_text: FloatVectorProperty(
+        name="全局文字色", description="关掉自动配文字色时用这个",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.94, 0.96, 0.90, 1.0),
+    )
+    global_auto_text: BoolProperty(
+        name="按底色自动配文字色",
+        description="按底色亮度自动挑深色字或浅色字，保证按钮上的图标与文字看得清",
+        default=True,
     )
     custom_choice: EnumProperty(
         name="自定义配色",

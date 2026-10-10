@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · N 面板顺序管理
+"""红红子lab N 面板顺序管理
 
 提供两块能力：
 

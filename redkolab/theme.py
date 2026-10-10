@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · 主题颜色
+"""红红子lab 主题颜色
 
 在 N 面板里修改 Blender 界面主题的颜色（**不进饼菜单**）。
 
@@ -52,21 +52,43 @@ WIDGET_FAMILIES = (
     ("wcol_progress", "进度条"),
     ("wcol_scroll", "滚动条"),
     ("wcol_box", "分组框"),
+    ("wcol_pulldown", "下拉菜单"),
 )
 
 #: 每个家族里「成员后缀 -> (中文后缀, 分组)」
+#: 分组名与标签一律用纯中文 + 空格，不放 `` `` 这类符号 ——
+#: 有些自定义界面字体（偏好设置里换过字体的）画不出这些符号，会显示成乱码。
 WIDGET_MEMBERS = (
-    ("inner", "底色", "按钮·底色"),
-    ("text", "文字与图标", "按钮·文字与图标"),
-    ("outline", "边框", "按钮·边框"),
-    ("inner_sel", "选中底色", "按钮·选中底色"),
-    ("text_sel", "选中文字与图标", "按钮·选中文字"),
-    ("outline_sel", "选中边框", "按钮·选中边框"),
-    ("item", "高亮条/滑块", "按钮·高亮"),
+    ("inner", "底色", "按钮 底色"),
+    ("text", "文字与图标", "按钮 文字与图标"),
+    ("outline", "边框", "按钮 边框"),
+    ("inner_sel", "选中底色", "按钮 选中底色"),
+    ("text_sel", "选中文字与图标", "按钮 选中文字"),
+    ("outline_sel", "选中边框", "按钮 选中边框"),
+    ("item", "高亮条与滑块", "按钮 高亮"),
 )
 
 #: N 面板「分开设置」里逐项列出的成员（顺序就是面板上的顺序）
 PART_MEMBERS = WIDGET_MEMBERS
+
+#: 全局"选中/活动"高亮 —— 这些不是 wcol 家族，但**选中态就是它们画的**：
+#: 大纲视图选中行（selected_highlight，默认偏蓝）、活动行、文件浏览器选中文件、
+#: 属性编辑器活动修改器、信息编辑器选中行、文本编辑器选中文字、控制台选区、
+#: 编辑器图标描边与高亮。来自 Blender 源码里 ``TH_ACTIVE`` / ``TH_SELECT``
+#: 的映射（``ts->active`` 即各空间自己的 active/select 色）。
+GLOBAL_TARGETS = (
+    ("outliner.selected_highlight", "大纲 选中行底色", "选中态 全局"),
+    ("outliner.active", "大纲 活动行底色", "选中态 全局"),
+    ("outliner.selected_object", "大纲 选中物体", "选中态 全局"),
+    ("outliner.active_object", "大纲 活动物体", "选中态 全局"),
+    ("file_browser.selected_file", "文件浏览器 选中文件", "选中态 全局"),
+    ("properties.active_modifier", "属性 活动修改器", "选中态 全局"),
+    ("info.info_selected", "信息编辑器 选中行", "选中态 全局"),
+    ("text_editor.selected_text", "文本编辑器 选中文字", "选中态 全局"),
+    ("console.select", "控制台 选区", "选中态 全局"),
+    ("user_interface.editor_outline", "编辑器图标描边", "选中态 全局"),
+    ("user_interface.editor_outline_active", "编辑器图标高亮 5.x", "选中态 全局"),
+)
 
 #: 图标颜色（Blender 按对象类型给图标上的色）
 ICON_TARGETS = (
@@ -84,20 +106,20 @@ ICON_TARGETS = (
 #: 说明：主题里没有独立的 timeline 结构，当前帧色分散在各编辑器的 frame_current 上，
 #: 时间轴的绘制走共享模块（``editors/animation/time_scrub_ui.cc``）。
 FRAME_TARGETS = (
-    ("dopesheet_editor.frame_current", "时间线/摄影表 · 当前帧", "时间线·当前帧"),
-    ("dopesheet_editor.time_scrub_background", "时间线/摄影表 · 时间轴底色", "时间线·当前帧"),
-    ("dopesheet_editor.time_marker_line", "时间线/摄影表 · 标记线", "时间线·当前帧"),
-    ("dopesheet_editor.time_marker_line_selected", "时间线/摄影表 · 选中标记线", "时间线·当前帧"),
-    ("graph_editor.frame_current", "曲线编辑器 · 当前帧", "时间线·当前帧"),
-    ("graph_editor.time_scrub_background", "曲线编辑器 · 时间轴底色", "时间线·当前帧"),
-    ("nla_editor.frame_current", "NLA 编辑器 · 当前帧", "时间线·当前帧"),
-    ("nla_editor.time_scrub_background", "NLA 编辑器 · 时间轴底色", "时间线·当前帧"),
-    ("sequence_editor.frame_current", "视频序列 · 当前帧", "时间线·当前帧"),
-    ("sequence_editor.time_scrub_background", "视频序列 · 时间轴底色", "时间线·当前帧"),
-    ("clip_editor.frame_current", "影片剪辑 · 当前帧", "时间线·当前帧"),
-    ("clip_editor.time_scrub_background", "影片剪辑 · 时间轴底色", "时间线·当前帧"),
-    ("image_editor.frame_current", "图像编辑器 · 当前帧", "时间线·当前帧"),
-    ("view_3d.frame_current", "3D 视图 · 当前帧", "时间线·当前帧"),
+    ("dopesheet_editor.frame_current", "时间线/摄影表 当前帧", "时间线 当前帧"),
+    ("dopesheet_editor.time_scrub_background", "时间线/摄影表 时间轴底色", "时间线 当前帧"),
+    ("dopesheet_editor.time_marker_line", "时间线/摄影表 标记线", "时间线 当前帧"),
+    ("dopesheet_editor.time_marker_line_selected", "时间线/摄影表 选中标记线", "时间线 当前帧"),
+    ("graph_editor.frame_current", "曲线编辑器 当前帧", "时间线 当前帧"),
+    ("graph_editor.time_scrub_background", "曲线编辑器 时间轴底色", "时间线 当前帧"),
+    ("nla_editor.frame_current", "NLA 编辑器 当前帧", "时间线 当前帧"),
+    ("nla_editor.time_scrub_background", "NLA 编辑器 时间轴底色", "时间线 当前帧"),
+    ("sequence_editor.frame_current", "视频序列 当前帧", "时间线 当前帧"),
+    ("sequence_editor.time_scrub_background", "视频序列 时间轴底色", "时间线 当前帧"),
+    ("clip_editor.frame_current", "影片剪辑 当前帧", "时间线 当前帧"),
+    ("clip_editor.time_scrub_background", "影片剪辑 时间轴底色", "时间线 当前帧"),
+    ("image_editor.frame_current", "图像编辑器 当前帧", "时间线 当前帧"),
+    ("view_3d.frame_current", "3D 视图 当前帧", "时间线 当前帧"),
 )
 
 #: 视口
@@ -124,15 +146,15 @@ MISC_TARGETS = (
     ("user_interface.panel_outline", "面板描边（5.x）", "面板（5.x）"),
     ("user_interface.panel_active", "活动面板标题（5.x）", "面板（5.x）"),
     ("user_interface.wcol_state.inner_changed", "已修改（默认橙）", "状态"),
-    ("user_interface.wcol_state.inner_changed_sel", "已修改·选中", "状态"),
+    ("user_interface.wcol_state.inner_changed_sel", "已修改 选中", "状态"),
     ("user_interface.wcol_state.inner_anim", "有动画", "状态"),
-    ("user_interface.wcol_state.inner_anim_sel", "有动画·选中", "状态"),
+    ("user_interface.wcol_state.inner_anim_sel", "有动画 选中", "状态"),
     ("user_interface.wcol_state.inner_key", "关键帧", "状态"),
-    ("user_interface.wcol_state.inner_key_sel", "关键帧·选中", "状态"),
+    ("user_interface.wcol_state.inner_key_sel", "关键帧 选中", "状态"),
     ("user_interface.wcol_state.inner_driven", "驱动器", "状态"),
-    ("user_interface.wcol_state.inner_driven_sel", "驱动器·选中", "状态"),
+    ("user_interface.wcol_state.inner_driven_sel", "驱动器 选中", "状态"),
     ("user_interface.wcol_state.inner_overridden", "被覆盖", "状态"),
-    ("user_interface.wcol_state.inner_overridden_sel", "被覆盖·选中", "状态"),
+    ("user_interface.wcol_state.inner_overridden_sel", "被覆盖 选中", "状态"),
     ("user_interface.wcol_state.error", "错误（5.x）", "状态"),
     ("user_interface.wcol_state.warning", "警告（5.x）", "状态"),
     ("user_interface.wcol_state.info", "信息（5.x）", "状态"),
@@ -150,12 +172,15 @@ MISC_TARGETS = (
 
 
 def _widget_targets():
-    """把控件家族 × 成员展开成 (路径, 标签, 分组) 三元组。"""
+    """把控件家族 × 成员展开成 (路径, 标签, 分组) 三元组。
+
+    标签形如「普通按钮 底色」—— 纯中文 + 空格，不放符号。
+    """
     for prefix, family_label in WIDGET_FAMILIES:
         for member, member_label, group in WIDGET_MEMBERS:
             yield (
                 "user_interface.{}.{}".format(prefix, member),
-                "{} · {}".format(family_label, member_label),
+                "{} {}".format(family_label, member_label),
                 group,
             )
 
@@ -163,6 +188,7 @@ def _widget_targets():
 #: (路径, 标签, 分组)。分组顺序就是下拉框里的顺序 —— 按钮优先。
 TARGETS = (
     tuple(_widget_targets())
+    + GLOBAL_TARGETS
     + ICON_TARGETS
     + FRAME_TARGETS
     + VIEWPORT_TARGETS
@@ -366,10 +392,97 @@ def write_family(theme, prefix, member, color):
     return set_color(theme, family_path(prefix, member), color)
 
 
+def scale_color(color, factor, alpha=None):
+    """把颜色按倍数调暗/调亮（用来派生描边、浅底高亮等）。"""
+    values = list(color)[:3]
+    while len(values) < 3:
+        values.append(0.0)
+    result = tuple(max(0.0, min(1.0, float(value) * factor)) for value in values)
+    if alpha is None:
+        alpha = color[3] if len(color) > 3 else 1.0
+    return result + (float(alpha),)
+
+
+def global_highlight_colors(accent):
+    """派生"全局选中高亮"那一组颜色。
+
+    分两类，避免把浅色文字压在亮底上：
+    * 当**背景**用的（大纲选中行、活动行、属性活动修改器、文本选中、控制台选区）
+      用调暗的 accent，浅色文字照样看得清；
+    * 当**前景/描边**用的（选中物体、选中文件、编辑器图标）用完整 accent。
+    """
+    accent = tuple(accent)
+    dark = scale_color(accent, 0.35)
+    mid = scale_color(accent, 0.55)
+    return {
+        "outliner.selected_highlight": dark,
+        "outliner.active": mid,
+        "text_editor.selected_text": mid,
+        "console.select": scale_color(accent, 0.5, 0.35),
+        "properties.active_modifier": mid,
+        "outliner.selected_object": accent,
+        "outliner.active_object": accent,
+        "file_browser.selected_file": accent,
+        "info.info_selected": accent,
+        "user_interface.editor_outline": dark,
+        "user_interface.editor_outline_active": accent,
+    }
+
+
+def global_button_colors(base, accent, text=None, outline=None, auto_text=True):
+    """一套**全局按钮配色**：所有控件家族的底色 / 文字与图标 / 边框 / 选中态，
+    外加各编辑器里的全局选中高亮（大纲、文件浏览器、属性、信息、控制台、编辑器图标）。
+
+    这就是"一次改掉所有按钮颜色，包括预选中的选项"：返回 ``{路径: 颜色}``。
+    """
+    base = tuple(base)
+    accent = tuple(accent)
+    if text is None:
+        text = readable_text_color(base)
+    text = tuple(text)
+    text_sel = readable_text_color(accent) if auto_text else text
+    if outline is None:
+        outline = scale_color(base, 1.35)
+
+    colors = {}
+    for prefix, _label in WIDGET_FAMILIES:
+        colors[family_path(prefix, "inner")] = base
+        colors[family_path(prefix, "text")] = text
+        colors[family_path(prefix, "outline")] = outline
+        colors[family_path(prefix, "inner_sel")] = accent
+        colors[family_path(prefix, "text_sel")] = text_sel
+        colors[family_path(prefix, "outline_sel")] = accent
+        colors[family_path(prefix, "item")] = accent
+    colors.update(global_highlight_colors(accent))
+    # 需要保持透明的两项
+    colors["user_interface.wcol_list_item.inner"] = scale_color(base, 1.0, 0.0)
+    colors["user_interface.wcol_scroll.inner"] = scale_color(base, 1.0, 0.0)
+    return colors
+
+
+def apply_colors(theme, colors):
+    """把一组 ``{路径: 颜色}`` 写进主题，返回成功数量（当前版本没有的项自动跳过）。"""
+    applied = 0
+    for path, color in dict(colors or {}).items():
+        if color is None:
+            continue
+        if set_color(theme, path, color):
+            applied += 1
+    return applied
+
+
+def label_of(path):
+    """某个颜色项在面板上的中文名（找不到就返回路径本身）。"""
+    for target_path, label, _group in TARGETS:
+        if target_path == path:
+            return label
+    return path
+
+
 def family_contrast_report(theme, prefix):
     """检查一个家族的"文字 vs 底色"对比度，返回问题描述列表。
 
-    预设与自定义配色都该保证这里没有内容 —— 否则就会出现"字看不清"。
+    预设与自定义配色都该保证这里是空的 —— 否则就会出现"字看不清"。
     """
     colors = read_family(theme, prefix)
     problems = []
@@ -434,6 +547,8 @@ def _acid_preset(hot=False):
         "user_interface.wcol_state.inner_key": hex_color("#E8C547"),
         "user_interface.wcol_state.inner_key_sel": hex_color(ACID["orange"]),
     })
+    # 各编辑器里的全局选中高亮（大纲选中行等）也一起酸起来
+    colors.update(global_highlight_colors(hex_color(accent)))
     return {path: color for path, color in colors.items() if color is not None}
 
 
@@ -459,7 +574,7 @@ def _preset(hot):
 #: 配色预设：改的是**可互动的按钮与状态色**（外加时间线当前帧），不动视口
 PRESETS = (
     ("Marathon 酸性", _preset(False)),
-    ("Marathon 酸性·高对比", _preset(True)),
+    ("Marathon 酸性 高对比", _preset(True)),
 )
 
 
@@ -554,7 +669,7 @@ def target_items(self=None, context=None):
     for path, label, group in TARGETS:
         if resolve(theme, path) is None:
             continue
-        items.append((path, "{} · {}".format(group, label), path))
+        items.append((path, "{} {}".format(group, label), path))
     if not items:
         items.append(("__unavailable__", "（当前版本没有可用颜色项）", ""))
     return items

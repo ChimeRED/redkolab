@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab · 页面布局
+"""红红子lab 页面布局
 
 把当前 Blender 的**工作区 + 区域划分**（哪个编辑器在哪、占多大）存成一份带名字的快照，
 以后在新文件里一键还原。

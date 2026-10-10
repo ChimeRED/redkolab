@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""红红子lab (REDKOlab) · 跨版本兼容层
+"""红红子lab (REDKOlab) 跨版本兼容层
 
 本插件只支持 **Blender 4.0 及以上**，所以这里不再有 2.80 ~ 3.1 的旧接口分支。
 仍然集中放在这个文件里的差异点有两个：
