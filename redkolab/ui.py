@@ -12,7 +12,7 @@
 """
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, StringProperty
 
 from . import compat, layout, pages, panels, theme
 
