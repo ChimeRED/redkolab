@@ -1,5 +1,8 @@
 # 红红子lab (REDKOlab)
 
+[![Release](https://github.com/ChimeRED/redkolab/actions/workflows/release.yml/badge.svg)](https://github.com/ChimeRED/redkolab/actions/workflows/release.yml)
+[![最新版本](https://img.shields.io/github/v/release/ChimeRED/redkolab)](https://github.com/ChimeRED/redkolab/releases/latest)
+
 一个 **Blender 4.0 ~ 最新版通用的单文件插件**，把三个高频操作变成一次点击：
 
 | 功能 | 说明 |
