@@ -7,9 +7,11 @@
 * :class:`HHZ_OT_apply_all_modifiers`   一键应用所有修改器
 * :class:`HHZ_OT_remove_all_modifiers`  一键删除所有修改器
 
-另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键，
-以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
+另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键、
+检查并修复缺失文件，以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
 """
+
+import os
 
 import bpy
 
@@ -492,6 +494,85 @@ class HHZ_OT_reset_hotkey(bpy.types.Operator):
             return {'CANCELLED'}
         self.report({'INFO'}, "饼菜单快捷键已恢复为 {}".format(compat.default_hotkey_label()))
         compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+# --------------------------------------------------------- 检查并修复缺失文件
+
+
+def _missing_image_names():
+    """扫描图像数据块，返回 ``(未被使用的缺失项名字, 仍在使用的缺失项名字)``。
+
+    判据与 Blender 报「无法打包文件，找不到源路径」时一致：
+    来源是外部文件（``source == 'FILE'``）、自己没有打包数据（``not packed_file``）、
+    而且磁盘上的源文件确实不在了。``bpy.path.abspath`` 本身也可能抛异常
+    （路径写法太怪），这里按「缺失」处理，不让整个算符中断。
+    """
+    unused = []
+    in_use = []
+    for img in list(bpy.data.images):
+        if img.source != 'FILE' or img.packed_file:
+            continue
+        try:
+            path = bpy.path.abspath(img.filepath)
+            exists = bool(path) and os.path.exists(path)
+        except Exception:
+            exists = False
+        if exists:
+            continue
+        if img.users == 0:
+            unused.append(img)
+        else:
+            in_use.append((img.name, img.users))
+    return unused, in_use
+
+
+class HHZ_OT_fix_missing_files(bpy.types.Operator):
+    bl_idname = "hhz.fix_missing_files"
+    bl_label = "检查并修复缺失文件"
+    bl_description = (
+        "清理指向已删除文件的图像数据块（只清没有任何使用者的），"
+        "并在必要时关闭本文件的自动打包资源"
+    )
+
+    def execute(self, context):
+        unused, in_use = _missing_image_names()
+        if not unused and not in_use:
+            # 幂等：一个缺失项都没有时，一个字节都不改（use_autopack 也不动）
+            self.report({'INFO'}, "没有发现缺失文件，未做任何修改")
+            return {'FINISHED'}
+
+        removed_names = []
+        for img in unused:
+            # 先记名字：remove() 之后这个数据块就失效了，不能再读它的属性
+            name = img.name
+            try:
+                bpy.data.images.remove(img)
+            except Exception as error:
+                self.report({'WARNING'}, "无法清理 {}：{}".format(name, error))
+                continue
+            removed_names.append(name)
+
+        # 弹窗的直接原因就是「自动打包资源」：文件里既然还有指向已删除文件的图像，
+        # 每次保存都会再去打包它们。这里只在这个文件确实有缺失项时才关掉。
+        auto_pack_off = False
+        if getattr(bpy.data, "use_autopack", False):
+            bpy.data.use_autopack = False
+            auto_pack_off = True
+
+        parts = ["发现 {} 个指向已删除文件的图像".format(len(unused) + len(in_use))]
+        if removed_names:
+            parts.append("已清理 {} 个没有使用者的引用（{}）".format(
+                len(removed_names), "、".join(removed_names)))
+        if in_use:
+            parts.append("仍有 {} 个在使用中，未删除（{}）：{}".format(
+                len(in_use),
+                "、".join("{} 使用者 {}".format(name, users) for name, users in in_use),
+                "可用 文件 ▸ 外部数据 ▸ 查找缺失文件 重新链接",
+            ))
+        if auto_pack_off:
+            parts.append("已关闭本文件的自动打包资源，所以保存时不会再弹这个错")
+        self.report({'INFO'}, "；".join(parts))
         return {'FINISHED'}
 
 

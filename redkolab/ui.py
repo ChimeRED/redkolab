@@ -427,6 +427,10 @@ class HHZ_PT_settings(bpy.types.Panel):
 
         layout.operator("hhz.open_preferences", icon='SETTINGS')
 
+        layout.separator()
+        layout.operator("hhz.fix_missing_files", icon='FILE_REFRESH')
+        layout.label(text="清理指向已删除文件的图像引用，并在必要时关闭自动打包")
+
         column = layout.column(align=True)
         column.label(text="{} {}".format(compat.ADDON_NAME, compat.ADDON_NAME_EN))
         column.label(text="支持 Blender {}+ 当前 {}".format(

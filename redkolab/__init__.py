@@ -60,6 +60,7 @@ _classes = (
     ops.HHZ_OT_open_preferences,
     ops.HHZ_OT_capture_hotkey,
     ops.HHZ_OT_reset_hotkey,
+    ops.HHZ_OT_fix_missing_files,
     ops.HHZ_OT_theme_read,
     ops.HHZ_OT_theme_apply_preset,
     ops.HHZ_OT_theme_restore_default,

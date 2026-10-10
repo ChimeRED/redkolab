@@ -22,6 +22,7 @@ import ast
 import os
 import re
 import sys
+import tempfile
 import traceback
 import zipfile
 
@@ -797,6 +798,181 @@ def test_bad_hotkey(module):
     items = _pie_shortcut_items(keyconfig)
     check(len(items) == 1 and items[0].type == module.compat.DEFAULT_KEY_TYPE and items[0].ctrl,
           "随后恢复默认键位成功（Ctrl+E）", [(item.type, item.ctrl) for item in items])
+
+
+def _make_missing_image(prefix, temporary_directory):
+    """造一个「指向已删除文件的图像」样本，返回 (数据块名字, 临时 png 路径)。
+
+    真实的缺失文件没法凭空造（不然就不缺失了），所以走真流程：生成 png 落盘 ->
+    作为外部文件读进来 -> 再删掉磁盘上的文件。此时数据块仍是指向外部文件、
+    自己没有打包数据、而源文件已经不在了 —— 正是保存时触发
+    「无法打包文件，找不到源路径」的那种条目。
+    """
+    folder = tempfile.mkdtemp(prefix=prefix, dir=temporary_directory)
+    path = os.path.join(folder, "sample.png")
+    generated = bpy.data.images.new("hhz_sample_source", 4, 4)
+    try:
+        generated.filepath_raw = path
+        generated.file_format = 'PNG'
+        generated.save()
+    finally:
+        bpy.data.images.remove(generated)
+
+    image = bpy.data.images.load(path)
+    image.name = prefix
+    os.remove(path)
+    return image.name, path
+
+
+def _clear_unused_missing_images():
+    """丢掉之前用例可能留下的无使用者缺失图像（不碰有使用者的）。"""
+    for image in list(bpy.data.images):
+        if image.source != 'FILE' or image.packed_file or image.users != 0:
+            continue
+        try:
+            if not os.path.exists(bpy.path.abspath(image.filepath)):
+                bpy.data.images.remove(image)
+        except Exception:
+            pass
+
+
+def class_source(source, class_name):
+    """按函数/类边界取出某个类的源码段（静态检查报告文案用）。
+
+    和 ``class_operator_idnames`` 同一套做法：解析 AST、按名字找节点，
+    不靠注释当锚点。
+    """
+    lines = source.splitlines()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            end = getattr(node, "end_lineno", node.lineno)
+            return "\n".join(lines[node.lineno - 1:end])
+    return ""
+
+
+def _classify_missing(module, name):
+    """``_missing_image_names()`` 把某个数据块归到了哪一类：unused / in_use / absent。"""
+    try:
+        unused, in_use = module.ops._missing_image_names()
+    except Exception:
+        return "error"
+    if any(getattr(image, "name", None) == name for image in unused):
+        return "unused"
+    if any(item[0] == name for item in in_use):
+        return "in_use"
+    return "absent"
+
+
+def test_fix_missing_files(module):
+    section("功能：检查并修复缺失文件")
+    operator = operator_class(module, "fix_missing_files")
+
+    # ---- 1. 算符存在（用项目既有的查类方式，不用 hasattr(bpy.ops...)）----
+    check(operator is not None, "算符 hhz.fix_missing_files 已注册")
+    check(getattr(operator, "bl_idname", "") == "hhz.fix_missing_files",
+          "算符 bl_idname 正确", getattr(operator, "bl_idname", None))
+
+    # 面板里真的画了这个按钮（静态读源码，和 test_pie_unchanged 同一套做法）
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
+    with open(ui_path, encoding="utf-8") as handle:
+        ui_source = handle.read()
+    in_settings = class_operator_idnames(ui_source, "HHZ_PT_settings")
+    check("hhz.fix_missing_files" in in_settings,
+          "按钮出现在已有的「插件设置」面板里", sorted(in_settings))
+
+    if operator is None:
+        return
+
+    # 报告文案：运行期抓不到 self.report（后台模式没有 WM 报告收集器，
+    # 实测 wm.report 不可赋值），改成按类边界静态读算符源码里的报告文案
+    static = class_source(source_of(module, "ops.py"), "HHZ_OT_fix_missing_files")
+    check(bool(static), "静态读到了算符源码段（报告文案检查有依据）")
+
+    has_autopack = hasattr(bpy.data, "use_autopack")
+    check(has_autopack, "当前 Blender 上有 bpy.data.use_autopack（本功能的前置 API）")
+    original_autopack = bool(getattr(bpy.data, "use_autopack", False))
+    if not has_autopack:
+        return
+
+    try:
+        # ---- 2. 没有缺失项：返回 FINISHED、不动 use_autopack、报告说「没有缺失」----
+        _clear_unused_missing_images()
+        bpy.data.use_autopack = True
+        before_names = sorted(image.name for image in bpy.data.images)
+        result = bpy.ops.hhz.fix_missing_files()
+        check(result == {'FINISHED'}, "没有缺失文件时算符返回 FINISHED", result)
+        check(bpy.data.use_autopack is True,
+              "没有缺失文件时不关闭自动打包资源（幂等，不产生副作用）",
+              bpy.data.use_autopack)
+        check(sorted(image.name for image in bpy.data.images) == before_names,
+              "没有缺失文件时图像数据块一个都没少")
+        check("没有发现缺失文件" in static,
+              "源码里「没有缺失」这一路明确报告「没有发现缺失文件」，不是一句「完成」")
+
+        # ---- 3. 有缺失且没有使用者：数据块被移除，并且自动打包被关掉 ----
+        _clear_unused_missing_images()
+        unused_name, _unused_path = _make_missing_image("hhz_missing_unused", None)
+        sample = bpy.data.images.get(unused_name)
+        check(sample is not None, "样本图像已创建", unused_name)
+        if sample is not None:
+            check(sample.source == 'FILE' and not sample.packed_file and sample.users == 0,
+                  "样本符合判据（外部文件 / 未打包 / 没有使用者）",
+                  (sample.source, sample.packed_file, sample.users))
+            check(not os.path.exists(bpy.path.abspath(sample.filepath)),
+                  "样本的源文件确实不在磁盘上")
+            check(_classify_missing(module, unused_name) == "unused",
+                  "_missing_image_names() 把它归到「没有使用者」一类")
+
+        bpy.data.use_autopack = True
+        result = bpy.ops.hhz.fix_missing_files()
+        check(result == {'FINISHED'}, "有缺失项时算符返回 FINISHED", result)
+        check(bpy.data.images.get(unused_name) is None,
+              "没有使用者的缺失图像数据块已被移除")
+        check(bpy.data.use_autopack is False,
+              "存在缺失项时自动打包资源被关闭（弹窗的直接原因）",
+              bpy.data.use_autopack)
+        check("use_autopack" in static,
+              "源码里确实用了 Blender 原生的 bpy.data.use_autopack，没有自己实现打包")
+
+        # 幂等：再点一次什么都不该变
+        again = bpy.ops.hhz.fix_missing_files()
+        check(again == {'FINISHED'}, "重复点击仍然正常结束", again)
+        check(bpy.data.use_autopack is False, "重复点击不会把状态改回来",
+              bpy.data.use_autopack)
+
+        # ---- 4. 有缺失但仍有使用者：绝不删除 ----
+        _clear_unused_missing_images()
+        used_name, _used_path = _make_missing_image("hhz_missing_used", None)
+        used = bpy.data.images.get(used_name)
+        check(used is not None, "带使用者的样本图像已创建", used_name)
+        if used is not None:
+            used.use_fake_user = True  # users 从 0 变成 1，等价于"文件里还在用它"
+            check(used.users == 1, "样本现在有 1 个使用者", used.users)
+            check(not os.path.exists(bpy.path.abspath(used.filepath)),
+                  "带使用者的样本源文件同样不在磁盘上")
+            check(_classify_missing(module, used_name) == "in_use",
+                  "_missing_image_names() 把它归到「仍在使用」一类")
+
+        bpy.data.use_autopack = True
+        result = bpy.ops.hhz.fix_missing_files()
+        check(result == {'FINISHED'}, "只剩带使用者的缺失项时算符返回 FINISHED", result)
+        check(bpy.data.images.get(used_name) is not None,
+              "仍在使用的缺失图像绝对不删（删了会改动用户场景）")
+        check(bpy.data.use_autopack is False,
+              "存在缺失项时自动打包资源被关闭", bpy.data.use_autopack)
+        check("查找缺失文件" in static and "未删除" in static,
+              "源码里对仍在使用的那类给了「查找缺失文件」的提示，且说明未删除")
+
+        if used is not None:
+            used.use_fake_user = False
+            bpy.data.images.remove(used)
+    finally:
+        # 复位，避免污染后面的用例
+        _clear_unused_missing_images()
+        try:
+            bpy.data.use_autopack = original_autopack
+        except Exception:
+            pass
 
 
 def test_theme(module):
@@ -1994,6 +2170,7 @@ def main():
     run("一键删除所有材质", test_materials)
     run("一键应用所有修改器", test_apply_modifiers, module)
     run("一键删除所有修改器", test_remove_modifiers)
+    run("检查并修复缺失文件", test_fix_missing_files, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
     run("主题颜色（N 面板）", test_theme, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
