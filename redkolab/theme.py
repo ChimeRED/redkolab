@@ -234,6 +234,90 @@ MISC_TARGETS = (
 )
 
 
+#: 3D 视图的编辑模式要素（顶点 / 边 / 面及其选中态）
+EDIT_TARGETS = (
+    ("view_3d.vertex_select", "顶点 选中", "3D 编辑模式"),
+    ("view_3d.vertex_active", "顶点 活动", "3D 编辑模式"),
+    ("view_3d.edge", "边", "3D 编辑模式"),
+    ("view_3d.edge_select", "边 选中", "3D 编辑模式"),
+    ("view_3d.edge_seam", "边 缝合线", "3D 编辑模式"),
+    ("view_3d.edge_sharp", "边 锐边", "3D 编辑模式"),
+    ("view_3d.edge_crease", "边 折痕", "3D 编辑模式"),
+    ("view_3d.edge_bevel", "边 倒角权重", "3D 编辑模式"),
+    ("view_3d.edge_facesel", "边 面选中", "3D 编辑模式"),
+    ("view_3d.face", "面", "3D 编辑模式"),
+    ("view_3d.face_select", "面 选中", "3D 编辑模式"),
+    ("view_3d.face_dot", "面 中心点", "3D 编辑模式"),
+    ("view_3d.editmesh_active", "编辑模式活动元素", "3D 编辑模式"),
+    ("view_3d.normal", "法线", "3D 编辑模式"),
+    ("view_3d.wire_edit", "编辑模式线框", "3D 编辑模式"),
+    ("view_3d.transform", "变换轴", "3D 编辑模式"),
+    ("view_3d.object_origin", "物体原点", "3D 编辑模式"),
+)
+
+#: UV 编辑与图像编辑器（UV 编辑是图像编辑器的一种模式，颜色都在 image_editor 上）
+UV_TARGETS = (
+    ("image_editor.vertex", "UV 顶点", "UV 与图像"),
+    ("image_editor.vertex_select", "UV 顶点 选中", "UV 与图像"),
+    ("image_editor.vertex_active", "UV 顶点 活动", "UV 与图像"),
+    ("image_editor.edge_select", "UV 边 选中", "UV 与图像"),
+    ("image_editor.face_select", "UV 面 选中", "UV 与图像"),
+    ("image_editor.editmesh_active", "UV 活动元素", "UV 与图像"),
+    ("image_editor.handle_vertex_select", "UV 手柄 选中", "UV 与图像"),
+    ("image_editor.grid", "图像网格", "UV 与图像"),
+    ("image_editor.back", "图像背景", "UV 与图像"),
+)
+
+#: 节点编辑器（着色器 / 几何节点 / 合成共用）
+NODE_TARGETS = (
+    ("node_editor.node_active", "活动节点", "节点编辑器"),
+    ("node_editor.selected_text", "选中节点文字", "节点编辑器"),
+    ("node_editor.frame_node", "节点框", "节点编辑器"),
+    ("node_editor.node_outline", "节点描边 5.x", "节点编辑器"),
+)
+
+#: 文本编辑器与控制台
+TEXT_TARGETS = (
+    ("text_editor.text", "文本正文", "文本与控制台"),
+    ("text_editor.cursor", "光标", "文本与控制台"),
+    ("text_editor.line_highlight", "当前行高亮", "文本与控制台"),
+    ("text_editor.selected_text", "选中文字", "文本与控制台"),
+    ("text_editor.syntax_string", "语法 字符串", "文本与控制台"),
+    ("text_editor.syntax_comment", "语法 注释", "文本与控制台"),
+    ("text_editor.syntax_special", "语法 关键字", "文本与控制台"),
+    ("console.text", "控制台文字", "文本与控制台"),
+    ("console.cursor", "控制台光标", "文本与控制台"),
+    ("console.line_error", "控制台错误行", "文本与控制台"),
+    ("console.select", "控制台选区", "文本与控制台"),
+)
+
+#: 信息编辑器与警告色
+INFO_TARGETS = (
+    ("info.info_text", "信息 正文", "信息与警告"),
+    ("info.info_selected_text", "信息 选中文字", "信息与警告"),
+    ("info.info_warning", "信息 警告", "信息与警告"),
+    ("info.info_error", "信息 错误", "信息与警告"),
+    ("info.info_debug", "信息 调试", "信息与警告"),
+    ("info.info_title", "信息 标题 5.x", "信息与警告"),
+)
+
+#: 面板层级（不同明度的深灰，避免所有面板一个色）
+def _panel_targets():
+    for prefix, label in (("view_3d", "3D 视图"),
+                          ("outliner", "大纲视图"),
+                          ("properties", "属性编辑器"),
+                          ("node_editor", "节点编辑器")):
+        yield ("{}.back".format(prefix), "{} 背景".format(label), "面板层级")
+        yield ("{}.text".format(prefix), "{} 文字".format(label), "面板层级")
+        yield ("{}.header".format(prefix), "{} 标题栏".format(label), "面板层级")
+        yield ("{}.tab_back".format(prefix), "{} 标签底".format(label), "面板层级")
+        yield ("{}.tab_active".format(prefix), "{} 活动标签".format(label), "面板层级")
+        yield ("{}.tab_inactive".format(prefix), "{} 非活动标签".format(label), "面板层级")
+
+
+PANEL_TARGETS = tuple(_panel_targets())
+
+
 def _widget_targets():
     """把控件家族 × 成员展开成 (路径, 标签, 分组) 三元组。
 
@@ -252,6 +336,12 @@ def _widget_targets():
 TARGETS = (
     tuple(_widget_targets())
     + GLOBAL_TARGETS
+    + EDIT_TARGETS
+    + UV_TARGETS
+    + NODE_TARGETS
+    + TEXT_TARGETS
+    + INFO_TARGETS
+    + PANEL_TARGETS
     + ICON_TARGETS
     + FRAME_TARGETS
     + VIEWPORT_TARGETS
@@ -259,16 +349,27 @@ TARGETS = (
 )
 
 #: 出厂默认值：**机械生成**（tools 里跑 4.0.2 / 4.2.23 / 5.2.2 三版导出的交集），
-#: 所以「恢复默认」写回去的就是真正的出厂值；没有记录到的项不会被瞎猜。
+#: 所以「恢复默认」写回去的就是真 出厂值；没有记录到的项不会被瞎猜。
 #: 三个表按运行版本合并使用，见 :func:`defaults_table`。
 #: 4.0 / 4.2 / 5.2 三个版本实测完全一致的出厂值（机械生成，别手改）
 DEFAULT_COLORS = {
+    "console.line_error": (1.0000, 0.3020, 0.5176, 1.0),
     "console.select": (1.0000, 1.0000, 1.0000, 0.1882),
     "dopesheet_editor.grid": (0.0863, 0.0863, 0.0863, 1.0),
     "file_browser.selected_file": (0.2784, 0.4471, 0.7020, 1.0),
     "graph_editor.grid": (0.1020, 0.1020, 0.1020, 1.0),
     "graph_editor.vertex": (0.0000, 0.0000, 0.0000, 1.0),
+    "image_editor.edge_select": (1.0000, 0.5216, 0.0000, 1.0),
+    "image_editor.editmesh_active": (1.0000, 1.0000, 1.0000, 0.2510),
+    "image_editor.face_select": (1.0000, 0.5216, 0.0000, 0.2353),
+    "image_editor.grid": (0.1882, 0.1882, 0.1882, 1.0),
+    "image_editor.vertex": (0.0000, 0.0000, 0.0000, 1.0),
+    "image_editor.vertex_select": (1.0000, 0.5216, 0.0000, 1.0),
+    "info.info_debug": (0.4196, 0.1961, 0.5765, 1.0),
     "info.info_selected": (0.2314, 0.3373, 0.5373, 1.0),
+    "info.info_selected_text": (1.0000, 1.0000, 1.0000, 1.0),
+    "node_editor.frame_node": (0.0588, 0.0588, 0.0588, 0.8000),
+    "node_editor.node_active": (1.0000, 1.0000, 1.0000, 1.0),
     "node_editor.node_backdrop": (0.1882, 0.1882, 0.1882, 1.0),
     "node_editor.node_selected": (0.9294, 0.3412, 0.0000, 1.0),
     "node_editor.wire": (0.1020, 0.1020, 0.1020, 1.0),
@@ -278,6 +379,9 @@ DEFAULT_COLORS = {
     "outliner.selected_highlight": (0.1137, 0.1922, 0.3020, 1.0),
     "outliner.selected_object": (0.9137, 0.4157, 0.0000, 1.0),
     "text_editor.selected_text": (0.3020, 0.3020, 0.3020, 1.0),
+    "text_editor.syntax_comment": (0.5765, 0.5765, 0.5765, 1.0),
+    "text_editor.syntax_special": (0.4078, 0.6157, 0.0235, 1.0),
+    "text_editor.syntax_string": (0.9020, 0.8353, 0.4510, 1.0),
     "user_interface.icon_collection": (1.0000, 1.0000, 1.0000, 1.0),
     "user_interface.icon_folder": (0.8000, 0.6784, 0.3882, 1.0),
     "user_interface.icon_modifier": (0.4549, 0.6353, 1.0000, 1.0),
@@ -416,20 +520,29 @@ DEFAULT_COLORS = {
     "user_interface.wcol_tooltip.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
     "view_3d.bone_pose": (0.3137, 0.7843, 1.0000, 1.0),
     "view_3d.camera": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.editmesh_active": (1.0000, 1.0000, 1.0000, 0.2000),
     "view_3d.empty": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.face": (1.0000, 1.0000, 1.0000, 0.0078),
     "view_3d.grid": (0.3294, 0.3294, 0.3294, 0.5020),
     "view_3d.light": (0.0000, 0.0000, 0.0000, 0.3137),
+    "view_3d.normal": (0.1333, 0.8667, 0.8667, 1.0),
     "view_3d.object_active": (1.0000, 0.6275, 0.1569, 1.0),
     "view_3d.object_selected": (0.9294, 0.3412, 0.0000, 1.0),
     "view_3d.space.gradients.gradient": (0.1882, 0.1882, 0.1882, 1.0),
     "view_3d.space.gradients.high_gradient": (0.2392, 0.2392, 0.2392, 1.0),
+    "view_3d.transform": (1.0000, 1.0000, 1.0000, 1.0),
     "view_3d.vertex": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.vertex_select": (1.0000, 0.4784, 0.0000, 1.0),
     "view_3d.wire": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.wire_edit": (0.0000, 0.0000, 0.0000, 1.0),
 }
 
 #: 5.x 专属项，或 5.x 与 4.x 取值不同的项（只在 5.x 上用）
 DEFAULT_COLORS_5X = {
+    "console.cursor": (0.4431, 0.6588, 1.0000, 1.0),
     "node_editor.grid": (0.1882, 0.1882, 0.1882, 1.0),
+    "node_editor.node_outline": (1.0000, 1.0000, 1.0000, 0.1490),
+    "text_editor.cursor": (0.4431, 0.6588, 1.0000, 1.0),
     "user_interface.editor_outline": (1.0000, 1.0000, 1.0000, 0.0824),
     "user_interface.editor_outline_active": (1.0000, 1.0000, 1.0000, 0.1647),
     "user_interface.icon_autokey": (0.6706, 0.2353, 0.2824, 1.0),
@@ -464,6 +577,8 @@ DEFAULT_COLORS_5X = {
     "user_interface.wcol_tool.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
     "user_interface.wcol_toolbar_item.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
     "user_interface.wcol_tooltip.outline_sel": (0.1412, 0.1412, 0.1412, 1.0),
+    "view_3d.edge_select": (1.0000, 0.6000, 0.0000, 1.0),
+    "view_3d.face_select": (1.0000, 0.6392, 0.0000, 0.2000),
 }
 
 #: 4.x 专属项，或与 5.x 取值不同的项（只在 4.x 上用）
@@ -477,14 +592,24 @@ DEFAULT_COLORS_4X = {
     "graph_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
     "graph_editor.time_scrub_background": (0.0863, 0.0863, 0.0863, 1.0),
     "image_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "image_editor.handle_vertex_select": (1.0000, 1.0000, 0.0000, 1.0),
+    "info.info_error": (0.7020, 0.2980, 0.2039, 1.0),
+    "info.info_warning": (0.6745, 0.5294, 0.2157, 1.0),
     "nla_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
     "nla_editor.time_scrub_background": (0.0863, 0.0863, 0.0863, 1.0),
     "node_editor.grid": (0.1569, 0.1569, 0.1569, 1.0),
+    "node_editor.selected_text": (0.4980, 0.4980, 0.4980, 1.0),
     "properties.active_modifier": (0.2784, 0.4471, 0.7020, 1.0),
     "sequence_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
     "sequence_editor.time_scrub_background": (0.0706, 0.0706, 0.0706, 1.0),
     "user_interface.editor_outline": (0.0863, 0.0863, 0.0863, 1.0),
     "user_interface.wcol_list_item.outline": (0.1765, 0.1765, 0.1765, 1.0),
+    "view_3d.edge_bevel": (0.0000, 0.6471, 1.0000, 1.0),
+    "view_3d.edge_crease": (0.8000, 0.0000, 0.6000, 1.0),
+    "view_3d.edge_facesel": (0.2941, 0.2941, 0.2941, 1.0),
+    "view_3d.edge_seam": (0.8588, 0.1451, 0.0706, 1.0),
+    "view_3d.edge_sharp": (0.0000, 1.0000, 1.0000, 1.0),
+    "view_3d.face_dot": (1.0000, 0.5412, 0.0000, 1.0),
     "view_3d.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
 }
 
@@ -496,20 +621,55 @@ DEFAULT_COLORS_4X = {
 
 #: 失落星船 马拉松 的界面配色（照着游戏实拍图取色）
 #: 近黑底 + 浅灰任务卡 + 酸性黄绿主行动色（READY 按钮）+ 洋红 / 青蓝点缀
+#: ---------------------------------------------------------------- 设计 Token
+#: 集中管理的配色变量：改这一块就能整体换风格，别在下面散落 RGB。
+#: 取自《失落星船 马拉松》实拍图：近黑底 + 亮黄绿关键状态 + 浅灰卡 + 极细分隔线。
+TOKENS = {
+    "BG_PRIMARY": "#0B0D12",        # 主背景：编辑器底、3D 视口
+    "BG_SECONDARY": "#11151C",      # 次级背景：交替行、输入框
+    "BG_PANEL": "#141821",          # 面板背景
+    "BG_ELEVATED": "#1E2430",       # 浮起面板：菜单、弹出、活动标签
+    "ACCENT_PRIMARY": "#D6F32B",    # 主强调：荧光黄绿（选中态、关键按钮）
+    "ACCENT_SECONDARY": "#3FB6E0",  # 次强调：冷青（活动态、次要标识）
+    "ACCENT_TERTIARY": "#E85BC8",   # 第三强调：洋红（少量点缀，不铺开）
+    "TEXT_PRIMARY": "#DDE3E8",      # 主要文字
+    "TEXT_SECONDARY": "#9AA3AD",    # 次级文字
+    "TEXT_DISABLED": "#5A626B",     # 禁用文字（Blender 只有可改的那几处）
+    "TEXT_ON_ACCENT": "#0B0D12",    # 强调色上的文字（黄绿配黑字）
+    "BORDER_SUBTLE": "#2A3038",     # 低对比分隔线
+    "BORDER_STRONG": "#3C444E",     # 需要一点存在感的边框
+    "STATE_SELECTED": "#D6F32B",    # 选中
+    "STATE_ACTIVE": "#3FB6E0",      # 活动
+    "STATE_WARNING": "#E8B33C",     # 警告
+    "STATE_ERROR": "#E0433A",       # 错误 / 危险
+    "CARD": "#C4C6C9",              # 浅灰卡片（实拍图里的任务卡纸面）
+    "CARD_TEXT": "#0B0D12",         # 卡片上的近黑文字
+}
+
+
+def token(name, alpha=1.0):
+    """取设计 Token（hex -> 0-1 浮点）。"""
+    return hex_color(TOKENS.get(name, "#FFFFFF"), alpha)
+
+
+#: 与实拍图一一对应的色名（Token 的别名，旧代码继续可用）
 MARATHON = {
-    "lime": "#D6F32B",        # 主行动色：READY 按钮、警示文字、罗盘标记
+    "lime": TOKENS["ACCENT_PRIMARY"],
     "lime_dim": "#9FB420",
-    "magenta": "#E85BC8",     # 任务横幅、货币数字、队伍标识
+    "magenta": TOKENS["ACCENT_TERTIARY"],
     "magenta_dim": "#A03E8B",
-    "cyan": "#3FB6E0",        # 副标题、次要标识（HUD 里的 IN A SINGLE RUN）
+    "cyan": TOKENS["ACCENT_SECONDARY"],
     "cyan_dim": "#2A7E9E",
-    "crimson": "#E03A2F",     # 危险 / 禁止
-    "card": "#C4C6C9",        # 浅灰任务卡底色
+    "crimson": TOKENS["STATE_ERROR"],
+    "card": TOKENS["CARD"],
     "card_edge": "#8A8F96",
-    "ink": "#0B0D12",         # 近黑：卡片上的文字、HUD 底色
-    "panel": "#141821",       # 深色面板
-    "panel_hi": "#1E2430",    # 深色面板（亮一档）
-    "text": "#DDE3E8",        # 暗底上的浅灰文字
+    "ink": TOKENS["BG_PRIMARY"],
+    "panel": TOKENS["BG_PANEL"],
+    "panel_hi": TOKENS["BG_ELEVATED"],
+    "text": TOKENS["TEXT_PRIMARY"],
+    "text_dim": TOKENS["TEXT_SECONDARY"],
+    "border": TOKENS["BORDER_SUBTLE"],
+    "warning": TOKENS["STATE_WARNING"],
 }
 
 #: 旧名字保留（早期版本叫 ACID）
@@ -795,7 +955,87 @@ def _marathon_frame_colors(accent):
 
 
 #: 配色预设：照着失落星船 马拉松 的三张实拍图做的
+def _marathon_preset_work():
+    """适合长时间建模的低干扰版本：近黑面板 + 黄绿只用在选中态，边框压到几乎看不见。
+
+    实拍图里"黄绿只出现在关键状态"的克制感就是这套的思路：
+    大面积是炭黑与低对比灰，强调色只落在当前选中 / 活动的东西上。
+    """
+    base = TOKENS["BG_PANEL"]
+    text = TOKENS["TEXT_PRIMARY"]
+    colors = {}
+    for prefix, _label in WIDGET_FAMILIES:
+        colors[family_path(prefix, "inner")] = hex_color(base)
+        colors[family_path(prefix, "text")] = hex_color(text)
+        colors[family_path(prefix, "outline")] = hex_color(TOKENS["BORDER_SUBTLE"])
+        colors[family_path(prefix, "inner_sel")] = hex_color(TOKENS["ACCENT_PRIMARY"])
+        colors[family_path(prefix, "text_sel")] = hex_color(TOKENS["TEXT_ON_ACCENT"])
+        colors[family_path(prefix, "outline_sel")] = hex_color(TOKENS["ACCENT_PRIMARY"])
+        colors[family_path(prefix, "item")] = hex_color(TOKENS["ACCENT_PRIMARY"])
+    colors.update({
+        "user_interface.wcol_list_item.inner": hex_color(base, 0.0),
+        "user_interface.wcol_scroll.inner": hex_color(base, 0.0),
+        "user_interface.wcol_menu_back.inner": hex_color(TOKENS["BG_ELEVATED"]),
+        "user_interface.wcol_menu_back.text": hex_color(text),
+        "user_interface.wcol_pie_menu.inner": hex_color(TOKENS["BG_ELEVATED"]),
+        "user_interface.wcol_pie_menu.text": hex_color(text),
+        "user_interface.wcol_tab.inner": hex_color(TOKENS["BG_PRIMARY"]),
+        "user_interface.wcol_tab.text": hex_color(TOKENS["TEXT_SECONDARY"]),
+        "user_interface.wcol_tab.inner_sel": hex_color(TOKENS["BG_ELEVATED"]),
+        "user_interface.wcol_tab.text_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_text.inner": hex_color(TOKENS["BG_SECONDARY"]),
+        "user_interface.wcol_text.text": hex_color(text),
+        "user_interface.wcol_text.inner_sel": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "user_interface.wcol_text.text_sel": hex_color(TOKENS["TEXT_ON_ACCENT"]),
+        "user_interface.wcol_box.inner": hex_color(TOKENS["BG_SECONDARY"], 0.5),
+        "user_interface.wcol_box.inner_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_list_item.inner_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.panel_active": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        # 面板层级：近黑 -> 面板 -> 浮起，三级区分
+        "view_3d.back": hex_color(TOKENS["BG_PRIMARY"]),
+        "outliner.back": hex_color(TOKENS["BG_PANEL"]),
+        "properties.back": hex_color(TOKENS["BG_PANEL"]),
+        "node_editor.back": hex_color(TOKENS["BG_PRIMARY"]),
+        "outliner.header": hex_color(TOKENS["BG_ELEVATED"]),
+        "properties.header": hex_color(TOKENS["BG_ELEVATED"]),
+        "outliner.tab_back": hex_color(TOKENS["BG_PANEL"]),
+        "outliner.tab_active": hex_color(TOKENS["BG_ELEVATED"]),
+        "outliner.tab_inactive": hex_color(TOKENS["BG_PRIMARY"]),
+        "properties.tab_back": hex_color(TOKENS["BG_PANEL"]),
+        "properties.tab_active": hex_color(TOKENS["BG_ELEVATED"]),
+        "properties.tab_inactive": hex_color(TOKENS["BG_PRIMARY"]),
+        # 3D 编辑模式：顶点白、选中黄绿、缝合/锐边/折痕各自可辨
+        "view_3d.editmesh_active": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "view_3d.vertex_select": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "view_3d.vertex_active": hex_color("#FFFFFF"),
+        "view_3d.edge_select": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "view_3d.face_select": hex_color(TOKENS["ACCENT_PRIMARY"], 0.5),
+        "view_3d.edge_seam": hex_color(TOKENS["STATE_ERROR"]),
+        "view_3d.edge_sharp": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "view_3d.edge_crease": hex_color(TOKENS["ACCENT_TERTIARY"]),
+        "view_3d.edge_bevel": hex_color(TOKENS["STATE_WARNING"]),
+        "view_3d.wire_edit": hex_color(TOKENS["TEXT_SECONDARY"]),
+        "view_3d.grid": hex_color(TOKENS["BORDER_SUBTLE"], 0.5),
+        "view_3d.normal": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        # 状态色语义
+        "user_interface.wcol_state.inner_changed": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_state.inner_changed_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_state.inner_anim": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "user_interface.wcol_state.inner_anim_sel": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "user_interface.wcol_state.inner_key": hex_color(TOKENS["TEXT_PRIMARY"]),
+        "user_interface.wcol_state.inner_key_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_state.inner_driven": hex_color(TOKENS["ACCENT_TERTIARY"]),
+        "user_interface.wcol_state.inner_driven_sel": hex_color(TOKENS["ACCENT_TERTIARY"]),
+        "user_interface.wcol_state.inner_overridden": hex_color(TOKENS["STATE_ERROR"]),
+        "user_interface.wcol_state.inner_overridden_sel": hex_color(TOKENS["STATE_ERROR"]),
+    })
+    colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY"])))
+    colors.update(_marathon_frame_colors(hex_color(TOKENS["ACCENT_PRIMARY"])))
+    return {path: color for path, color in colors.items() if color is not None}
+
+
 PRESETS = (
+    ("马拉松 建模 低干扰", _marathon_preset_work()),
     ("马拉松 浅灰卡", _marathon_preset("card")),
     ("马拉松 暗色 HUD", _marathon_preset("hud")),
     ("马拉松 洋红警戒", _marathon_preset("alert")),
