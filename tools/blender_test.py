@@ -19,6 +19,7 @@ BLENDER_USER_EXTENSIONS 环境变量把配置目录指到临时目录，就不�
 """
 
 import ast
+import colorsys
 import glob
 import os
 import re
@@ -949,6 +950,19 @@ def _isolated_config_dir():
     return config
 
 
+def _read_startup_file(config):
+    """读回沙箱启动文件里的 ``(工作区名清单, 物体名清单)``（不追加任何东西）。
+
+    用纯数据 API ``bpy.data.libraries.load`` 只读清单、不赋值给 ``target``，
+    所以不会真的把启动文件里的数据块拉进当前会话。
+    """
+    path = os.path.join(config, "startup.blend")
+    if not os.path.exists(path):
+        return [], []
+    with bpy.data.libraries.load(path) as (source, _target):
+        return list(source.workspaces), list(source.objects)
+
+
 def class_source(source, class_name):
     """按函数/类边界取出某个类的源码段（静态检查报告文案用）。
 
@@ -1010,6 +1024,29 @@ def _api_calls(source, dotted):
         if list(reversed(names)) == parts:
             lines.append(node.lineno)
     return lines
+
+
+def _call_keywords(source, dotted):
+    """源码里 ``dotted(...)`` 这次调用带了哪些关键字参数（AST 读，注释不算）。
+
+    返回 ``None`` 表示源码里根本没有这次调用；返回 ``[]`` 表示调用了但不带参数。
+    用途：确认 ``bpy.ops.wm.read_homefile()`` 是**裸调用**（注释里写
+    ``use_factory_startup=True`` 不能算数）。
+    """
+    parts = dotted.split(".")
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        names = []
+        func = node.func
+        while isinstance(func, ast.Attribute):
+            names.append(func.attr)
+            func = func.value
+        if isinstance(func, ast.Name):
+            names.append(func.id)
+        if list(reversed(names)) == parts:
+            return sorted(keyword.arg for keyword in node.keywords)
+    return None
 
 
 def test_fix_missing_files(module):
@@ -1677,16 +1714,40 @@ def test_theme(module):
     # 必须都能被恢复回来。
     recorded = theme.default_paths()
     check(len(recorded) >= 150, "记录的出厂默认值项数 >= 150", len(recorded))
+    # 按运行版本过滤（这就是 CI 上 4.5.14 唯一那条 [FAIL] 的根因）：
+    # 默认值表是真机 dump 出来的（4X 表来自 4.0 / 4.2），里面的 info.info_error /
+    # info.info_warning 在 4.5 上已经被 Blender 删掉（状态色搬到了
+    # user_interface.wcol_state.*）。表里留着它们是对的（4.2 上真的存在），
+    # 但核对时只能查**本版本真的存在**的那些，否则会把"本版本没有这一项"误报成"没恢复"。
+    present = theme.available_default_paths(current, recorded)
+    absent_in_version = theme.absent_default_paths(current, recorded)
+    check(len(present) + len(absent_in_version) == len(recorded),
+          "「本版本可用」+「本版本不存在」= 记录总数（过滤口径完整，不丢项）",
+          (len(present), len(absent_in_version), len(recorded)))
+    check(all(theme.resolve(current, item) is None for item in absent_in_version),
+          "被过滤掉的那些在本版本上确实不存在（不是随便丢的）",
+          absent_in_version[:4])
     theme.restore_defaults(current, recorded)
     not_restored = []
-    for item in recorded:
+    for item in present:
         live = theme.get_color(current, item)
         expected = theme.default_of(item)
         if live is None or expected is None or not theme.color_close(live, expected):
             not_restored.append("{}: {} != {}".format(item, live, expected))
     check(not not_restored,
-          "全部恢复之后每一项都回到记录的出厂值（{} 项）".format(len(recorded)),
+          "全部恢复之后每一项都回到记录的出厂值（记录 {} 项 / 本版本可用 {} 项，"
+          "另有 {} 项本版本不存在已跳过）".format(
+              len(recorded), len(present), len(absent_in_version)),
           not_restored[:6])
+    # 版本过滤机制本身：本版本不存在的路径既不会被列进可用、也不会被算成恢复成功
+    bogus_path = "user_interface.hhz_not_a_real_color_path"
+    check(theme.available_default_paths(current, [bogus_path]) == []
+          and theme.absent_default_paths(current, [bogus_path]) == [bogus_path],
+          "版本过滤：本版本不存在的路径被排除，并出现在 absent_default_paths 里",
+          (theme.available_default_paths(current, [bogus_path]),
+           theme.absent_default_paths(current, [bogus_path])))
+    check(theme.restore_defaults(current, [bogus_path]) == 0,
+          "本版本不存在的路径不会被算成「恢复成功」（不误报）")
     for item in ("outliner.selected_highlight", "outliner.active", "file_browser.selected_file",
                  "properties.active_modifier", "user_interface.editor_outline"):
         if item in listed_set:
@@ -1951,12 +2012,29 @@ def test_preset_death_stranding(module):
         "bg": "#14171A", "panel": "#1C2024", "elevated": "#262B30",
         "line": "#3A4046", "text": "#D6DADE", "text_dim": "#8A9299",
         "blue": "#4B7FA8", "blue_dim": "#2E4E68", "orange": "#D08A2E",
+        # 视口选中专用的**高饱和橙**：由 orange 同色相派生（见 theme.py 的推导注释）
+        "orange_vivid": "#E0840B",
         "orange_dim": "#8A5A1E", "steel": "#6E7B85", "red": "#B4453C",
         "warn": "#C9A227", "disabled": "#5A626B",
     }
     check(theme.STRANDING == expected_palette,
           "「死亡搁浅」色表是集中管理的一份字典，且逐项等于确认过的调色板",
           (theme.STRANDING, expected_palette))
+    # 派生关系必须成立：同色相（±1°）、饱和度被推到 >= 0.9、明度不低于原橙
+    orange_hsv = colorsys.rgb_to_hsv(*theme.stranding_color("orange")[:3])
+    vivid_hsv = colorsys.rgb_to_hsv(*theme.stranding_color("orange_vivid")[:3])
+    check(abs(vivid_hsv[0] - orange_hsv[0]) < 1.0 / 360.0,
+          "高饱和橙与点缀橙**同色相**（不臆造新色相；实测 {:.1f}° vs {:.1f}°）".format(
+              orange_hsv[0] * 360.0, vivid_hsv[0] * 360.0),
+          (orange_hsv, vivid_hsv))
+    check(vivid_hsv[1] >= 0.9,
+          "高饱和橙的饱和度 >= 0.9（实测 {:.3f}，原橙 {:.3f}）".format(
+              vivid_hsv[1], orange_hsv[1]),
+          vivid_hsv)
+    check(vivid_hsv[2] >= orange_hsv[2],
+          "高饱和橙的明度不低于原橙（实测 {:.3f} vs {:.3f}）".format(
+              vivid_hsv[2], orange_hsv[2]),
+          (vivid_hsv[2], orange_hsv[2]))
 
     name = "死亡搁浅"
     check(name in theme.preset_names(), "预设清单里有「死亡搁浅」", theme.preset_names())
@@ -1996,8 +2074,8 @@ def test_preset_death_stranding(module):
           "整套预设里的暖色路径**就是**白名单那 {} 条（清单外出现一条就失败）".format(
               len(theme.STRANDING_WARM_PATHS)),
           (warm_paths, sorted(theme.STRANDING_WARM_PATHS)))
-    check(len(theme.STRANDING_WARM_PATHS) <= 8,
-          "点缀暖色路径有数量上限（<= 8，防止以后被铺开）",
+    check(len(theme.STRANDING_WARM_PATHS) <= 12,
+          "点缀暖色路径有数量上限（<= 12：原 8 条 + 视口选中 4 条，防止以后被铺开）",
           len(theme.STRANDING_WARM_PATHS))
     orange_paths = [path for path, color in colors.items()
                     if theme.color_close(color, theme.stranding_color("orange"))
@@ -2005,8 +2083,45 @@ def test_preset_death_stranding(module):
     check(sorted(orange_paths) == ["user_interface.panel_active",
                                    "user_interface.wcol_state.inner_changed",
                                    "user_interface.wcol_state.inner_changed_sel"],
-          "DS_BLUE 之外，调色板里的橙只落在「活动面板标题 + 已修改状态」这三处",
+          "界面上的「点缀橙」仍只落在「活动面板标题 + 已修改状态」这三处（视口用高饱和橙）",
           sorted(orange_paths))
+
+    # ---- 视口里被选中的几何：换成高饱和橙（用户原话："选中线换成高饱和的橙色"）----
+    vivid = theme.stranding_color("orange_vivid")
+    vivid_saturation = theme.saturation_of(vivid)
+    background = theme.stranding_color("bg")
+    panel = theme.stranding_color("panel")
+    print("  死亡搁浅视口选中色 {} 饱和度 {:.3f}（与 DS_BG 亮度差 {:.3f} / 与 DS_PANEL 亮度差 {:.3f}）".format(
+        theme.color_to_hex(vivid), vivid_saturation,
+        abs(theme.luminance(vivid) - theme.luminance(background)),
+        abs(theme.luminance(vivid) - theme.luminance(panel))))
+    for path in theme.VIEWPORT_SELECTION_PATHS:
+        color = colors.get(path)
+        check(color is not None,
+              "「死亡搁浅」{} 有显式赋值（视口选中色不能留空）".format(path))
+        if color is None:
+            continue
+        check(theme.saturation_of(color) >= 0.9,
+              "「死亡搁浅」{} 饱和度 >= 0.9（实测 {:.3f}）".format(
+                  path, theme.saturation_of(color)),
+              (theme.color_to_hex(color), theme.saturation_of(color)))
+        check(theme.color_close(color, vivid, 0.02)
+              or (len(color) > 3 and color[3] < 0.999
+                  and theme.color_close(color[:3] + (1.0,), vivid, 0.02)),
+              "「死亡搁浅」{} 就是调色板里的高饱和橙 {}（面选中允许保留 50% alpha）".format(
+                  path, theme.color_to_hex(vivid)),
+              (theme.color_to_hex(color), theme.color_to_hex(vivid)))
+        gap = min(abs(theme.luminance(color) - theme.luminance(background)),
+                  abs(theme.luminance(color) - theme.luminance(panel)))
+        check(gap >= 0.3,
+              "「死亡搁浅」{} 与视口背景 / 面板底的亮度差 >= 0.3（实测 {:.3f}）".format(
+                  path, gap),
+              (theme.luminance(color), theme.luminance(background), theme.luminance(panel)))
+    # 界面控件**不许**跟着一起改橙（用户要的只是"视口里的选中线"）
+    widget_warm = [prefix for prefix, _label in theme.WIDGET_FAMILIES
+                   if theme.warm_accent(colors.get(theme.family_path(prefix, "inner_sel")))]
+    check(not widget_warm,
+          "「死亡搁浅」的界面控件选中态仍然是蓝（没有整族改成橙）", widget_warm)
 
     # ---- 文字：灰白，不用纯白铺陈 ----
     whites = [path for path, color in colors.items() if min(color[:3]) >= 0.99]
@@ -2231,7 +2346,7 @@ def test_preset_deep_accent_families(module):
 #: 所以下面另有一条"不许等于低饱和档"的断言；两条一起才是完整防线。
 VIEWPORT_SELECTION_MIN_SATURATION = 0.6
 
-#: 用鲜亮档视口选中色的两套预设（「死亡搁浅」不在这里：它用调色板里的蓝）。
+#: 用鲜亮档视口选中色的两套预设（「死亡搁浅」不在这里：它用高饱和橙，另有断言守着）。
 VIEWPORT_SELECTION_PRESETS = ("马拉松 建模 低干扰", "马拉松 浅灰卡")
 
 #: 「界面控件的低饱和档没有被连带改亮」的代表性路径（普通按钮 / 分组框 / 列表行）。
@@ -2255,10 +2370,10 @@ def test_viewport_selection_accent(module):
     print("  视口选中几何：鲜亮档 {} 饱和度 {:.3f} / 低饱和档 {} 饱和度 {:.3f}".format(
         theme.color_to_hex(bright), theme.saturation_of(bright),
         theme.color_to_hex(calm), theme.saturation_of(calm)))
-    # 「死亡搁浅」本次**只测量、不改色**（在下面单独打印实测值，供报告取证）
+    # 「死亡搁浅」的视口选中色已改成高饱和橙（详见 test_preset_death_stranding）
     death_stranding = theme.preset_colors("死亡搁浅") or {}
     ds_edge = death_stranding.get("view_3d.edge_select")
-    print("  死亡搁浅视口选中色 {} 饱和度 {:.3f}（本次不改 DS，仅记录）".format(
+    print("  死亡搁浅视口选中色 {} 饱和度 {:.3f}（高饱和橙，详见死亡搁浅那节）".format(
         theme.color_to_hex(ds_edge), theme.saturation_of(ds_edge)))
 
     check(tuple(theme.VIEWPORT_SELECTION_PATHS) == (
@@ -2325,6 +2440,45 @@ def test_viewport_selection_accent(module):
               VIEWPORT_SELECTION_PRESETS[0], VIEWPORT_SELECTION_MIN_SATURATION,
               {path: round(value, 3) for path, value in sorted(live.items())}),
           below)
+
+    # ---- 颜色到顶之后靠线宽：ThemeView3D.edge_width（真正的 bl_rna 实测，不凭记忆）----
+    size_path = "view_3d.edge_width"
+    check(theme.resolve_size(current, size_path) is not None,
+          "本版本真的有 {}（bl_rna 实测：INT + PIXEL 子类型）".format(size_path),
+          theme.resolve_size(current, size_path))
+    check(theme.get_color(current, size_path) is None,
+          "它**不是**颜色项（颜色那套读不到它，所以两套路径分开）")
+    before_width = theme.get_size(current, size_path)
+    writable = theme.set_size(current, size_path, 3)
+    check(writable and theme.get_size(current, size_path) == 3,
+          "{} 可写（写入 3 后读回实测 {}）".format(size_path, theme.get_size(current, size_path)),
+          (writable, theme.get_size(current, size_path)))
+    theme.set_size(current, size_path, before_width if before_width is not None else 1)
+    check(theme.size_default(size_path) == 1,
+          "出厂默认值记为 1（三版 factory-startup 实测）", theme.size_default(size_path))
+    check(theme.MARATHON_VIEWPORT_SIZES == {size_path: 2},
+          "两套马拉松预设把选中边线宽写成 2（粗一档）", theme.MARATHON_VIEWPORT_SIZES)
+    check(set(theme.MARATHON_PRESET_NAMES) <= set(theme.preset_names()),
+          "MARATHON_PRESET_NAMES 里的名字都真的在预设表里",
+          (theme.MARATHON_PRESET_NAMES, theme.preset_names()))
+    size_missing = [name for name in theme.MARATHON_PRESET_NAMES
+                    if theme.preset_sizes(name) != {size_path: 2}]
+    check(not size_missing,
+          "两套马拉松预设都返回这份尺寸表", size_missing)
+    check(theme.preset_sizes("死亡搁浅") == {},
+          "「死亡搁浅」不碰线宽（它这一版只换视口选中的颜色）",
+          theme.preset_sizes("死亡搁浅"))
+    # 走真实算符：套用马拉松预设 -> 主题里的线宽真的变成 2 -> 「恢复全部」写回 1
+    result = bpy.ops.hhz.theme_apply_preset(preset=theme.MARATHON_PRESET_NAMES[0])
+    check(result == {'FINISHED'}, "「应用预设」算符在马拉松预设上返回 FINISHED", result)
+    live_width = theme.get_size(current, size_path)
+    check(live_width == 2,
+          "套用「{}」之后实际主题里的线宽 = 2（读回实测 {}）".format(
+              theme.MARATHON_PRESET_NAMES[0], live_width), live_width)
+    check(theme.restore_size_defaults(current) >= 1,
+          "视口尺寸能一键写回默认（「恢复全部」里有这一步）")
+    check(theme.get_size(current, size_path) == 1,
+          "写回之后线宽 = 1（读回实测 {}）".format(theme.get_size(current, size_path)))
 
 
 #: 颜色项下拉标签的平均 UTF-8 字节长度上限（缓解弹出框里的宽度截断）。
@@ -2459,10 +2613,73 @@ def test_startup_layout(module):
           "无头环境里 4.x 的 is_dirty 恒为 True 不会把功能锁死（只在文件已落盘时放行）")
     check("libraries.write" in static and "LAYOUT_LIBRARY_NAME" in source,
           "先把工作区写进布局库（libraries.write，配置目录里的固定名字）")
-    check("read_homefile" in static and "use_factory_startup=True" in static,
-          "载入工厂启动文件用的是 read_homefile(use_factory_startup=True)（不重置偏好设置）")
-    check("use_empty=True" in static,
-          "并且 use_empty=True —— 启动文件是**空场景**，不带当前场景")
+    # 幂等的根因修复：不能再从出厂启动文件重新开始
+    # （出厂启动文件里必然有同名自带工作区 -> 每点一次就多一批「出厂 xxx」）
+    read_keywords = _call_keywords(source, "bpy.ops.wm.read_homefile")
+    check(read_keywords == [],
+          "载入的是**上次保存的启动文件**：bpy.ops.wm.read_homefile() 是裸调用，"
+          "一个关键字参数都不带（不带 use_factory_startup）",
+          read_keywords)
+    check("use_empty" not in static,
+          "不再依赖 use_empty=True —— 空场景改成读进来之后自己清（_empty_scene_data）")
+    empty_helper = function_source(source, "_empty_scene_data")
+    check("list(bpy.data.objects)" in empty_helper
+          and bool(_api_calls(empty_helper, "bpy.data.objects.remove")),
+          "场景数据用纯数据 API 逐个移除（bpy.data.objects.remove，不用算子）",
+          empty_helper[:200])
+    check("orphans_purge" in empty_helper and "do_recursive=True" in empty_helper,
+          "移除物体之后清理孤儿数据（orphans_purge(do_recursive=True)）", empty_helper[:400])
+    check("bpy.data.workspaces" not in empty_helper,
+          "清场景**不碰工作区**（工作区布局正是要留下的东西）", empty_helper[:200])
+    # ---- 幂等：同名 + 同区域构成才跳过 ----
+    plan_helper = function_source(source, "_plan_workspace_appends")
+    present_helper = function_source(source, "_workspace_already_present")
+    composition_helper = function_source(source, "_workspace_composition")
+    check("_workspace_already_present" in plan_helper and "target.workspaces = wanted" in static,
+          "追加前先挑出「启动文件里没有的」，只追加这些（幂等的关键一步）", plan_helper[:300])
+    check("_workspace_composition" in present_helper,
+          "判据是**区域构成**，不是只看名字（同名但构成不同算不同工作区）", present_helper[:300])
+    check("screen" in composition_helper and "area" in composition_helper
+          and "sorted" in composition_helper,
+          "区域构成 = 各区域 type 的多重集合（sorted 成可比较的元组）",
+          composition_helper[:300])
+    check("bpy.data.workspaces.get(name)" in present_helper,
+          "按名字查启动文件里现有的工作区（查不到就是要追加）", present_helper[:300])
+    check("{name}" not in composition_helper and "as_pointer" not in composition_helper,
+          "构成快照按**名字**索引（切文件前后对象变了，指针不可用）", composition_helper[:200])
+    # ---- 落盘前校验：三条都写在源码里 ----
+    check("lost_names" in static and "校验不通过" in static,
+          "落盘前校验①：用户的工作区一个都没丢（名字集合 ⊇ 运行前记录的集合）")
+    check("pairs_left" in static and "_workspace_collision_pairs()" in static,
+          "落盘前校验②：不存在「X」与「X.<数字>」并存")
+    check("objects_left" in static,
+          "落盘前校验③：物体数为 0（启动文件是空场景）")
+    check("return restore_original" in static and static.count("校验不通过") >= 3,
+          "三条校验任何一条不过都**不写**启动文件（return restore_original）",
+          static.count("校验不通过"))
+    check("LAST_STARTUP_LAYOUT_RESULT" in source and "appended_total" in source,
+          "本次结果（新增 / 跳过）记在模块级变量里，供真机测试直接断言（不是设置项）")
+    # ---- 报告文案：新增几个 / 跳过几个 / 空场景 / 出厂项怎么删 ----
+    report_helper = function_source(source, "startup_report_parts")
+    check("startup_report_parts" in static and "本次新增" in report_helper,
+          "报告文案由 startup_report_parts 生成，明说本次新增几个", report_helper[:200])
+    report_both = "；".join(module.ops.startup_report_parts(["A", "B"], ["C", "D", "E"], []))
+    check("本次新增 2 个工作区" in report_both,
+          "新增数如实写进报告", report_both)
+    check("跳过 3 个已存在的" in report_both and "同名且区域构成相同" in report_both,
+          "跳过数 + 原因（同名且区域构成相同）如实写进报告", report_both)
+    report_zero = "；".join(module.ops.startup_report_parts([], ["C"], []))
+    check("本次新增 0 个工作区" in report_zero,
+          "一个都没新增时报告说的是 0（连点两次就是这个结果）", report_zero)
+    check("空场景" in report_zero and "不含当前场景" in report_zero,
+          "报告说清启动文件仍是空场景、不含当前场景", report_zero)
+    report_factory = "；".join(module.ops.startup_report_parts([], [], ["出厂 建模", "出厂 雕刻"]))
+    check("还留着 2 个带「出厂」前缀的工作区" in report_factory,
+          "启动文件里残留的「出厂 xxx」数量如实报出", report_factory)
+    check("删不掉工作区" in report_factory and "右键" in report_factory
+          and "删除工作区" in report_factory,
+          "残留的出厂项给出可执行路径：本版脚本删不掉，工作区标签上右键 ▸ 删除工作区",
+          report_factory)
     # 回归：用户实测「bpy.ops.wm.append.poll() failed, context is incorrect」——
     # wm.append 的 poll（wm_link_append_poll）要求 WM_operator_winactive，而 read_homefile
     # 之后界面里的窗口 context 已经失效，所以这条算子路在真实界面里必然失败。
@@ -2574,7 +2791,7 @@ def test_startup_layout(module):
               "未保存时当前场景没有被丢掉（那个标记物体还在）")
     reset_scene()
 
-    # ---- (b)/(c) 完整流程：真的在沙箱里跑一遍 ----
+    # ---- (b)(c)(d)(e) 完整流程：真的在沙箱里跑，跑两次验证幂等 ----
     sandbox_file = os.path.join(config, "hhz_startup_test.blend")
     try:
         bpy.ops.wm.save_as_mainfile(filepath=sandbox_file)
@@ -2590,11 +2807,22 @@ def test_startup_layout(module):
               bpy.data.is_dirty)
 
     recorded_path = bpy.data.filepath
-    recorded_workspaces = [workspace.name for workspace in bpy.data.workspaces]
-    check(len(recorded_workspaces) >= 3, "测试文件里有多个工作区可存",
-          recorded_workspaces[:4])
-
     _purge_test_samples(module)
+
+    # 造一个「启动文件里肯定没有」的工作区名：把一个出厂工作区改名。
+    # 必须**存盘** —— 算符跑完会重新打开磁盘上的这个文件，不存盘改名就白改了。
+    probe_name = "hhz_startup_probe"
+    previous_name = ""
+    try:
+        previous_name = bpy.data.workspaces[0].name
+        bpy.data.workspaces[0].name = probe_name
+    except Exception as error:
+        skip("改不动工作区名字（{}），跳过完整流程".format(error))
+        return
+    check(previous_name != probe_name,
+          "把一个工作区改成了启动文件里没有的新名字（幂等用例的前提）",
+          (previous_name, probe_name))
+
     sound_name, _sound_path, note = _make_missing_sample("sound", "hhz_missing_startup", None)
     check(sound_name is not None, "启动布局用例造出了缺失样本（{}）".format(note), sound_name)
     if sound_name is not None:
@@ -2603,16 +2831,28 @@ def test_startup_layout(module):
         check(sound_name in scanned or any(item[1] == sound_name for item in in_use),
               "扫描函数确实检出了这个缺失样本（提示的判据是真的）",
               (sound_name, scanned[:4], len(in_use)))
-        # 造完样本数据块就算"有改动"，先存一次让流程能继续（等于用户先按了 Ctrl+S）
+    # 改名 / 造样本都算"有改动"，先存一次让流程能继续（等于用户先按了 Ctrl+S）
+    try:
         bpy.ops.wm.save_as_mainfile(filepath=recorded_path)
+    except Exception as error:
+        skip("存不了测试文件（{}），跳过完整流程".format(error))
+        return
+
+    recorded_workspaces = [workspace.name for workspace in bpy.data.workspaces]
+    check(len(recorded_workspaces) >= 3, "测试文件里有多个工作区可存", recorded_workspaces[:4])
+    check(probe_name in recorded_workspaces,
+          "记录下来的工作区里有那个新名字", recorded_workspaces[:4])
+
+    def run_startup_layout(label):
+        try:
+            return bpy.ops.hhz.layout_save_startup(confirm=True)
+        except Exception as error:
+            return "抛出异常（{}）：{}".format(label, error)
 
     try:
-        result = "未调用"
-        try:
-            result = bpy.ops.hhz.layout_save_startup(confirm=True)
-        except Exception as error:
-            result = "抛出异常：{}".format(error)
-        check(result == {'FINISHED'}, "完整流程返回 FINISHED", result)
+        # ---- (b) 第一次：只补「启动文件里还没有的」 ----
+        first = run_startup_layout("第一次")
+        check(first == {'FINISHED'}, "第一次完整流程返回 FINISHED", first)
         check(bpy.data.filepath == recorded_path,
               "跑完之后会话文件路径与开始时一致（用户回到原文件）",
               (recorded_path, bpy.data.filepath))
@@ -2621,50 +2861,139 @@ def test_startup_layout(module):
         check(os.path.exists(os.path.join(config, module.ops.LAYOUT_LIBRARY_NAME)),
               "布局库写在配置目录里的固定名字上", module.ops.LAYOUT_LIBRARY_NAME)
 
-        # 启动文件里应该：有那批工作区（原名）、没有场景物体、没有重名对
-        startup_path = os.path.join(config, "startup.blend")
-        try:
-            with bpy.data.libraries.load(startup_path) as (src, _dst):
-                startup_workspaces = list(src.workspaces)
-                startup_objects = list(src.objects)
-            missing_names = [name for name in recorded_workspaces
-                             if not any(item == name or item.startswith(name + ".")
-                                        for item in startup_workspaces)]
-            check(not missing_names,
-                  "启动文件里覆盖了记录下来的每个工作区",
-                  (missing_names, startup_workspaces[:4]))
-            # 重名收尾之后：每个工作区都该拿回**原来的名字**，不再是 .001
-            exact_missing = [name for name in recorded_workspaces
-                             if name not in startup_workspaces]
+        result_first = dict(module.ops.LAST_STARTUP_LAYOUT_RESULT)
+        startup_first, objects_first = _read_startup_file(config)
+        check(probe_name in result_first.get("appended", []),
+              "第一次把「启动文件里还没有的」那个工作区追加进去了",
+              (result_first.get("appended"), result_first.get("skipped")))
+        check(result_first.get("skipped_total", 0) >= 1,
+              "第一次也没有重复追加已经存在的工作区（同名且区域构成相同 -> 跳过）",
+              result_first.get("skipped"))
+        check(sorted(startup_first) == sorted(result_first.get("workspaces", [])),
+              "报告里的工作区清单 == 启动文件里真实的工作区清单",
+              (result_first.get("workspaces"), startup_first))
+        check(not objects_first,
+              "启动文件是空场景（没有任何物体，场景没被带进去）", objects_first[:4])
+        check(result_first.get("objects") == 0,
+              "落盘前校验里物体数就是 0", result_first.get("objects"))
+
+        # ---- (c) 第二次：幂等 —— 本次优化的验收核心 ----
+        second = run_startup_layout("第二次")
+        check(second == {'FINISHED'}, "第二次完整流程返回 FINISHED", second)
+        result_second = dict(module.ops.LAST_STARTUP_LAYOUT_RESULT)
+        startup_second, objects_second = _read_startup_file(config)
+        check(result_second.get("appended_total") == 0,
+              "第二次新增 0 个工作区（幂等：已存在的全部跳过）",
+              result_second.get("appended"))
+        check(result_second.get("skipped_total") == result_second.get("recorded"),
+              "第二次把本次会话记录的工作区全都算成「已存在」",
+              (result_second.get("skipped_total"), result_second.get("recorded")))
+        check(sorted(startup_second) == sorted(startup_first),
+              "连跑两次之后启动文件里的工作区集合**完全一致**（本次验收核心）",
+              (sorted(startup_first), sorted(startup_second)))
+        check(len(startup_second) == len(startup_first),
+              "连跑两次工作区数量一个都没变（不再每点一次就多一批）",
+              (len(startup_first), len(startup_second)))
+        check(not objects_second, "第二次之后启动文件仍是空场景", objects_second[:4])
+
+        # 用户的工作区零丢失、没有 X / X.<数字> 并存（两次都查）
+        for label, names in (("第一次", startup_first), ("第二次", startup_second)):
+            exact_missing = [name for name in recorded_workspaces if name not in names]
             check(not exact_missing,
-                  "记录下来的工作区在启动文件里都是**原名**（不再带 .001 后缀）",
-                  (exact_missing, startup_workspaces[:8]))
-            startup_pairs = [name for name in startup_workspaces
+                  "{}：记录下来的工作区在启动文件里都是**原名**（零丢失、无 .001）".format(label),
+                  (exact_missing, names[:6]))
+            startup_pairs = [name for name in names
                              if name.rpartition(".")[2].isdigit()
-                             and name.rpartition(".")[0] in startup_workspaces]
+                             and name.rpartition(".")[0] in names]
             check(not startup_pairs,
-                  "启动文件里没有「X」与「X.<数字>」并存的重名对",
+                  "{}：启动文件里没有「X」与「X.<数字>」并存的重名对".format(label),
                   startup_pairs[:6])
-            leftover = [name for name in startup_workspaces
-                        if name.startswith(module.ops.FACTORY_WORKSPACE_PREFIX)]
-            check(len(startup_workspaces) >= len(recorded_workspaces),
-                  "启动文件里的工作区数量不少于你记录下来的数量",
-                  (len(startup_workspaces), len(recorded_workspaces)))
-            if leftover:
-                # 本环境删不掉出厂重名 → 它们被改名让位，数量对得上
-                check(len(startup_workspaces) == len(recorded_workspaces) + len(leftover),
-                      "没能删掉的出厂重名项都在（{} 个，带「出厂」前缀），数量对得上".format(
-                          len(leftover)),
-                      (len(startup_workspaces), len(recorded_workspaces), len(leftover)))
-            check(not startup_objects,
-                  "启动文件是空场景（没有任何物体，场景没被带进去）",
-                  startup_objects[:4])
-        except Exception as error:
-            check(False, "能读回启动文件检查内容", "{}".format(error))
+        # 用户实测的坏现象：每点一次按钮就多一批「出厂 xxx」
+        leftover_first = [name for name in startup_first
+                          if name.startswith(module.ops.FACTORY_WORKSPACE_PREFIX)]
+        leftover_second = [name for name in startup_second
+                           if name.startswith(module.ops.FACTORY_WORKSPACE_PREFIX)]
+        check(sorted(leftover_second) == sorted(leftover_first),
+              "第二次运行没有再冒出新的「出厂 xxx」工作区（用户实测的坏现象不再发生）",
+              (sorted(leftover_first), sorted(leftover_second)))
+
+        # ---- (d) 同名但**区域构成不同** -> 按设计追加（并给旧的那份「出厂」前缀让位）----
+        ops = module.ops
+        previous = bpy.data.workspaces.get(probe_name)
+        check(previous is not None,
+              "会话已被恢复：那个测试工作区还在（会话没停在空场景上）", probe_name)
+        if previous is None:
+            skip("会话里找不到测试工作区，跳过同名不同构成的验证")
+        else:
+            probe_composition = ops._workspace_composition(previous)
+            same_composition = [workspace for workspace in bpy.data.workspaces
+                                if workspace is not previous
+                                and ops._workspace_composition(workspace) == probe_composition]
+            other_composition = [workspace for workspace in bpy.data.workspaces
+                                 if workspace is not previous
+                                 and ops._workspace_composition(workspace) != probe_composition]
+            check(bool(other_composition),
+                  "会话里找得到「同名但区域构成不同」的候选工作区（判据可测）",
+                  (len(same_composition), len(other_composition)))
+            if not other_composition:
+                skip("当前文件里找不到区域构成不同的第二个工作区，跳过这一条")
+            else:
+                try:
+                    # 让出 probe_name，再把一个**构成不同**的工作区改成 probe_name
+                    previous.name = "hhz_startup_old"
+                    other_composition[0].name = probe_name
+                    bpy.ops.wm.save_as_mainfile(filepath=recorded_path)
+                except Exception as error:
+                    skip("造不出「同名不同构成」场景（{}），跳过这一条".format(error))
+                else:
+                    third = run_startup_layout("第三次")
+                    check(third == {'FINISHED'}, "同名不同构成时流程仍然 FINISHED", third)
+                    result_third = dict(module.ops.LAST_STARTUP_LAYOUT_RESULT)
+                    startup_third, objects_third = _read_startup_file(config)
+                    check(probe_name in result_third.get("appended", []),
+                          "同名但区域构成不同 -> **追加**（没有被误判成已存在而跳过）",
+                          (result_third.get("appended"), result_third.get("skipped")[:4]))
+                    check(probe_name in startup_third,
+                          "追加之后那个名字在启动文件里（重名收尾把原名还回来了）",
+                          startup_third[:8])
+                    check(module.ops.FACTORY_WORKSPACE_PREFIX + probe_name in startup_third,
+                          "启动文件里原来那份同名工作区被加「出厂」前缀让位",
+                          startup_third[:8])
+                    pairs_third = [name for name in startup_third
+                                   if name.rpartition(".")[2].isdigit()
+                                   and name.rpartition(".")[0] in startup_third]
+                    check(not pairs_third,
+                          "同名不同构成追加之后也没有 X / X.<数字> 并存", pairs_third[:4])
+                    check(not objects_third, "第三次之后启动文件仍是空场景", objects_third[:4])
+
+                    # ---- (e) 切文件之后出错 -> 会话自动回到用户原来的文件 ----
+                    real_plan = ops._plan_workspace_appends
+
+                    def _explode(*_args, **_kwargs):
+                        raise RuntimeError("hhz 自愈测试：故意让追加步骤失败")
+
+                    ops._plan_workspace_appends = _explode
+                    try:
+                        failed = run_startup_layout("自愈")
+                    finally:
+                        ops._plan_workspace_appends = real_plan
+                    # report({'ERROR'}) 在 bpy.ops 里会**抛** RuntimeException，
+                    # 所以"失败"有两种表现：抛出异常（带失败原因）或返回 CANCELLED。
+                    check("追加工作区失败" in str(failed) or failed == {'CANCELLED'},
+                          "切文件之后出错时明确失败（抛错 / CANCELLED），没有假装成功",
+                          failed)
+                    check(bpy.data.filepath == recorded_path,
+                          "出错之后会话自动回到了用户原来的文件（自愈没被破坏）",
+                          (recorded_path, bpy.data.filepath))
+                    check(bpy.data.workspaces.get(probe_name) is not None,
+                          "恢复回来的会话里有用户自己的工作区（不是空场景）", probe_name)
+                    startup_after_failure, _objects_after = _read_startup_file(config)
+                    check(sorted(startup_after_failure) == sorted(startup_third),
+                          "失败的那次没有写启动文件（磁盘上还是上一次的结果）",
+                          (sorted(startup_third), sorted(startup_after_failure)))
 
         # ---- 重名收尾：在沙箱会话里直接对助手函数做一次端到端验证 ----
         ops = module.ops
-        current_names = [workspace.name for workspace in bpy.data.workspaces]
         check(not ops._workspace_collision_pairs(),
               "收尾之后当前会话里没有残留的重名对",
               [item[0].name for item in ops._workspace_collision_pairs()][:4])

@@ -21,9 +21,9 @@ PAGE_THEME = "THEME"
 
 #: (标识, 名字, 说明, 图标, 顺序)
 PAGE_ITEMS = (
-    (PAGE_MODELING, "建模", "一键删材质 / 应用与删除修改器", "MODIFIER", 0),
-    (PAGE_TOOLS, "工具", "饼菜单、快捷键与面板设置", "TOOL_SETTINGS", 1),
-    (PAGE_THEME, "主题", "界面控件配色与酸性预设", "COLOR", 2),
+    (PAGE_MODELING, "建模", "一键删材质 / 应用与删除修改器 / 一键楼梯", "MODIFIER", 0),
+    (PAGE_TOOLS, "工具", "饼菜单、快捷键、面板顺序与页面布局", "TOOL_SETTINGS", 1),
+    (PAGE_THEME, "主题", "配色预设与界面配色", "COLOR", 2),
 )
 
 PAGE_LABELS = {page: label for page, label, _tip, _icon, _order in PAGE_ITEMS}

@@ -705,6 +705,11 @@ STRANDING = {
     "blue": "#4B7FA8",        # 主强调：选中行 / 选中态填充（多数家族 inner_sel）
     "blue_dim": "#2E4E68",    # 蓝的深档：要在它上面配浅色文字的场合
     "orange": "#D08A2E",      # 点缀强调：极少量关键项
+    # 「视口里被选中的几何」专用的**高饱和橙**：由 orange 按公式派生，不是新色相 ——
+    # 色相沿用 orange 的 34.1°，饱和度从 0.779 推到 0.95，明度从 0.816 抬到 0.88
+    # （抬明度是为了在冷炭黑视口 DS_BG 上拉开亮度差，见 README 的实测数字）。
+    # HSV→RGB 复算：C=V*S=0.836、m=V-C=0.044 → (0.880, 0.519, 0.044) = #E0840B。
+    "orange_vivid": "#E0840B",
     "orange_dim": "#8A5A1E",  # 橙的深档
     "steel": "#6E7B85",       # 技术性元素、线框
     "red": "#B4453C",         # 危险 / 被覆盖（克制）
@@ -1012,6 +1017,25 @@ VIEWPORT_SELECTION_PATHS = (
     "view_3d.edge_select",
     "view_3d.face_select",
 )
+
+# ------------------------------------------------- 视口「粗细 / 尺寸」类项（不是颜色）
+#
+# 用户实测反馈"被选中的线饱和度太低"——调色板里能给的最高饱和度就是
+# ``ACCENT_PRIMARY`` 的 0.823（见 README 的实测数字），再往上只能靠**线更粗**。
+# 实测（4.0.2 / 4.2.23 / 5.2.2 三版 bl_rna）：
+#   ``view_3d.edge_width`` = INT + PIXEL 子类型、**可写**，三版 factory-startup 的实测值都是 1。
+# 所以两套马拉松预设把它写成 2（粗一档）—— 这是颜色之外唯一的可见性手段，
+# 且只动这一项；死亡搁浅预设不碰它（它这一版只换视口选中的颜色）。
+
+#: 视口尺寸项的出厂默认值（**三版 factory-startup 实测**，不是猜的）。
+VIEWPORT_SIZE_DEFAULTS = {
+    "view_3d.edge_width": 1,
+}
+
+#: 两套马拉松预设要写进去的视口尺寸：编辑模式选中边画粗一档。
+MARATHON_VIEWPORT_SIZES = {
+    "view_3d.edge_width": 2,
+}
 
 #: 「标签与选中块分离」的控件家族：Blender 里这三类按钮的**标签文字不在选中块上**，
 #: 只有那个小方块 / 小圆点 / 开关体用 ``inner_sel`` 填色，标签仍然读 ``text_sel``（源码依据：
@@ -1376,10 +1400,12 @@ def _frame_current_colors(accent):
 #: 真机断言会拿 :func:`warm_accent` 扫一遍整套预设，出现清单外的暖色就失败
 #: （``tools/blender_test.py`` 的 ``test_preset_death_stranding``）。
 #:
-#: 清单分三类语义，每类只落一处，加起来 8 条：
+#: 清单分四类语义，加起来 12 条：
 #: * 活动面板标题 + 已修改状态 —— 调色板里 ``orange`` / ``orange_dim`` 的指定用途；
 #: * 关键帧选中 / 倒角权重 —— ``warn``（警告）；
-#: * 被覆盖 / 边缝合线 —— ``red``（危险，克制）。
+#: * 被覆盖 / 边缝合线 —— ``red``（危险，克制）；
+#: * **视口里被选中的几何**（活动元素 / 顶点 / 边 / 面）—— 用户授权："选中线换成
+#:   **高饱和**的橙色"；界面控件的主强调仍然是蓝（真机断言守着这一条）。
 STRANDING_WARM_PATHS = (
     "user_interface.panel_active",
     "user_interface.wcol_state.inner_changed",
@@ -1389,6 +1415,10 @@ STRANDING_WARM_PATHS = (
     "user_interface.wcol_state.inner_overridden_sel",
     "view_3d.edge_seam",
     "view_3d.edge_bevel",
+    "view_3d.editmesh_active",
+    "view_3d.vertex_select",
+    "view_3d.edge_select",
+    "view_3d.face_select",
 )
 
 
@@ -1397,11 +1427,12 @@ def _stranding_preset():
 
     用户逐项确认的设计约束（同时是真机断言的判据）：
 
-    * **蓝是唯一的主选中色**：控件家族的 ``inner_sel`` 只会是 ``blue`` 或
+    * **蓝是界面控件的主选中色**：控件家族的 ``inner_sel`` 只会是 ``blue`` 或
       ``blue_dim``（``wcol_tab`` 的 ``inner_sel`` 是面板层级色 ``elevated``）；
       **绝不**把所有选中态统一染成橙 —— 这条由 :func:`warm_accent` +
       :data:`STRANDING_WARM_PATHS` 机械守住；
-    * **橙只落在白名单路径上**（活动面板标题、已修改状态），是点缀不是主色；
+    * **橙只落在白名单路径上**：活动面板标题、已修改状态，以及用户授权的
+      **视口里被选中的几何**（活动元素 / 顶点 / 边 / 面）—— 是点缀不是界面主色；
     * 常态文字用灰白 ``text`` / ``text_dim``，不用纯白大面积铺陈；
       压在亮蓝填充上的**选中态**文字用最暗的 ``bg``（推导见下面的 ``on_blue``）；
     * 面板三级层次 ``bg`` < ``panel`` < ``elevated``（亮度递增），边框用低对比 ``line``；
@@ -1482,12 +1513,16 @@ def _stranding_preset():
         "user_interface.wcol_state.inner_driven_sel": stranding_color("steel"),
         "user_interface.wcol_state.inner_overridden": stranding_color("red"),
         "user_interface.wcol_state.inner_overridden_sel": stranding_color("red"),
-        # 3D 编辑模式：选中一律蓝，线框 / 技术元素用钢灰
-        "view_3d.editmesh_active": blue,
-        "view_3d.vertex_select": blue,
+        # 3D 编辑模式：**视口里被选中的几何用高饱和橙**（用户授权：他原话是
+        # "选中线换成高饱和的橙色"）——界面控件的主强调仍然是蓝（见上面那个循环）。
+        # 橙用 orange_vivid（H 34.1° / S 0.95 / V 0.88），不是界面用的 orange（S 0.78）：
+        # 视口里线条细、又压在冷炭黑背景上，饱和度不够就"看着发灰"。
+        "view_3d.editmesh_active": stranding_color("orange_vivid"),
+        "view_3d.vertex_select": stranding_color("orange_vivid"),
         "view_3d.vertex_active": text,
-        "view_3d.edge_select": blue,
-        "view_3d.face_select": stranding_color("blue", 0.5),
+        "view_3d.edge_select": stranding_color("orange_vivid"),
+        # 面选中保持 50% alpha（与两套马拉松预设一致：面是整块填充，要能透出下面的东西）
+        "view_3d.face_select": stranding_color("orange_vivid", 0.5),
         "view_3d.edge_seam": stranding_color("red"),
         "view_3d.edge_sharp": stranding_color("steel"),
         "view_3d.edge_crease": stranding_color("steel"),
@@ -1603,6 +1638,10 @@ def _marathon_preset_work():
     return {path: color for path, color in colors.items() if color is not None}
 
 
+#: 两套马拉松预设的名字（:data:`MARATHON_VIEWPORT_SIZES` 只对它们生效；
+#: 真机测试会断言它们都真的在 :data:`PRESETS` 里，且「死亡搁浅」不在其中）。
+MARATHON_PRESET_NAMES = ("马拉松 建模 低干扰", "马拉松 浅灰卡")
+
 #: 配色预设：两套「失落星船：马拉松」+ 一套「死亡搁浅」。
 #: 顺序就是 N 面板上按钮的顺序（按钮由 ``preset_names()`` 自动生成，ui.py 不参与）。
 PRESETS = (
@@ -1697,6 +1736,86 @@ def set_color(theme, path, color):
         return False
 
 
+# ----------------------------------------------------- 视口尺寸项：读 / 写
+#
+# 颜色项走 resolve() / get_color() / set_color()（FLOAT 3~4 分量）；
+# 「粗细 / 尺寸」是 INT，走下面这条**独立的**小路 —— 不塞进颜色那套，
+# 否则颜色项枚举会把 edge_width 也列出来（那不是颜色，用户也调不了色）。
+
+
+def resolve_size(theme, path):
+    """按点分路径找一个**整数**主题项，返回 ``(宿主结构, 属性名)``；不适用返回 None。"""
+    if theme is None or not path:
+        return None
+    parts = path.split(".")
+    owner = theme
+    for part in parts[:-1]:
+        owner = getattr(owner, part, None)
+        if owner is None:
+            return None
+    name = parts[-1]
+    try:
+        prop = owner.bl_rna.properties.get(name)
+    except Exception:
+        return None
+    if prop is None or prop.type != 'INT':
+        return None
+    return owner, name
+
+
+def get_size(theme, path):
+    """读一个整数主题项；读不到返回 None。"""
+    resolved = resolve_size(theme, path)
+    if resolved is None:
+        return None
+    owner, name = resolved
+    try:
+        return int(getattr(owner, name))
+    except Exception:
+        return None
+
+
+def set_size(theme, path, value):
+    """写一个整数主题项（夹在 0..64）；写成功返回 True。"""
+    resolved = resolve_size(theme, path)
+    if resolved is None:
+        return False
+    owner, name = resolved
+    try:
+        setattr(owner, name, max(0, min(64, int(value))))
+        return True
+    except Exception:
+        return False
+
+
+def size_default(path):
+    """视口尺寸项的出厂默认值（三版 factory-startup 实测的那张表）。"""
+    return VIEWPORT_SIZE_DEFAULTS.get(path)
+
+
+def apply_sizes(theme, sizes):
+    """把一组 ``{路径: 整数}`` 写进主题，返回成功数量（本版本没有的项自动跳过）。"""
+    applied = 0
+    for path, value in dict(sizes or {}).items():
+        if value is None:
+            continue
+        if set_size(theme, path, value):
+            applied += 1
+    return applied
+
+
+def restore_size_defaults(theme, paths=None):
+    """把视口尺寸项写回出厂默认值，返回改动数量。"""
+    changed = 0
+    for path in (list(paths) if paths is not None else list(VIEWPORT_SIZE_DEFAULTS)):
+        default = size_default(path)
+        if default is None:
+            continue
+        if set_size(theme, path, default):
+            changed += 1
+    return changed
+
+
 #: 控件家族那批条目的分组名（「按钮 底色」这类共 7 个）。
 #: 它们的标签本身已经写明家族与部位（「普通按钮 底色」），下拉里再拼一次分组名
 #: 就是把同一个词说两遍 —— 见 :func:`item_label`。
@@ -1765,6 +1884,27 @@ def has_default(path, version=None):
     return path in defaults_table(version)
 
 
+def available_default_paths(theme, paths=None):
+    """默认值表里**当前这个 Blender 版本真的存在**的那些路径。
+
+    为什么需要这一步（4.5.14 的 CI 失败就是它）：默认值表是真机 dump 出来的
+    （4X 表来自 4.0 / 4.2），里面有 ``info.info_error`` / ``info.info_warning``
+    —— 这两条在 **4.5** 上已经被 Blender 删掉（状态色搬到了
+    ``user_interface.wcol_state.*``）。表里留着它们是对的（4.2 上真的存在），
+    但"恢复 / 核对"这两个动作**必须**按运行版本过滤：拿一个本版本根本不存在的
+    路径去读写，只会把"本版本没有这一项"误报成"恢复失败"。
+    """
+    source = list(paths) if paths is not None else list(defaults_table())
+    return [path for path in source if resolve(theme, path) is not None]
+
+
+def absent_default_paths(theme, paths=None):
+    """上一句的补集：记录了默认值、但**本版本不存在**的路径（报告里单独计数）。"""
+    present = set(available_default_paths(theme, paths))
+    source = list(paths) if paths is not None else list(defaults_table())
+    return [path for path in source if path not in present]
+
+
 def viewport_helper_paths():
     """**必须写回出厂默认值**的颜色项：视口里的基面网格线与法线。
 
@@ -1809,6 +1949,17 @@ def preset_colors(name):
             merged.update(viewport_helper_colors())
             return merged
     return None
+
+
+def preset_sizes(name):
+    """预设要写的**视口尺寸**（不是颜色）：目前只有两套马拉松预设把选中边画粗一档。
+
+    尺寸项不能塞进 :func:`preset_colors`（那是颜色字典，颜色项枚举会跟着变脏），
+    所以单独给一份；调用方（``ops.py`` 的「应用预设」）在写完颜色后再写它。
+    """
+    if name in MARATHON_PRESET_NAMES:
+        return dict(MARATHON_VIEWPORT_SIZES)
+    return {}
 
 
 # ----------------------------------------------------------- 面向偏好的读写

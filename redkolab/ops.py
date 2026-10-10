@@ -826,6 +826,9 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
         if factor < 1.0:
             colors = theme.desaturate_colors(colors, factor)
         changed = theme.apply_colors(current, colors)
+        # 视口尺寸（不是颜色）：两套马拉松预设会把编辑模式选中边画粗一档
+        # —— 颜色已经拉到调色板最高饱和度，剩下的可见性只能靠线宽。
+        changed_sizes = theme.apply_sizes(current, theme.preset_sizes(self.preset))
         if not changed:
             self.report({'WARNING'}, "这套预设没有可用颜色")
             return {'CANCELLED'}
@@ -833,7 +836,10 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
         if preferences is not None:
             preferences.last_preset = self.preset
             theme.read_into_preferences(context, preferences)
-        self.report({'INFO'}, "已套用「{}」配色（{} 项）".format(self.preset, changed))
+        message = "已套用「{}」配色（{} 项）".format(self.preset, changed)
+        if changed_sizes:
+            message += "；视口尺寸 {} 项".format(changed_sizes)
+        self.report({'INFO'}, message)
         compat.tag_redraw(context)
         return {'FINISHED'}
 
@@ -859,6 +865,8 @@ class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
         factor = float(getattr(preferences, "preset_saturation", 1.0))
         colors = theme.desaturate_colors(colors, factor) if factor < 1.0 else colors
         applied = theme.apply_colors(current, colors)
+        # 视口尺寸与颜色一样"从预设表重算"，所以重复点击同样不累积
+        theme.apply_sizes(current, theme.preset_sizes(name))
         preferences.last_preset = name
         theme.read_into_preferences(context, preferences)
         self.report({'INFO'}, "已按 {}% 饱和度重新套用「{}」（{} 项）".format(
@@ -899,28 +907,45 @@ class HHZ_OT_theme_restore_default(bpy.types.Operator):
             if not paths:
                 self.report({'WARNING'}, "这一组里没有可恢复的颜色项")
                 return {'CANCELLED'}
+            # 按运行版本过滤：本版本没有这一项（例如 4.5 删掉的 info.info_error）
+            # 不算"恢复失败"，单独计数、跳过
+            absent = theme.absent_default_paths(current, paths)
             changed = theme.restore_defaults(current, paths)
-            skipped = len(paths) - changed
+            skipped = len(paths) - changed - len(absent)
             message = "「{}」组：恢复 {} 项".format(group or "?", changed)
-            if skipped:
+            if absent:
+                message += "，{} 项在当前版本不存在（跳过）".format(len(absent))
+            if skipped > 0:
                 message += "，{} 项没有记录默认值（跳过）".format(skipped)
             self.report({'INFO' if changed else 'WARNING'}, message)
             if not changed:
                 return {'CANCELLED'}
         elif self.scope == 'ALL':
             paths = theme.default_paths()
+            # 恢复逻辑与核对逻辑都按运行版本过滤（4.5 上 info.info_error /
+            # info.info_warning 已被 Blender 删掉，表里留着它们是为 4.2 服务）
+            absent = theme.absent_default_paths(current, paths)
             changed = theme.restore_defaults(current, paths)
+            # 视口尺寸（不是颜色）：两套马拉松预设会把它写粗，这里一并写回默认
+            sizes_changed = theme.restore_size_defaults(current)
             missing = [item for item in theme.available_paths(context)
                        if not theme.has_default(item)]
-            message = "恢复了 {} 项（本版本共记录 {} 项出厂默认值）".format(changed, len(paths))
+            message = "恢复了 {} 项（本版本共记录 {} 项出厂默认值，其中 {} 项在当前版本不存在已跳过）".format(
+                changed, len(paths), len(absent))
+            if sizes_changed:
+                message += "，另外把 {} 项视口尺寸写回默认".format(sizes_changed)
             if missing:
                 message += "，另有 {} 项没有默认值记录".format(len(missing))
-            self.report({'INFO' if changed else 'WARNING'}, message)
-            if not changed:
+            self.report({'INFO' if changed or sizes_changed else 'WARNING'}, message)
+            if not changed and not sizes_changed:
                 return {'CANCELLED'}
         else:
             if not theme.has_default(path):
                 self.report({'WARNING'}, "这一项没有记录默认值，无法一键恢复")
+                return {'CANCELLED'}
+            if theme.resolve(current, path) is None:
+                self.report({'WARNING'},
+                            "这一项在当前 Blender 版本上不存在，无法恢复（{}）".format(path))
                 return {'CANCELLED'}
             before = theme.get_color(current, path)
             if not theme.restore_default(current, path):
@@ -1324,6 +1349,126 @@ FACTORY_WORKSPACE_PREFIX = "出厂 "
 #: 工作区名字上限（Blender 的 ``MAX_ID_NAME - 2``）。
 WORKSPACE_NAME_LIMIT = 63
 
+# ------------------------------------------------- 幂等：只补「启动文件里还没有的」
+#
+# 旧流程每次都 `read_homefile(use_factory_startup=True)` **从出厂启动文件重新开始**，
+# 再把用户的工作区无脑追加一遍。中文界面下出厂启动文件里也有「布局 / 建模 / 雕刻 / ...」
+# 这同名的自带工作区，于是必然撞名、必然被改名成「出厂 xxx」——
+# 用户点两次就得到 22 个工作区（11 个自己的 + 11 个「出厂 xxx」），点得越多越乱。
+#
+# 新流程的两个支点：
+#   1. 读**上次保存的启动文件**（`read_homefile()`，不带 use_factory_startup），
+#      第二次运行时看到的就是上一次的结果；
+#   2. 追加之前按「同名 **且** 区域构成相同」判断，已经有的直接跳过。
+
+
+def _workspace_composition(workspace):
+    """工作区的**区域构成**：``(屏幕数, 区域 type 的多重集合)``。
+
+    ``sorted(区域 type 列表)`` 就是多重集合的表示（同一种区域有两个就算两个）。
+    同名但构成不同（比如用户改过区域划分）算**不同**的工作区，要各留一份。
+    """
+    areas = []
+    screens = list(getattr(workspace, "screens", []) or [])
+    for screen in screens:
+        for area in getattr(screen, "areas", []) or []:
+            try:
+                areas.append(area.type)
+            except Exception:
+                pass
+    return (len(screens), tuple(sorted(areas)))
+
+
+def workspace_signatures():
+    """当前文件里 ``工作区名 -> 区域构成`` 的快照（切文件**之前**记录，当幂等判据用）。"""
+    return {workspace.name: _workspace_composition(workspace)
+            for workspace in bpy.data.workspaces}
+
+
+def _workspace_already_present(name, signature):
+    """启动文件里是否已经有「同名**且**区域构成相同」的工作区。
+
+    读不到本次构成（``signature is None``）时按「已经有」处理 —— 宁可少追加一次，
+    也不要在判据不明的时候重复追加出一堆 ``.001``。
+    """
+    existing = bpy.data.workspaces.get(name)
+    if existing is None:
+        return False
+    if signature is None:
+        return True
+    return _workspace_composition(existing) == signature
+
+
+def _plan_workspace_appends(available, signatures):
+    """把布局库里可用的工作区分成「要追加的」和「已经有的」。
+
+    返回 ``(要追加的名字清单, 跳过的名字清单)``；跳过的就是幂等的部分 ——
+    第二次运行时全部落在跳过里，一个都不追加。
+    """
+    wanted = []
+    skipped = []
+    for name in available:
+        if _workspace_already_present(name, signatures.get(name)):
+            skipped.append(name)
+        else:
+            wanted.append(name)
+    return wanted, skipped
+
+
+def _empty_scene_data():
+    """把当前会话清成空场景（启动文件里只留工作区布局），返回清完后的物体数量。
+
+    纯数据 API：``list()`` 之后逐个 ``bpy.data.objects.remove()``，再用
+    ``orphans_purge`` 清掉因此变成孤儿的网格 / 材质 / 世界等。
+    **不碰工作区** —— 实测（4.0.2 沙箱）orphans_purge 不会删掉它们
+    （工作区被窗口引用着，不是孤儿）。
+    """
+    for obj in list(bpy.data.objects):
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
+    try:
+        bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
+    except Exception:
+        # 个别版本参数不同：退化成无参调用，清不掉也不算致命（后面还有物体数校验）
+        try:
+            bpy.data.orphans_purge()
+        except Exception:
+            pass
+    return len(bpy.data.objects)
+
+
+def startup_report_parts(appended, skipped, leftover_factory):
+    """「设为启动布局」的结果文案（单独成函数，真机测试直接断言文案如实）。
+
+    必须说清四件事：本次**新增了几个**、**跳过了几个**（因为启动文件里已经有了）、
+    启动文件仍然是**空场景**、以及启动文件里还留着的「出厂 xxx」怎么办
+    （脚本删不掉工作区，只能在工作区标签上右键删）。
+    """
+    parts = ["启动布局已更新"]
+    if appended:
+        parts.append("本次新增 {} 个工作区".format(len(appended)))
+    else:
+        parts.append("本次新增 0 个工作区（要补的工作区启动文件里都已经有了）")
+    if skipped:
+        parts.append("跳过 {} 个已存在的（同名且区域构成相同，不再重复追加）".format(
+            len(skipped)))
+    parts.append("启动文件仍是空场景 + 你的工作区布局（不含当前场景）")
+    if leftover_factory:
+        parts.append("启动文件里还留着 {} 个带「出厂」前缀的工作区，"
+                     "本版 Blender 的脚本接口删不掉工作区："
+                     "要清掉它们，在工作区标签上点右键 ▸ 删除工作区".format(
+                         len(leftover_factory)))
+    return parts
+
+
+#: 最近一次「把当前窗口布局设为启动布局」的内部计数。
+#: **不是设置项 / 不是新按钮 / 不是偏好设置**（这些东西一个都没加），只是把这次运行
+#: 新增了几个、跳过了几个、启动文件里最后有几个工作区留个痕，好让真机测试直接断言
+#: 「连点两次，第二次新增 0 个」—— 不用靠间接推断。
+LAST_STARTUP_LAYOUT_RESULT = {}
+
 
 def _workspace_collision_pairs():
     """当前文件里「``X`` 与 ``X.<数字>`` 同时存在」的工作区对。
@@ -1554,6 +1699,9 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
         if not workspace_names:
             self.report({'ERROR'}, "当前文件里没有工作区，无法保存布局")
             return {'CANCELLED'}
+        # 幂等判据：切文件**之前**记下每个工作区的区域构成（构成只在这里读得到，
+        # 切到启动文件之后当前文件的工作区就不在了）。
+        signatures = workspace_signatures()
         active_name = ""
         for window_manager in bpy.data.window_managers:
             for window in window_manager.windows:
@@ -1595,35 +1743,62 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
             return {'CANCELLED'}
 
         try:
-            # 出厂启动文件 = 空场景，且**不会**重置用户偏好设置
-            # （read_factory_settings 会连偏好一起重置，这里不能用）
-            bpy.ops.wm.read_homefile(use_factory_startup=True, use_empty=True)
+            # 读**上次保存的启动文件**（用户目录里的 startup.blend），**不带**
+            # ``use_factory_startup=True``。这是本次幂等修复的核心：出厂启动文件里必然
+            # 有一整套自带工作区，每次从它重来就必然与用户的工作区撞名、必然改名让位，
+            # 于是每点一次按钮就多一批「出厂 xxx」；读用户启动文件之后，第二次运行时
+            # 看到的就是第一次的结果，同名同构成会被下面的 _plan_workspace_appends 跳过。
+            #
+            # 实测（4.0.2 沙箱）：命令行带着 ``--factory-startup`` 也**不影响**这一次
+            # 读取 —— 加载的确实是用户目录里的 startup.blend（探针里只可能来自用户启动
+            # 文件的标记存活、出厂工作区不在），所以真机测试与真实界面行为一致。
+            # 它也不会重置用户偏好设置（那是 read_factory_settings 才干的事）。
+            bpy.ops.wm.read_homefile()
         except Exception as error:
-            return restore_original("载入出厂启动文件失败：{}".format(error))
+            return restore_original("载入启动文件失败：{}".format(error))
 
+        # 启动文件只留工作区布局：把场景数据清空。
+        # 此刻**磁盘上的启动文件还没动**（只在最后 save_homefile 时落盘），
+        # 用户原来的文件也还没动（最后会重新打开）。
+        objects_left = _empty_scene_data()
+        if objects_left:
+            return restore_original(
+                "清空场景失败（还剩 {} 个物体），已中止、没有写启动文件".format(
+                    objects_left))
+
+        appended = []
+        skipped = []
         try:
             # 纯数据 API：不经过算子、没有窗口 poll，界面与无头都一样能用
             # （用 bpy.ops.wm.append 会报 poll() failed / context is incorrect，见上面注释）
             before_append = {workspace.as_pointer() for workspace in bpy.data.workspaces}
             with bpy.data.libraries.load(library, link=False) as (source, target):
-                target.workspaces = list(source.workspaces)
+                # 幂等的关键一步：只追加「启动文件里没有同名同构成」的那些
+                wanted, skipped = _plan_workspace_appends(list(source.workspaces), signatures)
+                target.workspaces = wanted
             added = [workspace for workspace in bpy.data.workspaces
                      if workspace.as_pointer() not in before_append]
         except Exception as error:
             return restore_original("追加工作区失败：{}".format(error))
+        appended = added
+        # 注意：全部被跳过（``appended`` 为空）是**正常**的 —— 那正是幂等第二次运行的
+        # 样子，不能像旧流程那样把它当成 "追加不完整" 报错。
 
-        # 校验：每个记录下来的工作区都要真的追加回来（同名冲突时 Blender 会给 .001 后缀）
-        appended = {}
-        for workspace in added:
+        # 校验：每个记录下来的工作区要么本来就在（被跳过），要么真的追加回来了
+        # （同名冲突时 Blender 会给 .001 后缀，下面重名收尾会把原名还回来）
+        appended_by_name = {}
+        for workspace in appended:
             base = workspace.name
             if base not in workspace_names:
                 base = base.rsplit(".", 1)[0]
-            appended.setdefault(base, workspace)
-        missing_workspaces = [name for name in workspace_names if name not in appended]
-        if missing_workspaces or not added:
+            appended_by_name.setdefault(base, workspace)
+        missing_workspaces = [name for name in workspace_names
+                              if bpy.data.workspaces.get(name) is None
+                              and name not in appended_by_name]
+        if missing_workspaces:
             return restore_original(
                 "追加工作区不完整（缺 {}），已中止、没有写启动文件".format(
-                    "、".join(missing_workspaces) or "全部"))
+                    "、".join(missing_workspaces)))
 
         # ---- 重名收尾：让用户的工作区拿回原来的名字 ----
         # 中文界面下出厂启动文件里也有同名工作区（布局 / 建模 / ...），所以上面那一步
@@ -1636,9 +1811,9 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
         workspace_total = len(bpy.data.workspaces)
         removed_duplicates, renamed_workspaces, collisions_left, dedupe_problems = (
             _dedupe_appended_workspaces())
-        still_alive = [workspace for workspace in added
+        still_alive = [workspace for workspace in appended
                        if any(item is workspace for item in bpy.data.workspaces)]
-        if len(still_alive) != len(added):
+        if len(still_alive) != len(appended):
             return restore_original("工作区重名收尾时丢了工作区，已中止、没有写启动文件")
         # 改名不改变数量、删除会让数量减少，所以对得上才算收尾正常
         if len(bpy.data.workspaces) != workspace_total - removed_duplicates:
@@ -1647,14 +1822,54 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
                 "已中止、没有写启动文件".format(
                     workspace_total, len(bpy.data.workspaces), removed_duplicates))
 
+        # ---- 落盘前校验：任何一条不过就**不写**启动文件（宁可没反应，也不写坏的）----
+        # ① 用户的工作区一个都没丢（名字集合 ⊇ 运行前记录的集合）
+        lost_names = [name for name in workspace_names
+                      if bpy.data.workspaces.get(name) is None]
+        if lost_names:
+            return restore_original(
+                "校验不通过：你的工作区丢了（{}），已中止、没有写启动文件".format(
+                    "、".join(lost_names)))
+        # ② 不存在 X 与 X.<数字> 并存（重名收尾之后还剩下就说明收尾没干净）
+        pairs_left = _workspace_collision_pairs()
+        if pairs_left:
+            return restore_original(
+                "校验不通过：还有 {} 对同名工作区（{}），已中止、没有写启动文件".format(
+                    len(pairs_left), "、".join(item[0].name for item in pairs_left)))
+        # ③ 启动文件是空场景
+        objects_left = len(bpy.data.objects)
+        if objects_left:
+            return restore_original(
+                "校验不通过：场景里还剩 {} 个物体，已中止、没有写启动文件".format(
+                    objects_left))
+
+        leftover_factory = sorted(workspace.name for workspace in bpy.data.workspaces
+                                  if workspace.name.startswith(FACTORY_WORKSPACE_PREFIX))
+        LAST_STARTUP_LAYOUT_RESULT.clear()
+        LAST_STARTUP_LAYOUT_RESULT.update({
+            "recorded": len(workspace_names),
+            "appended": sorted(workspace.name for workspace in appended),
+            "appended_total": len(appended),
+            "skipped": sorted(skipped),
+            "skipped_total": len(skipped),
+            "objects": objects_left,
+            "workspaces": sorted(workspace.name for workspace in bpy.data.workspaces),
+            "factory_leftovers": leftover_factory,
+            "duplicates_removed": removed_duplicates,
+            "duplicates_renamed": renamed_workspaces,
+        })
+
         # 让窗口停在**你自己**的那个工作区上。
         # 实测（4.0.2，界面与无头都测过）：脚本**改不动**当前工作区
         # （``window.workspace = ...`` 赋值不生效），所以这一步只能尽力而为，
         # 结果**核实**之后如实写进报告 —— 不假装切过去了。
-        target_workspace = (appended.get(active_name)
-                            or appended.get(workspace_names[0])
-                            or added[0])
-        switched = _make_workspace_current(target_workspace)
+        target_workspace = (appended_by_name.get(active_name)
+                            or appended_by_name.get(workspace_names[0])
+                            or (appended[0] if appended else None)
+                            or bpy.data.workspaces.get(active_name)
+                            or bpy.data.workspaces.get(workspace_names[0]))
+        switched = (target_workspace is not None
+                    and _make_workspace_current(target_workspace))
 
         try:
             bpy.ops.wm.save_homefile()
@@ -1670,9 +1885,9 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
                             "用 文件 打开 回到 {}".format(error, original_path))
                 return {'CANCELLED'}
 
-        parts = ["启动布局已重建",
-                 "写入了 {} 个工作区".format(len(added)),
-                 "启动文件现在是空场景 + 你的工作区布局（不含当前场景）"]
+        # 文案如实说清：本次新增了几个、跳过了几个（已经有的不再重复追加）、
+        # 启动文件还是空场景，以及「出厂 xxx」那批只能手工右键删。
+        parts = startup_report_parts(appended, skipped, leftover_factory)
         parts.extend(_dedupe_report_parts(collisions_before, removed_duplicates,
                                          renamed_workspaces, collisions_left,
                                          dedupe_problems))
