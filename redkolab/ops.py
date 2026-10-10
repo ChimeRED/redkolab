@@ -1718,12 +1718,26 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
                    for label, _collection, block in unused]
         missing += in_use
 
-        library = layout_library_path()
-        try:
-            bpy.data.libraries.write(library, set(bpy.data.workspaces), fake_user=True)
-        except Exception as error:
-            self.report({'ERROR'}, "写入布局库失败：{}".format(error))
-            return {'CANCELLED'}
+        # 追加工作区的**来源文件**：优先用用户自己已经保存过的那个文件
+        # （上面 is_dirty 那一步已经保证了它有 filepath）。
+        #
+        # 为什么不再"先写一个只含工作区的部分库"：实测 Blender **4.5.14 上
+        # ``bpy.data.libraries.write(<文件>, <工作区集合>)`` 必定段错误**
+        # （本机 4.5.14 复现：fake_user 真/假、只传一个工作区、不传关键字，
+        # 四种写法全崩，栈顶 ``PartialWriteContext::id_add_copy``；CI 上同一条崩溃，
+        # exit 139）。而从**全量 .blend** 里 ``libraries.load`` 追加工作区是好的
+        # （同版本探针实测通过），所以直接用用户的原文件当来源，不再写库。
+        source_path = original_path
+        if not source_path:
+            # 极少数情况（文件还没保存过）：退回部分库。这条路上要追加的清单通常
+            # 是空的（会话与启动文件里的工作区本来就一样）。
+            library = layout_library_path()
+            try:
+                bpy.data.libraries.write(library, set(bpy.data.workspaces), fake_user=True)
+            except Exception as error:
+                self.report({'ERROR'}, "写入布局库失败：{}".format(error))
+                return {'CANCELLED'}
+            source_path = library
 
         def restore_original(reason):
             """失败之后尽量把会话恢复到用户原来的文件，并给出如实的报告。"""
@@ -1772,7 +1786,7 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
             # 纯数据 API：不经过算子、没有窗口 poll，界面与无头都一样能用
             # （用 bpy.ops.wm.append 会报 poll() failed / context is incorrect，见上面注释）
             before_append = {workspace.as_pointer() for workspace in bpy.data.workspaces}
-            with bpy.data.libraries.load(library, link=False) as (source, target):
+            with bpy.data.libraries.load(source_path, link=False) as (source, target):
                 # 幂等的关键一步：只追加「启动文件里没有同名同构成」的那些
                 wanted, skipped = _plan_workspace_appends(list(source.workspaces), signatures)
                 target.workspaces = wanted

@@ -67,14 +67,28 @@ def check(condition, label, detail=""):
         text = "{}  ->  {}".format(label, detail) if detail != "" else label
         print("  [FAIL] {}".format(text))
         FAILURES.append(text)
+    # 每断言都刷一次 stdout：Blender 段错误（实测 4.5.14 上是 libraries.write）
+    # 会把 Python 的缓冲输出整块丢掉，日志就断在崩溃前几千字节处、看不出崩在哪一条。
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def section(title):
     print("\n=== {} ===".format(title))
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def skip(reason):
     print("  [skip] {}".format(reason))
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def run(title, function, *args):
@@ -2612,7 +2626,10 @@ def test_startup_layout(module):
     check("bpy.app.background" in static and "original_path" in static,
           "无头环境里 4.x 的 is_dirty 恒为 True 不会把功能锁死（只在文件已落盘时放行）")
     check("libraries.write" in static and "LAYOUT_LIBRARY_NAME" in source,
-          "先把工作区写进布局库（libraries.write，配置目录里的固定名字）")
+          "部分库只留在「文件还没保存过」的兜底分支里（4.5.14 上写部分库必崩）")
+    check("source_path" in static and "libraries.load(source_path" in static,
+          "追加来源改成**用户自己保存过的那个文件**（全量 .blend 追加不崩）",
+          static.count("source_path"))
     # 幂等的根因修复：不能再从出厂启动文件重新开始
     # （出厂启动文件里必然有同名自带工作区 -> 每点一次就多一批「出厂 xxx」）
     read_keywords = _call_keywords(source, "bpy.ops.wm.read_homefile")
@@ -2858,8 +2875,8 @@ def test_startup_layout(module):
               (recorded_path, bpy.data.filepath))
         check(os.path.exists(os.path.join(config, "startup.blend")),
               "启动文件写进了隔离目录（沙箱）", config)
-        check(os.path.exists(os.path.join(config, module.ops.LAYOUT_LIBRARY_NAME)),
-              "布局库写在配置目录里的固定名字上", module.ops.LAYOUT_LIBRARY_NAME)
+        check(not os.path.exists(os.path.join(config, module.ops.LAYOUT_LIBRARY_NAME)),
+              "正常路径下**不写**部分库（4.5.14 上 libraries.write 工作区必崩）", config)
 
         result_first = dict(module.ops.LAST_STARTUP_LAYOUT_RESULT)
         startup_first, objects_first = _read_startup_file(config)
