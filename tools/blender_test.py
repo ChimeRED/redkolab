@@ -2226,6 +2226,107 @@ def test_preset_deep_accent_families(module):
               theme.family_contrast_report(current, prefix))
 
 
+#: 视口选中几何的饱和度下限 —— 用户实测反馈给出的阈值（"被选中的线饱和度太低看不清"）。
+#: 注意：界面控件的低饱和档 #B9CE4E 饱和度实测约 0.62，**也过得了这条阈值**，
+#: 所以下面另有一条"不许等于低饱和档"的断言；两条一起才是完整防线。
+VIEWPORT_SELECTION_MIN_SATURATION = 0.6
+
+#: 用鲜亮档视口选中色的两套预设（「死亡搁浅」不在这里：它用调色板里的蓝）。
+VIEWPORT_SELECTION_PRESETS = ("马拉松 建模 低干扰", "马拉松 浅灰卡")
+
+#: 「界面控件的低饱和档没有被连带改亮」的代表性路径（普通按钮 / 分组框 / 列表行）。
+CALM_GUARD_PATHS = (
+    "user_interface.wcol_regular.inner_sel",
+    "user_interface.wcol_box.inner_sel",
+    "user_interface.wcol_list_item.inner_sel",
+)
+
+
+def test_viewport_selection_accent(module):
+    section("预设：视口里被选中的几何用鲜亮档（不被界面控件的低饱和档连带压灰）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    bright = theme.hex_color(theme.TOKENS["ACCENT_PRIMARY"])
+    calm = theme.hex_color(theme.TOKENS["ACCENT_PRIMARY_CALM"])
+    print("  视口选中几何：鲜亮档 {} 饱和度 {:.3f} / 低饱和档 {} 饱和度 {:.3f}".format(
+        theme.color_to_hex(bright), theme.saturation_of(bright),
+        theme.color_to_hex(calm), theme.saturation_of(calm)))
+    # 「死亡搁浅」本次**只测量、不改色**（在下面单独打印实测值，供报告取证）
+    death_stranding = theme.preset_colors("死亡搁浅") or {}
+    ds_edge = death_stranding.get("view_3d.edge_select")
+    print("  死亡搁浅视口选中色 {} 饱和度 {:.3f}（本次不改 DS，仅记录）".format(
+        theme.color_to_hex(ds_edge), theme.saturation_of(ds_edge)))
+
+    check(tuple(theme.VIEWPORT_SELECTION_PATHS) == (
+        "view_3d.editmesh_active", "view_3d.vertex_select",
+        "view_3d.edge_select", "view_3d.face_select"),
+        "「视口选中几何」清单就是活动元素 / 顶点 / 边 / 面 四项",
+        theme.VIEWPORT_SELECTION_PATHS)
+    check(not (set(theme.VIEWPORT_SELECTION_PATHS) & set(theme.viewport_helper_paths())),
+          "选中几何与「写回出厂默认值」的视口辅助元素不重叠（两套机制分开）",
+          theme.VIEWPORT_SELECTION_PATHS)
+    untouched = [path for path in ("view_3d.edge", "view_3d.wire_edit", "view_3d.edge_seam",
+                                   "view_3d.edge_sharp", "view_3d.edge_crease",
+                                   "view_3d.edge_bevel")
+                 if path in theme.VIEWPORT_SELECTION_PATHS]
+    check(not untouched,
+          "未选中边 / 线框 / 特征标记没有进「鲜亮档」清单（保持原设计）", untouched)
+
+    measured = []
+    for preset in VIEWPORT_SELECTION_PRESETS:
+        colors = theme.preset_colors(preset) or {}
+        for path in theme.VIEWPORT_SELECTION_PATHS:
+            color = colors.get(path)
+            check(color is not None,
+                  "预设「{}」{} 有显式赋值（视口选中色不能留空）".format(preset, path))
+            if color is None:
+                continue
+            saturation = theme.saturation_of(color)
+            measured.append((preset, path, saturation, theme.color_to_hex(color)))
+            check(saturation >= VIEWPORT_SELECTION_MIN_SATURATION,
+                  "预设「{}」{} 饱和度 >= {}（阈值；实测 {:.3f}，色值 {}）".format(
+                      preset, path, VIEWPORT_SELECTION_MIN_SATURATION,
+                      saturation, theme.color_to_hex(color)))
+            check(not color_close(color, calm, 0.02),
+                  "预设「{}」{} 不再等于界面控件的低饱和档 {}（防止改回去；实测饱和度 {:.3f}）".format(
+                      preset, path, theme.color_to_hex(calm), saturation),
+                  (theme.color_to_hex(color), theme.color_to_hex(calm)))
+    for preset, path, saturation, value in measured:
+        print("    {} | {} = {} 饱和度 {:.3f}".format(preset, path, value, saturation))
+
+    # 界面控件的低饱和档没有被"一改全亮"连带改掉（三个代表家族）
+    for preset in VIEWPORT_SELECTION_PRESETS:
+        colors = theme.preset_colors(preset) or {}
+        for path in CALM_GUARD_PATHS:
+            value = colors.get(path)
+            check(value is not None and color_close(value, calm, 0.02),
+                  "预设「{}」{} 仍是界面控件的低饱和档 {}（没有被连带改亮）".format(
+                      preset, path, theme.color_to_hex(calm)),
+                  (theme.color_to_hex(value), theme.color_to_hex(calm)))
+
+    # 真套一次：从**实际主题**读回校验（8 位量化之后也不许掉回低饱和档）
+    theme.apply_colors(current, theme.preset_colors(VIEWPORT_SELECTION_PRESETS[0]) or {})
+    live = {}
+    for path in theme.VIEWPORT_SELECTION_PATHS:
+        color = theme.get_color(current, path)
+        if color is not None:
+            live[path] = theme.saturation_of(color)
+    check(len(live) >= 1,
+          "能从实际主题读回选中几何（{} / {} 项在当前 Blender 上存在）".format(
+              len(live), len(theme.VIEWPORT_SELECTION_PATHS)), sorted(live))
+    below = {path: round(value, 3) for path, value in sorted(live.items())
+             if value < VIEWPORT_SELECTION_MIN_SATURATION}
+    check(not below,
+          "套用「{}」后实际主题里的选中几何饱和度 >= {}（读回实测 {}）".format(
+              VIEWPORT_SELECTION_PRESETS[0], VIEWPORT_SELECTION_MIN_SATURATION,
+              {path: round(value, 3) for path, value in sorted(live.items())}),
+          below)
+
+
 def test_save_preferences(module):
     section("功能：保存到偏好设置（算子名 + 真跑一次）")
     # 注意：不能用 hasattr(bpy.ops.wm, "save_userpref") —— 项目已知它对不存在的算子名恒为真
@@ -3137,6 +3238,7 @@ def main():
     run("预设：死亡搁浅", test_preset_death_stranding, module)
     run("预设：视口辅助元素", test_preset_viewport_helpers, module)
     run("预设：深档强调的三个家族", test_preset_deep_accent_families, module)
+    run("预设：视口选中几何用鲜亮档", test_viewport_selection_accent, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)

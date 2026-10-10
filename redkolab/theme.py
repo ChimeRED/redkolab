@@ -993,6 +993,26 @@ VIEWPORT_HELPERS = (
     "view_3d.normal",
 )
 
+#: 视口里「**被选中的几何**」的四个颜色项：编辑模式活动元素、顶点 / 边 / 面 的选中色。
+#:
+#: 这几项**必须用鲜亮档强调色**（``ACCENT_PRIMARY``），不能跟界面控件一起用低饱和档
+#: （``ACCENT_PRIMARY_CALM``）。理由来自用户实测反馈："被选中的线饱和度太低看不清"——
+#: 界面控件降饱和是为了长时间工作耐看，而"视口里哪些东西被选中"是必须一眼看清的信息。
+#: 上一版把两者一起降饱和，就是那次**过度应用**：界面照旧用低饱和档，视口选中几何回鲜亮档。
+#:
+#: **不在**这一组里（保持现设计，不要顺手改）：
+#: ``view_3d.edge``（未选中边）、``view_3d.wire_edit``（编辑模式线框）、
+#: ``view_3d.edge_seam`` / ``edge_sharp`` / ``edge_crease`` / ``edge_bevel``
+#: （缝合线 / 锐边 / 折痕 / 倒角权重这些特征标记）、``view_3d.vertex_active``
+#: （活动顶点，预设给的是白色），以及 :data:`VIEWPORT_HELPERS`（网格线 / 法线，
+#: 继续写回出厂默认值）。
+VIEWPORT_SELECTION_PATHS = (
+    "view_3d.editmesh_active",
+    "view_3d.vertex_select",
+    "view_3d.edge_select",
+    "view_3d.face_select",
+)
+
 #: 「标签与选中块分离」的控件家族：Blender 里这三类按钮的**标签文字不在选中块上**，
 #: 只有那个小方块 / 小圆点 / 开关体用 ``inner_sel`` 填色，标签仍然读 ``text_sel``（源码依据：
 #: ``interface_widgets.cc`` 的 ``widget_state()`` 把 ``inner``/``text`` 换成 ``inner_sel``/
@@ -1297,6 +1317,12 @@ def _marathon_card_preset():
         "user_interface.wcol_box.inner_sel": hex_color(accent),
         "user_interface.wcol_list_item.inner_sel": hex_color(accent),
         "user_interface.panel_active": hex_color(accent),
+        # 视口里「被选中的几何」用**鲜亮档**：界面控件走低饱和档，视口选中色不跟着压灰
+        # （用户实测："被选中的线饱和度太低看不清"，见 VIEWPORT_SELECTION_PATHS）
+        "view_3d.editmesh_active": hex_color(MARATHON["lime"]),
+        "view_3d.vertex_select": hex_color(MARATHON["lime"]),
+        "view_3d.edge_select": hex_color(MARATHON["lime"]),
+        "view_3d.face_select": hex_color(MARATHON["lime"], 0.5),
         "user_interface.wcol_state.inner_changed": marathon_color("lime"),
         "user_interface.wcol_state.inner_changed_sel": marathon_color("lime_dim"),
         "user_interface.wcol_state.inner_anim": marathon_color("cyan"),
@@ -1536,12 +1562,13 @@ def _marathon_preset_work():
         "properties.tab_back": hex_color(TOKENS["BG_PANEL"]),
         "properties.tab_active": hex_color(TOKENS["BG_ELEVATED"]),
         "properties.tab_inactive": hex_color(TOKENS["BG_PRIMARY"]),
-        # 3D 编辑模式：顶点白、选中黄绿、缝合/锐边/折痕各自可辨
-        "view_3d.editmesh_active": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
-        "view_3d.vertex_select": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        # 3D 编辑模式：顶点白、**选中几何用鲜亮档**（界面控件才用低饱和档）、
+        # 缝合 / 锐边 / 折痕各自可辨（见 VIEWPORT_SELECTION_PATHS 的说明）
+        "view_3d.editmesh_active": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "view_3d.vertex_select": hex_color(TOKENS["ACCENT_PRIMARY"]),
         "view_3d.vertex_active": hex_color("#FFFFFF"),
-        "view_3d.edge_select": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
-        "view_3d.face_select": hex_color(TOKENS["ACCENT_PRIMARY_CALM"], 0.5),
+        "view_3d.edge_select": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "view_3d.face_select": hex_color(TOKENS["ACCENT_PRIMARY"], 0.5),
         "view_3d.edge_seam": hex_color(TOKENS["STATE_ERROR"]),
         "view_3d.edge_sharp": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
         "view_3d.edge_crease": hex_color(TOKENS["ACCENT_TERTIARY_CALM"]),
