@@ -1216,6 +1216,78 @@ def test_theme(module):
     # 还原测试前的颜色
     theme.set_color(current, rgb_path, original_rgb)
     theme.set_color(current, rgba_path, original_rgba)
+    # ---- 饱和度：预设滑杆（theme.desaturate_* + preferences.preset_saturation）----
+    # 功能早就实现了，却一直没有断言：滑到 0 会不会把界面弄脏、反复拖动会不会越拖
+    # 越灰，之前没人管。纯函数与真实算符两条路都验一遍。
+    probe = (0.7765, 1.0, 0.0, 1.0)   # 酸性黄绿：饱和度高、明度也高
+    check(color_close(theme.desaturate_color(probe, 1.0), probe),
+          "factor=1.0 时颜色原样不变", theme.desaturate_color(probe, 1.0))
+    grey = theme.desaturate_color(probe, 0.0)
+    check(theme.saturation_of(grey) < 0.01 and max(grey[:3]) - min(grey[:3]) < 0.005,
+          "factor=0.0 时变成灰（三个通道相等）", (grey, theme.saturation_of(grey)))
+    softened = theme.desaturate_color(probe, 0.4)
+    check(theme.saturation_of(softened) < theme.saturation_of(probe) * 0.6
+          and theme.saturation_of(softened) > 0.0,
+          "0.4 倍之后饱和度明显下降，但没有直接变灰",
+          (theme.saturation_of(probe), theme.saturation_of(softened)))
+    check(theme.luminance(softened) >= 0.45
+          and theme.readable_text_color(softened) == theme.TEXT_ON_LIGHT,
+          "降饱和后底色仍够亮，配深色文字仍看得清",
+          (theme.luminance(softened), theme.color_to_hex(softened)))
+    check(color_close(theme.desaturate_color(probe, 0.4), softened),
+          "同一个颜色降饱和是确定性的（两次算出同一个值）")
+
+    batch = {"a": probe, "b": (0.1, 0.2, 0.9, 1.0), "c": (0.5, 0.5, 0.5, 1.0)}
+    batch_low = theme.desaturate_colors(batch, 0.4)
+    check(set(batch_low) == set(batch), "批量降饱和不丢项（键一个不少）",
+          (sorted(batch), sorted(batch_low)))
+    check(all(theme.saturation_of(batch_low[key]) <= theme.saturation_of(batch[key]) + 1e-9
+              for key in batch),
+          "批量里每一项的饱和度都没有被调高")
+    check(max(batch_low["c"][:3]) - min(batch_low["c"][:3]) < 0.005,
+          "批量里的灰色项仍是灰的", batch_low["c"])
+    check(theme.desaturate_colors(None, 0.4) == {}, "批量降饱和对空输入返回空字典")
+
+    # 每个预设：高饱和的颜色在 0.4 倍之后都要明显更灰；原本够亮的底色不能变暗到看不清
+    not_greyer = []
+    light_thin = []
+    for name in theme.preset_names():
+        for path, color in (theme.preset_colors(name) or {}).items():
+            full = theme.desaturate_color(color, 1.0)
+            low = theme.desaturate_color(color, 0.4)
+            if (theme.saturation_of(full) > 0.2
+                    and theme.saturation_of(low) >= theme.saturation_of(full) * 0.6):
+                not_greyer.append("{}:{}".format(name, path))
+            if (theme.luminance(full) >= 0.45
+                    and theme.readable_text_color(low) != theme.TEXT_ON_LIGHT):
+                light_thin.append("{}:{}".format(name, path))
+    check(not not_greyer, "每个预设里高饱和的颜色在 0.4 倍后都明显更灰", not_greyer[:6])
+    check(not light_thin, "降饱和没有把浅色底压暗到看不清深色字", light_thin[:6])
+
+    # 真滑杆：40% 的选中色必须比 100% 更灰，而且反复套用不累积
+    original_saturation = float(preferences.preset_saturation)
+    preferences.preset_saturation = 1.0
+    result = bpy.ops.hhz.theme_apply_preset(preset=preset_name)
+    check(result == {'FINISHED'}, "饱和度 100% 时「应用预设」算符可用", result)
+    full_saturation = theme.saturation_of(theme.get_color(current, blue_path))
+    preferences.preset_saturation = 0.4
+    result = bpy.ops.hhz.theme_apply_preset(preset=preset_name)
+    check(result == {'FINISHED'}, "饱和度 40% 时「应用预设」算符可用", result)
+    low_saturation = theme.saturation_of(theme.get_color(current, blue_path))
+    check(low_saturation < full_saturation * 0.7,
+          "40% 的选中色比 100% 更灰（滑杆真的落到主题上）",
+          (full_saturation, low_saturation, theme.color_to_hex(theme.get_color(current, blue_path))))
+    first_pass = theme.get_color(current, blue_path)
+    result = bpy.ops.hhz.theme_apply_preset(preset=preset_name)
+    second_pass = theme.get_color(current, blue_path)
+    check(result == {'FINISHED'} and color_close(first_pass, second_pass),
+          "同一饱和度重复套用结果一致（从预设表重算，不累积变灰）",
+          (first_pass, second_pass))
+    check(abs(theme.saturation_of(second_pass) - low_saturation) < 0.01,
+          "第二次套用后的饱和度与第一次相同（没有变成 16%）",
+          (low_saturation, theme.saturation_of(second_pass)))
+    preferences.preset_saturation = original_saturation
+
 
 
 def pie_operator_idnames(source):
@@ -1693,6 +1765,62 @@ def test_layout(module):
     confirm = bpy.ops.hhz.layout_save_startup.get_rna_type().properties.get("confirm")
     check(confirm is not None and confirm.default is False,
           "confirm 默认 False（不会静默覆盖启动文件）", getattr(confirm, "default", None))
+    # ---- 区域配对：必须按几何位置配，不能按列表顺序 zip ----
+    # 真实事故：应用保存的布局后各功能区乱窜 —— screen.areas 的内部顺序与"按位置
+    # 排序"保存的顺序并不一致，按顺序 zip 会把编辑器类型安到错误的区域上。
+    # 这里用纯数据复现，不依赖真实 UI 分区。
+    saved_areas = [
+        {"type": "VIEW_3D", "x": 0.0, "y": 0.0, "w": 0.75, "h": 1.0},
+        {"type": "OUTLINER", "x": 0.75, "y": 0.0, "w": 0.25, "h": 1.0},
+    ]
+    # 当前区域顺序与保存顺序相反：左边的这一格才是 VIEW_3D
+    reversed_boxes = [
+        {"x": 0.75, "y": 0.0, "w": 0.25, "h": 1.0},
+        {"x": 0.0, "y": 0.0, "w": 0.75, "h": 1.0},
+    ]
+    pairs = layout.match_areas(saved_areas, reversed_boxes)
+    check(len(pairs) == 2, "每个当前区域都配到一个保存项", pairs)
+    check(all(0 <= index < len(reversed_boxes) for index, _saved in pairs),
+          "配对结果给的是当前区域的下标",
+          [(index, saved["type"]) for index, saved in pairs])
+    check(len({id(saved) for _index, saved in pairs}) == len(pairs),
+          "同一个保存项不会被用两次")
+    matched = {index: saved["type"] for index, saved in pairs}
+    check(matched.get(0) == "OUTLINER" and matched.get(1) == "VIEW_3D",
+          "当前区域顺序与保存顺序相反时仍按位置配对正确",
+          [(index, saved["type"]) for index, saved in pairs])
+    check(len(layout.match_areas([], reversed_boxes)) == 0,
+          "没有保存项时配对为空（不抛异常）")
+    check(len(layout.match_areas(saved_areas, [])) == 0,
+          "没有当前区域时配对为空（不抛异常）")
+
+    # 四宫格：保存顺序与坐标顺序完全错开，当前区域又是另一种顺序
+    grid_saved = [
+        {"type": "D", "x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5},
+        {"type": "C", "x": 0.0, "y": 0.5, "w": 0.5, "h": 0.5},
+        {"type": "B", "x": 0.5, "y": 0.0, "w": 0.5, "h": 0.5},
+        {"type": "A", "x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5},
+    ]
+    grid_boxes = [
+        {"x": 0.0, "y": 0.0, "w": 0.5, "h": 0.5},   # 左下 -> A
+        {"x": 0.5, "y": 0.5, "w": 0.5, "h": 0.5},   # 右上 -> D
+        {"x": 0.5, "y": 0.0, "w": 0.5, "h": 0.5},   # 右下 -> B
+        {"x": 0.0, "y": 0.5, "w": 0.5, "h": 0.5},   # 左上 -> C
+    ]
+    grid_pairs = layout.match_areas(grid_saved, grid_boxes)
+    grid_matched = {index: saved["type"] for index, saved in grid_pairs}
+    check(grid_matched == {0: "A", 1: "D", 2: "B", 3: "C"},
+          "四宫格里每个当前区域都配到位置上对应的保存项", grid_matched)
+    check(len({id(saved) for _index, saved in grid_pairs}) == 4,
+          "四宫格里四个保存项各用了一次")
+
+    # 当前区域比保存项多：只能配出保存项那么多，且绝不重复用一个
+    extra_boxes = grid_boxes + [{"x": 0.0, "y": 0.0, "w": 0.25, "h": 0.25}]
+    crowded = layout.match_areas(grid_saved, extra_boxes)
+    check(len(crowded) == len(grid_saved), "当前区域更多时配对数量以保存项为准", len(crowded))
+    check(len({id(saved) for _index, saved in crowded}) == len(crowded),
+          "多出来的当前区域不会让保存项被重复使用")
+
 
 
 def test_unregister(module_name, module):
