@@ -399,7 +399,8 @@ def test_registration(module_name, module):
     check(not offenders, "没有任何面板使用 bl_parent_id（否则可能不在 N 面板显示）",
           offenders)
 
-    for idname in ("HHZ_PT_theme", "HHZ_PT_hotkey", "HHZ_PT_settings", "HHZ_PT_order"):
+    for idname in ("HHZ_PT_theme", "HHZ_PT_hotkey", "HHZ_PT_settings",
+                   "HHZ_PT_order", "HHZ_PT_layout"):
         panel = getattr(bpy.types, idname, None)
         check(panel is not None, "面板 {} 已注册".format(idname))
         if panel is not None:
@@ -902,10 +903,78 @@ def test_theme(module):
     check(result == {'FINISHED'}, "「读取当前值」算符可用", result)
     result = bpy.ops.hhz.theme_apply_preset(preset=preset_name)
     check(result == {'FINISHED'}, "「应用预设」算符可用", result)
-    result = bpy.ops.hhz.theme_restore_default(scope='VIEWPORT')
-    check(result == {'FINISHED'}, "「全部视口恢复默认」算符可用", result)
-    result = bpy.ops.hhz.theme_restore_default(scope='WIDGET')
-    check(result == {'FINISHED'}, "「全部控件恢复默认」算符可用", result)
+    result = bpy.ops.hhz.theme_restore_default(scope='GROUP')
+    check(result == {'FINISHED'}, "「恢复本组」算符可用", result)
+    result = bpy.ops.hhz.theme_restore_default(scope='ALL')
+    check(result == {'FINISHED'}, "「全部恢复」算符可用", result)
+
+    # ---- 分组：底色 / 文字与图标 / 边框 是分开的 ----
+    groups = theme.group_names(listed)
+    check("按钮·底色" in groups and "按钮·文字与图标" in groups and "按钮·边框" in groups,
+          "按钮的底色 / 文字与图标 / 边框是三个独立分组", groups[:6])
+    check(theme.group_of(grey_path) == "按钮·底色", "普通按钮底色归到「按钮·底色」",
+          theme.group_of(grey_path))
+    check(theme.group_of("user_interface.wcol_regular.text") == "按钮·文字与图标",
+          "按钮文字与图标归到「按钮·文字与图标」")
+    check(theme.group_of("user_interface.wcol_regular.outline") == "按钮·边框",
+          "按钮边框归到「按钮·边框」")
+    border_paths = theme.paths_in_group("按钮·边框", listed)
+    check(len(border_paths) >= 3 and all(path.endswith(".outline") for path in border_paths),
+          "「按钮·边框」组里全是 outline 项", border_paths[:4])
+    check(isinstance(theme.differing_paths(current, theme.default_paths()), list),
+          "能列出与出厂默认值不同的颜色项（面板上会显示这个数字）")
+    check(len(theme.default_paths()) >= 40, "记录了出厂默认值的项 >= 40",
+          len(theme.default_paths()))
+
+    # ---- 图标颜色 ----
+    icon_paths = [path for path in listed if ".icon_" in path]
+    check(len(icon_paths) >= 6, "图标颜色项 >= 6", icon_paths)
+
+    # ---- 时间线当前帧：4.x 有、5.x 已被 Blender 移除 ----
+    frame_path = "dopesheet_editor.frame_current"
+    has_frame = frame_path in listed
+    if bpy.app.version < (5, 0, 0):
+        check(has_frame, "4.x 上时间线当前帧色在列表里", frame_path)
+        check(theme.has_default(frame_path), "时间线当前帧记录了出厂默认值")
+        check(color_close(theme.get_color(current, frame_path),
+                          theme.DEFAULT_COLORS[frame_path]),
+              "时间线当前帧默认是蓝色", theme.get_color(current, frame_path))
+    else:
+        check(not has_frame, "5.x 上时间线当前帧色已被 Blender 移除（自动隐藏）", frame_path)
+
+    # ---- 自定义配色：保存 -> 套用 -> 删除 ----
+    stored = getattr(preferences, "theme_custom", "")
+    saved_colors = theme.capture_colors(current, listed)
+    text, ok = theme.custom_save(stored, "测试配色", saved_colors)
+    check(ok and "测试配色" in theme.custom_names(text), "自定义配色可以保存")
+    check(theme.custom_colors(text, "测试配色") is not None, "保存后能读回来")
+    check(len(theme.custom_colors(text, "测试配色")) == len(saved_colors),
+          "存下来的颜色项数量一致", len(theme.custom_colors(text, "测试配色")))
+    check(theme.load_custom(theme.dump_custom(theme.load_custom(text))) == theme.load_custom(text),
+          "自定义配色 JSON 往返一致")
+    theme.set_color(current, grey_path, (0.9, 0.1, 0.1, 1.0))
+    applied = 0
+    for item_path, color in (theme.custom_colors(text, "测试配色") or {}).items():
+        if theme.set_color(current, item_path, color):
+            applied += 1
+    check(applied >= 20, "套用自定义配色能写回很多项", applied)
+    text2, removed = theme.custom_delete(text, "测试配色")
+    check(removed and "测试配色" not in theme.custom_names(text2), "自定义配色可以删除")
+
+    # ---- 字体设置 ----
+    font_items = theme.font_items(context)
+    check(len(font_items) >= 5, "字体设置项 >= 5", [item[0] for item in font_items])
+    keys = [item[0] for item in font_items]
+    for key in ("ui_scale", "font_path_ui", "text_hinting", "use_text_antialiasing"):
+        check(key in keys, "字体设置里有 {}".format(key), keys)
+    original_scale = theme.font_get(context, "ui_scale")
+    check(theme.font_set(context, "ui_scale", 1.25), "能改界面缩放")
+    check(abs(float(theme.font_get(context, "ui_scale")) - 1.25) < 0.001,
+          "界面缩放写回一致", theme.font_get(context, "ui_scale"))
+    check(theme.font_set(context, "ui_scale", original_scale), "能改回去")
+    check(theme.font_get(context, "font_path_ui") == "", "界面字体默认是空（用自带的）")
+    check("ui_scale" in theme.font_defaults(), "记录了字体出厂默认值")
+    check(theme.font_restore(context) >= 5, "字体一键恢复默认可用")
 
     # 面板挂在 N 面板里（需求：只进 N 面板）
     panel = getattr(bpy.types, "HHZ_PT_theme", None)
@@ -992,14 +1061,14 @@ def test_panel_order(module):
     context = bpy.context
 
     # ---- 列表模型（纯逻辑，可精确断言）----
-    check(len(panels.SECTIONS) >= 3, "可排序分块至少 3 个", len(panels.SECTIONS))
+    check(len(panels.SECTIONS) >= 4, "可排序分块至少 4 个", len(panels.SECTIONS))
     check(panels.parse_order("") == list(panels.DEFAULT_SECTION_ORDER),
           "空配置回落到默认顺序", panels.parse_order(""))
     check(panels.parse_order("settings,theme") ==
-          ["settings", "theme", "hotkey"], "解析顺序并补齐缺失分块",
+          ["settings", "theme", "hotkey", "layout"], "解析顺序并补齐缺失分块",
           panels.parse_order("settings,theme"))
     check(panels.parse_order("nope,theme,theme,settings") ==
-          ["theme", "settings", "hotkey"], "未知项丢弃、重复项去重",
+          ["theme", "settings", "hotkey", "layout"], "未知项丢弃、重复项去重",
           panels.parse_order("nope,theme,theme,settings"))
     check(panels.move_item(["a", "b", "c"], 0, 2) == ["b", "c", "a"], "向下移动元素")
     check(panels.move_item(["a", "b", "c"], 2, 0) == ["c", "a", "b"], "向上移动元素")
@@ -1028,16 +1097,20 @@ def test_panel_order(module):
           bpy.types.HHZ_PT_theme.bl_order)
     check(bpy.types.HHZ_PT_hotkey.bl_order == 4, "第 3 位面板的 bl_order = 4",
           bpy.types.HHZ_PT_hotkey.bl_order)
+    check(bpy.types.HHZ_PT_layout.bl_order == 5, "第 4 位面板（页面布局）的 bl_order = 5",
+          bpy.types.HHZ_PT_layout.bl_order)
     check(bpy.types.HHZ_PT_order.bl_order == panels.ORDER_PANEL_ORDER,
           "顺序编辑器被固定在最后", bpy.types.HHZ_PT_order.bl_order)
 
     values = [bpy.types.HHZ_PT_pages.bl_order, bpy.types.HHZ_PT_main.bl_order,
               bpy.types.HHZ_PT_settings.bl_order, bpy.types.HHZ_PT_theme.bl_order,
-              bpy.types.HHZ_PT_hotkey.bl_order, bpy.types.HHZ_PT_order.bl_order]
+              bpy.types.HHZ_PT_hotkey.bl_order, bpy.types.HHZ_PT_layout.bl_order,
+              bpy.types.HHZ_PT_order.bl_order]
     check(len(set(values)) == len(values), "各面板 bl_order 互不相同（顺序无歧义）", values)
 
     order = ui.apply_panel_order(context)
-    check(order == ["settings", "theme", "hotkey"], "注册时的应用函数返回当前顺序", order)
+    check(order == ["settings", "theme", "hotkey", "layout"],
+          "注册时的应用函数返回当前顺序", order)
 
     preferences.panel_order = ",".join(panels.DEFAULT_SECTION_ORDER)
     ui.apply_panel_order(context)
@@ -1056,19 +1129,19 @@ def test_panel_order(module):
           "子面板没有被当成独立标签页")
 
     # ---- 注册顺序那一层（3D 视图侧栏真正认的）----
-    keys = panels.our_panel_keys(["theme", "settings", "hotkey"])
+    keys = panels.our_panel_keys(panels.read_section_order(preferences))
     check(keys[:2] == ["HHZ_PT_pages", "HHZ_PT_main"],
           "分页标签条与主面板排在最前", keys)
     check(keys[-1] == "HHZ_PT_order", "顺序编辑器排在最后", keys)
-    check(keys[2:5] == ["HHZ_PT_theme", "HHZ_PT_settings", "HHZ_PT_hotkey"],
-          "可排序面板按给定顺序展开", keys)
+    check("HHZ_PT_layout" in keys and "HHZ_PT_theme" in keys,
+          "四个可排序面板都在列表里（theme / hotkey / settings / layout）", keys)
 
-    registered, failures = panels.reregister_our_panels(["theme", "settings", "hotkey"])
-    check(registered == 6 and not failures, "重新注册本插件 6 个面板成功",
+    registered, failures = panels.reregister_our_panels(panels.read_section_order(preferences))
+    check(registered == 7 and not failures, "重新注册本插件 7 个面板成功",
           "{} 个 / {}".format(registered, failures))
     check(all(getattr(bpy.types, key, None) is not None
               for key in ("HHZ_PT_pages", "HHZ_PT_main", "HHZ_PT_theme", "HHZ_PT_hotkey",
-                          "HHZ_PT_settings", "HHZ_PT_order")),
+                          "HHZ_PT_settings", "HHZ_PT_order", "HHZ_PT_layout")),
           "重新注册后所有面板类都还在")
     check(sorted(panels.panel_groups().keys()) == sorted(groups.keys()),
           "重新注册后标签页一个都没少", sorted(panels.panel_groups().keys()))
@@ -1115,6 +1188,7 @@ def test_pages(module):
         "HHZ_PT_hotkey": pages.PAGE_TOOLS,
         "HHZ_PT_settings": pages.PAGE_TOOLS,
         "HHZ_PT_order": pages.PAGE_TOOLS,
+        "HHZ_PT_layout": pages.PAGE_TOOLS,
         "HHZ_PT_theme": pages.PAGE_THEME,
     }
     for page in ("MODELING", "TOOLS", "THEME"):
@@ -1278,6 +1352,63 @@ def source_of(module, filename):
         return handle.read()
 
 
+def test_layout(module):
+    section("功能：页面布局（保存 / 在新文件里使用）")
+    layout = module.layout
+    context = bpy.context
+
+    check(operator_class(module, "layout_save") is not None, "算符 hhz.layout_save 已注册")
+    for idname in ("layout_apply", "layout_delete", "layout_save_startup"):
+        check(operator_class(module, idname) is not None,
+              "算符 hhz.{} 已注册".format(idname))
+
+    # 后台模式没有窗口：capture 要老老实实返回 None，apply 要明确拒绝而不是崩
+    snapshot = layout.capture(context)
+    check(snapshot is None or isinstance(snapshot, dict),
+          "capture 返回 dict 或 None（后台模式没有窗口）", snapshot)
+    if snapshot is None:
+        message, ok = layout.apply(context, {"active": "Layout", "workspaces": []})
+        check(not ok and isinstance(message, str), "后台模式下 apply 明确拒绝并给出说明", message)
+    else:
+        check(bool(snapshot.get("workspaces")), "抓到了工作区列表",
+              [item.get("name") for item in snapshot.get("workspaces") or []])
+        first = (snapshot.get("workspaces") or [{}])[0]
+        areas = first.get("areas") or []
+        check(isinstance(areas, list), "每个工作区带区域列表", len(areas))
+        check(all(0.0 <= float(area.get("w", 0)) <= 1.0 for area in areas),
+              "区域宽度存的是相对值（换分辨率也能用）", [area.get("w") for area in areas][:4])
+
+    # JSON 往返 + 保存 / 列表 / 删除
+    fake = {
+        "active": "Layout",
+        "workspaces": [
+            {"name": "Layout", "areas": [
+                {"type": "VIEW_3D", "x": 0.0, "y": 0.0, "w": 0.75, "h": 1.0},
+                {"type": "OUTLINER", "x": 0.75, "y": 0.0, "w": 0.25, "h": 1.0},
+            ]},
+            {"name": "Modeling", "areas": [
+                {"type": "VIEW_3D", "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+            ]},
+        ],
+    }
+    text, ok = layout.save("", "测试布局", fake)
+    check(ok, "能保存一份布局")
+    check(layout.names(text) == ["测试布局"], "列表里有这个名字", layout.names(text))
+    loaded = layout.load(text)
+    check(loaded.get("测试布局") == fake, "JSON 往返后内容一致")
+    check(layout.save(text, "", fake)[1] is False, "名字为空时拒绝保存")
+    text2, removed = layout.delete(text, "测试布局")
+    check(removed and layout.names(text2) == [], "能删除这份布局")
+    check(layout.load("这不是 JSON") == {}, "坏数据不会让插件崩")
+
+    # 启动布局算符要带确认，因为会覆盖 startup.blend
+    startup = module.ops.HHZ_OT_layout_save_startup
+    check("invoke" in startup.__dict__, "「存为启动布局」走确认弹窗（不点一下就覆盖）")
+    confirm = bpy.ops.hhz.layout_save_startup.get_rna_type().properties.get("confirm")
+    check(confirm is not None and confirm.default is False,
+          "confirm 默认 False（不会静默覆盖启动文件）", getattr(confirm, "default", None))
+
+
 def test_unregister(module_name, module):
     section("卸载清理")
     keyconfig = module.compat.addon_keyconfig()
@@ -1325,6 +1456,7 @@ def main():
     run("主题颜色（N 面板）", test_theme, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
+    run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)
     run("算符 poll", test_poll)
     run("卸载清理", test_unregister, module_name, module)

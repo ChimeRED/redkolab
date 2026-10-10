@@ -13,7 +13,7 @@
 
 import bpy
 
-from . import compat, panels, stairs, theme, ui
+from . import compat, layout, panels, stairs, theme, ui
 
 # --------------------------------------------------------------------- 小工具
 
@@ -633,14 +633,14 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
 class HHZ_OT_theme_restore_default(bpy.types.Operator):
     bl_idname = "hhz.theme_restore_default"
     bl_label = "恢复颜色默认值"
-    bl_description = "把当前颜色（或整组控件 / 视口颜色）恢复为 Blender 出厂默认"
+    bl_description = "把当前颜色、当前分组或全部有默认值的颜色恢复为 Blender 出厂默认"
 
     scope: bpy.props.EnumProperty(
         name="范围",
         items=(
-            ('CURRENT', "当前颜色", "只恢复当前选中的这一项"),
-            ('WIDGET', "全部控件颜色", "恢复按钮与状态色（灰色按钮 / 选中蓝色那一批）"),
-            ('VIEWPORT', "全部视口颜色", "恢复视口那一组的全部颜色"),
+            ('CURRENT', "当前这一项", "只恢复当前选中的颜色"),
+            ('GROUP', "当前分组", "恢复下拉框里当前这一组的全部颜色"),
+            ('ALL', "全部（有默认值的项）", "把记录了出厂默认值的颜色全部恢复"),
         ),
         default='CURRENT',
     )
@@ -651,34 +651,279 @@ class HHZ_OT_theme_restore_default(bpy.types.Operator):
             self.report({'ERROR'}, "读不到当前主题")
             return {'CANCELLED'}
 
-        if self.scope == 'WIDGET':
-            changed = theme.restore_widget_defaults(current)
-            if not changed:
-                self.report({'WARNING'}, "没有可恢复的控件颜色")
+        preferences = compat.get_preferences(context)
+        path = getattr(preferences, "theme_target", "") if preferences else ""
+        available = theme.available_paths(context)
+
+        if self.scope == 'GROUP':
+            group = theme.group_of(path) or getattr(preferences, "theme_group", "")
+            paths = theme.paths_in_group(group, available)
+            if not paths:
+                self.report({'WARNING'}, "这一组里没有可恢复的颜色项")
                 return {'CANCELLED'}
-            self.report({'INFO'}, "已恢复 {} 项控件颜色（按钮 / 状态）".format(changed))
-        elif self.scope == 'VIEWPORT':
-            changed = theme.restore_viewport_defaults(current)
+            changed = theme.restore_defaults(current, paths)
+            skipped = len(paths) - changed
+            message = "「{}」组：恢复 {} 项".format(group or "?", changed)
+            if skipped:
+                message += "，{} 项没有记录默认值（跳过）".format(skipped)
+            self.report({'INFO' if changed else 'WARNING'}, message)
             if not changed:
-                self.report({'WARNING'}, "没有可恢复的视口颜色")
                 return {'CANCELLED'}
-            self.report({'INFO'}, "已恢复 {} 项视口颜色".format(changed))
+        elif self.scope == 'ALL':
+            paths = theme.default_paths()
+            changed = theme.restore_defaults(current, paths)
+            self.report({'INFO' if changed else 'WARNING'},
+                        "恢复 {} 项（共记录 {} 项默认值）".format(changed, len(paths)))
+            if not changed:
+                return {'CANCELLED'}
         else:
-            preferences = compat.get_preferences(context)
-            path = getattr(preferences, "theme_target", "") if preferences else ""
             if not theme.has_default(path):
                 self.report({'WARNING'}, "这一项没有记录默认值，无法一键恢复")
                 return {'CANCELLED'}
+            before = theme.get_color(current, path)
             if not theme.restore_default(current, path):
                 self.report({'WARNING'}, "恢复失败")
                 return {'CANCELLED'}
-            self.report({'INFO'}, "已恢复该颜色默认值")
+            after = theme.get_color(current, path)
+            if before is not None and after is not None and theme.color_close(before, after):
+                self.report({'INFO'}, "这一项本来就是默认值（没有变化）")
+            else:
+                self.report({'INFO'}, "已恢复这一项的默认值")
 
         preferences = compat.get_preferences(context)
         if preferences is not None:
             theme.read_into_preferences(context, preferences)
         compat.tag_redraw(context)
         return {'FINISHED'}
+
+
+class HHZ_OT_theme_custom_save(bpy.types.Operator):
+    bl_idname = "hhz.theme_custom_save"
+    bl_label = "保存为自定义配色"
+    bl_description = "把当前所有可用颜色存成一套自定义配色（同名会覆盖）"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        current = theme.current_theme(context)
+        if preferences is None or current is None:
+            self.report({'ERROR'}, "读不到偏好设置或主题")
+            return {'CANCELLED'}
+
+        name = getattr(preferences, "custom_name", "").strip()
+        if not name:
+            self.report({'WARNING'}, "先给这套配色起个名字")
+            return {'CANCELLED'}
+
+        colors = theme.capture_colors(current, theme.available_paths(context))
+        text, ok = theme.custom_save(getattr(preferences, "theme_custom", ""), name, colors)
+        if not ok:
+            self.report({'WARNING'}, "保存失败（名字或颜色为空）")
+            return {'CANCELLED'}
+
+        preferences.theme_custom = text
+        preferences.custom_choice = name
+        self.report({'INFO'}, "已保存自定义配色「{}」（{} 项颜色）".format(name, len(colors)))
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_custom_apply(bpy.types.Operator):
+    bl_idname = "hhz.theme_custom_apply"
+    bl_label = "套用自定义配色"
+    bl_description = "把选中的自定义配色写进当前主题"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        current = theme.current_theme(context)
+        if preferences is None or current is None:
+            self.report({'ERROR'}, "读不到偏好设置或主题")
+            return {'CANCELLED'}
+
+        name = getattr(preferences, "custom_choice", "")
+        colors = theme.custom_colors(getattr(preferences, "theme_custom", ""), name)
+        if not colors:
+            self.report({'WARNING'}, "没有这套自定义配色")
+            return {'CANCELLED'}
+
+        applied = 0
+        skipped = 0
+        for path, color in colors.items():
+            if theme.resolve(current, path) is None:
+                skipped += 1
+                continue
+            if theme.set_color(current, path, color):
+                applied += 1
+            else:
+                skipped += 1
+        theme.read_into_preferences(context, preferences)
+        self.report({'INFO'}, "已套用「{}」：{} 项生效{}".format(
+            name, applied, "，{} 项当前版本没有（跳过）".format(skipped) if skipped else ""))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_custom_delete(bpy.types.Operator):
+    bl_idname = "hhz.theme_custom_delete"
+    bl_label = "删除这套配色"
+    bl_description = "把选中的自定义配色从偏好设置里删掉"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到偏好设置")
+            return {'CANCELLED'}
+        name = getattr(preferences, "custom_choice", "")
+        text, ok = theme.custom_delete(getattr(preferences, "theme_custom", ""), name)
+        if not ok:
+            self.report({'WARNING'}, "没有这套自定义配色")
+            return {'CANCELLED'}
+        preferences.theme_custom = text
+        self.report({'INFO'}, "已删除「{}」".format(name))
+        return {'FINISHED'}
+
+
+class HHZ_OT_font_pick(bpy.types.Operator):
+    bl_idname = "hhz.font_pick"
+    bl_label = "选择字体文件"
+    bl_description = "选一个 .ttf / .otf / .ttc 作为 Blender 的界面字体"
+
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH')
+    filter_glob: bpy.props.StringProperty(default="*.ttf;*.otf;*.ttc", options={'HIDDEN'})
+    mono: bpy.props.BoolProperty(
+        name="等宽字体",
+        description="选中的是等宽字体（给文本编辑器用）",
+        default=False,
+    )
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        key = "font_path_ui_mono" if self.mono else "font_path_ui"
+        if not self.filepath:
+            self.report({'WARNING'}, "没有选文件")
+            return {'CANCELLED'}
+        if not theme.font_set(context, key, self.filepath):
+            self.report({'WARNING'}, "这个 Blender 版本没有这项字体设置")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "字体已设为 {}".format(self.filepath))
+        return {'FINISHED'}
+
+
+class HHZ_OT_font_restore(bpy.types.Operator):
+    bl_idname = "hhz.font_restore"
+    bl_label = "字体恢复默认"
+    bl_description = "把界面缩放、DPI、自定义字体、抗锯齿等恢复成 Blender 出厂值"
+
+    def execute(self, context):
+        restored = theme.font_restore(context)
+        if not restored:
+            self.report({'WARNING'}, "没有可恢复的字体设置")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已恢复 {} 项字体 / 缩放设置".format(restored))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_layout_save(bpy.types.Operator):
+    bl_idname = "hhz.layout_save"
+    bl_label = "保存当前布局"
+    bl_description = "把当前的工作区与区域划分存成一份带名字的布局快照"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到偏好设置")
+            return {'CANCELLED'}
+
+        name = getattr(preferences, "layout_name", "").strip()
+        if not name:
+            self.report({'WARNING'}, "先给这套布局起个名字")
+            return {'CANCELLED'}
+
+        snapshot = layout.capture(context)
+        if not snapshot:
+            self.report({'WARNING'}, "后台模式没有窗口，抓不到布局")
+            return {'CANCELLED'}
+        if not snapshot.get("workspaces"):
+            self.report({'WARNING'}, "没读到工作区")
+            return {'CANCELLED'}
+
+        text, ok = layout.save(getattr(preferences, "layout_slots", ""), name, snapshot)
+        if not ok:
+            self.report({'WARNING'}, "保存失败")
+            return {'CANCELLED'}
+
+        preferences.layout_slots = text
+        preferences.layout_choice = name
+        areas = sum(len(item.get("areas") or ()) for item in snapshot["workspaces"])
+        self.report({'INFO'}, "已保存布局「{}」：{} 个工作区 / {} 个区域".format(
+            name, len(snapshot["workspaces"]), areas))
+        return {'FINISHED'}
+
+
+class HHZ_OT_layout_apply(bpy.types.Operator):
+    bl_idname = "hhz.layout_apply"
+    bl_label = "使用这套布局"
+    bl_description = "把选中的布局套到当前文件（缺的工作区会补出来）"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到偏好设置")
+            return {'CANCELLED'}
+
+        name = getattr(preferences, "layout_choice", "")
+        slots = layout.load(getattr(preferences, "layout_slots", ""))
+        snapshot = slots.get(name)
+        if not snapshot:
+            self.report({'WARNING'}, "没有这套布局")
+            return {'CANCELLED'}
+
+        message, ok = layout.apply(context, snapshot)
+        self.report({'INFO' if ok else 'WARNING'}, message)
+        compat.tag_redraw(context)
+        return {'FINISHED'} if ok else {'CANCELLED'}
+
+
+class HHZ_OT_layout_delete(bpy.types.Operator):
+    bl_idname = "hhz.layout_delete"
+    bl_label = "删除这套布局"
+    bl_description = "把选中的布局从偏好设置里删掉"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到偏好设置")
+            return {'CANCELLED'}
+        name = getattr(preferences, "layout_choice", "")
+        text, ok = layout.delete(getattr(preferences, "layout_slots", ""), name)
+        if not ok:
+            self.report({'WARNING'}, "没有这套布局")
+            return {'CANCELLED'}
+        preferences.layout_slots = text
+        self.report({'INFO'}, "已删除布局「{}」".format(name))
+        return {'FINISHED'}
+
+
+class HHZ_OT_layout_save_startup(bpy.types.Operator):
+    bl_idname = "hhz.layout_save_startup"
+    bl_label = "存为启动布局（新建文件就用它）"
+    bl_description = "把当前界面存成 Blender 启动文件；以后新建文件就是这个布局"
+
+    confirm: bpy.props.BoolProperty(
+        name="确认覆盖启动文件",
+        description="会覆盖 Blender 的启动文件（startup.blend）",
+        default=False,
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        message, ok = layout.save_startup(context)
+        self.report({'INFO' if ok else 'ERROR'}, message)
+        return {'FINISHED'} if ok else {'CANCELLED'}
 
 
 class HHZ_OT_theme_save_preferences(bpy.types.Operator):

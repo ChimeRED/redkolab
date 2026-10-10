@@ -27,6 +27,7 @@ SECTIONS = (
     ("theme", "主题颜色", "HHZ_PT_theme"),
     ("hotkey", "饼菜单与快捷键", "HHZ_PT_hotkey"),
     ("settings", "插件设置", "HHZ_PT_settings"),
+    ("layout", "页面布局", "HHZ_PT_layout"),
 )
 
 #: 默认顺序

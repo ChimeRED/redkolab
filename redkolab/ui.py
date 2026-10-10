@@ -14,7 +14,7 @@
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
 
-from . import compat, pages, panels, theme
+from . import compat, layout, pages, panels, theme
 
 #: 饼菜单的 bl_idname（必须以 _MT_ 命名，Menu 才能注册成功）
 PIE_IDNAME = "OBJECT_MT_hhz_pie"
@@ -139,8 +139,25 @@ def apply_hotkey(context, key_type, ctrl=False, shift=False, alt=False, oskey=Fa
 
 
 def _on_theme_target_update(self, context):
-    """切换颜色项时，把该项当前的色值读进选择器。"""
+    """切换颜色项时，把该项当前的色值读进选择器，并记住它属于哪一组。"""
     theme.read_into_preferences(context, self)
+    self.theme_group = theme.group_of(getattr(self, "theme_target", ""))
+
+
+def custom_items(self, context):
+    """自定义配色的下拉项（动态，跟着已保存的名字走）。"""
+    names = theme.custom_names(getattr(self, "theme_custom", ""))
+    if not names:
+        return [("__none__", "（还没有）", "还没有保存过自定义配色")]
+    return [(name, name, "套用或删除「{}」".format(name)) for name in names]
+
+
+def layout_items(self, context):
+    """已保存布局的下拉项。"""
+    names = layout.names(getattr(self, "layout_slots", ""))
+    if not names:
+        return [("__none__", "（还没有）", "还没有保存过布局")]
+    return [(name, name, "使用或删除「{}」".format(name)) for name in names]
 
 
 def _on_theme_color_update(self, context):
@@ -379,6 +396,7 @@ class HHZ_PT_theme(bpy.types.Panel):
             layout.label(text="读不到当前主题", icon='ERROR')
             return
 
+        available = theme.available_paths(context)
         path = getattr(preferences, "theme_target", "")
         if theme.resolve(current, path) is None:
             layout.label(text="当前 Blender 没有这一项颜色", icon='INFO')
@@ -391,24 +409,115 @@ class HHZ_PT_theme(bpy.types.Panel):
         if theme.component_count(current, path) == 3:
             column.label(text="该项是 RGB，Alpha 会被忽略", icon='INFO')
 
+        # ---- 恢复默认：本项 / 本组 / 全部，三个范围语义各不相同 ----
+        group = theme.group_of(path)
+        group_paths = [item for item in theme.paths_in_group(group, available)
+                       if theme.has_default(item)]
+        differing = theme.differing_paths(current, group_paths)
         row = layout.row(align=True)
-        operation = row.operator("hhz.theme_restore_default", text="恢复默认")
+        operation = row.operator("hhz.theme_restore_default", text="恢复本项")
         operation.scope = 'CURRENT'
-        operation = row.operator("hhz.theme_restore_default", text="全部控件")
-        operation.scope = 'WIDGET'
-        operation = row.operator("hhz.theme_restore_default", text="全部视口")
-        operation.scope = 'VIEWPORT'
+        operation = row.operator("hhz.theme_restore_default", text="恢复本组")
+        operation.scope = 'GROUP'
+        operation = row.operator("hhz.theme_restore_default", text="全部恢复")
+        operation.scope = 'ALL'
+        if not group_paths:
+            layout.label(text="「{}」没有记录出厂默认值，无法一键恢复".format(group), icon='INFO')
+        elif differing:
+            layout.label(text="「{}」{} 项有默认值，已改动 {} 项".format(
+                group, len(group_paths), len(differing)), icon='INFO')
+        else:
+            layout.label(text="「{}」{} 项都还是出厂值".format(group, len(group_paths)),
+                         icon='CHECKMARK')
 
+        # ---- 配色预设 ----
         box = layout.box()
-        box.label(text="配色预设（按钮 / 状态色）")
+        box.label(text="配色预设（按钮 / 状态 / 当前帧）")
         grid = box.grid_flow(row_major=True, columns=2, align=True)
         for name in theme.preset_names():
             operation = grid.operator("hhz.theme_apply_preset", text=name)
             operation.preset = name
 
+        # ---- 自定义配色 ----
+        box = layout.box()
+        box.label(text="自定义配色")
+        row = box.row(align=True)
+        row.prop(preferences, "custom_name", text="")
+        row.operator("hhz.theme_custom_save", text="", icon='ADD')
+        if theme.custom_names(getattr(preferences, "theme_custom", "")):
+            box.prop(preferences, "custom_choice", text="")
+            row = box.row(align=True)
+            row.operator("hhz.theme_custom_apply", text="套用", icon='CHECKMARK')
+            row.operator("hhz.theme_custom_delete", text="删除", icon='TRASH')
+            box.label(text="保存与套用都会覆盖全部 {} 项颜色".format(len(available)), icon='INFO')
+        else:
+            box.label(text="起个名字点 + 就能把当前配色存下来", icon='INFO')
+
+        # ---- 字体设置（Blender 偏好设置里的项） ----
+        box = layout.box()
+        box.label(text="字体设置（写进 Blender 偏好设置）")
+        for key, label, _owner_name, _default, _tip in theme.font_items(context):
+            target = theme.font_target(context, key)
+            if target is None:
+                continue
+            owner, attr = target
+            if key in ("font_path_ui", "font_path_ui_mono"):
+                row = box.row(align=True)
+                row.prop(owner, attr, text=label)
+                pick = row.operator("hhz.font_pick", text="", icon='FILEBROWSER')
+                pick.mono = key == "font_path_ui_mono"
+            else:
+                box.prop(owner, attr, text=label)
+        box.operator("hhz.font_restore", icon='LOOP_BACK')
+
         layout.separator()
         layout.operator("hhz.theme_save_preferences", icon='FILE_TICK')
         layout.label(text="改动立即生效；不保存偏好设置则重启后还原", icon='INFO')
+
+
+class HHZ_PT_layout(bpy.types.Panel):
+    """页面布局：把当前工作区与区域划分存下来，在新文件里一键还原。"""
+
+    bl_idname = "HHZ_PT_layout"
+    bl_label = "页面布局"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = compat.ADDON_NAME
+
+    @classmethod
+    def poll(cls, context):
+        return pages.is_active(context, pages.PAGE_TOOLS)
+
+    def draw(self, context):
+        region = self.layout
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            region.label(text="读不到插件偏好设置", icon='ERROR')
+            return
+
+        box = region.box()
+        box.label(text="保存 / 使用布局")
+        row = box.row(align=True)
+        row.prop(preferences, "layout_name", text="")
+        row.operator("hhz.layout_save", text="", icon='ADD')
+        if layout.names(getattr(preferences, "layout_slots", "")):
+            box.prop(preferences, "layout_choice", text="")
+            row = box.row(align=True)
+            row.operator("hhz.layout_apply", text="使用", icon='CHECKMARK')
+            row.operator("hhz.layout_delete", text="删除", icon='TRASH')
+            slots = layout.load(getattr(preferences, "layout_slots", ""))
+            chosen = slots.get(getattr(preferences, "layout_choice", "")) or {}
+            workspaces = chosen.get("workspaces") or []
+            areas = sum(len(item.get("areas") or ()) for item in workspaces)
+            box.label(text="共 {} 个工作区 / {} 个区域".format(len(workspaces), areas), icon='INFO')
+        else:
+            region.label(text="先把界面排好，起个名字点 + 保存", icon='INFO')
+
+        box = region.box()
+        box.label(text="新文件也用这套界面？")
+        box.operator("hhz.layout_save_startup", icon='FILE_TICK')
+        box.label(text="会覆盖 Blender 启动文件（点之前会弹确认）", icon='ERROR')
+        region.label(text="「使用」只改当前文件；启动布局管的是新建文件", icon='INFO')
 
 
 # --------------------------------------------------------------- 偏好设置
@@ -467,6 +576,41 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         description="本插件各面板在 N 面板里的先后顺序（逗号分隔，拖动排序时自动维护）",
         default=",".join(panels.DEFAULT_SECTION_ORDER),
         update=_on_panel_order_update,
+    )
+    theme_group: StringProperty(
+        name="当前分组",
+        description="当前颜色项所属的分组（跟着颜色项自动更新，用于「恢复当前分组」）",
+        default="",
+    )
+    custom_name: StringProperty(
+        name="自定义配色名",
+        description="保存自定义配色时用的名字",
+        default="",
+    )
+    custom_choice: EnumProperty(
+        name="自定义配色",
+        description="已保存的自定义配色",
+        items=custom_items,
+    )
+    theme_custom: StringProperty(
+        name="自定义配色数据",
+        description="已保存的自定义配色（JSON，别手改）",
+        default="",
+    )
+    layout_name: StringProperty(
+        name="布局名",
+        description="保存页面布局时用的名字",
+        default="",
+    )
+    layout_choice: EnumProperty(
+        name="已保存布局",
+        description="已保存的页面布局",
+        items=layout_items,
+    )
+    layout_slots: StringProperty(
+        name="布局数据",
+        description="已保存的页面布局（JSON，别手改）",
+        default="",
     )
 
     def hotkey_label(self):
