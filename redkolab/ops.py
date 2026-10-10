@@ -1291,14 +1291,32 @@ class HHZ_OT_layout_delete(bpy.types.Operator):
         return {'FINISHED'}
 
 
+#: 只放工作区布局的临时布局库：放在 Blender 用户配置目录里，**不写进用户工程目录**。
+LAYOUT_LIBRARY_NAME = "redkolab_startup_layout.blend"
+
+#: 布局库里工作区所在的"追加目录"（实测 5.2.2：``<库路径>/WorkSpace``，大写 S；
+#: ``bpy.ops.wm.append`` 用它才能把 Workspace 追加回来 —— 测试里有真机断言）。
+LAYOUT_LIBRARY_FOLDER = "WorkSpace"
+
+
+def layout_library_path():
+    """布局库路径（Blender 用户配置目录下的固定名字）。"""
+    config = bpy.utils.user_resource('CONFIG') or bpy.app.tempdir
+    return os.path.join(config, LAYOUT_LIBRARY_NAME)
+
+
 class HHZ_OT_layout_save_startup(bpy.types.Operator):
     bl_idname = "hhz.layout_save_startup"
-    bl_label = "存为启动布局（新建文件就用它）"
-    bl_description = "把当前界面存成 Blender 启动文件；以后新建文件就是这个布局"
+    bl_label = "把当前窗口布局设为启动布局"
+    bl_description = (
+        "把现在的工作区 / 窗口布局设成 Blender 启动布局：启动文件会重建成"
+        "「空场景 + 你这套工作区」，当前场景不会被带进启动文件。"
+        "想连场景一起存，请用 Blender 原生的「文件 默认 保存启动文件」"
+    )
 
     confirm: bpy.props.BoolProperty(
-        name="确认覆盖启动文件",
-        description="会覆盖 Blender 的启动文件（startup.blend）",
+        name="确认重建启动文件",
+        description="会覆盖 Blender 启动文件（startup.blend）：新的启动文件是空场景 + 当前工作区布局，不含当前场景",
         default=False,
     )
 
@@ -1306,20 +1324,124 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
         return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
-        # 只提示、不阻止：缺失引用会被一起写进启动文件，于是**每个新建文件**都带着它、
-        # 保存时继续报"无法打包文件"。行为保持原样（用户可能就是要存），只多一句警告。
+        original_path = bpy.data.filepath
+        # 硬要求：有未保存改动时绝不继续 —— 下面会切换文件，可能丢改动。
+        # 例外：**无头环境**（--background）里 4.x 的 ``is_dirty`` 实测恒为 True
+        # （刚启动、保存之后、载入出厂文件之后都是 True，见测试断言），那是"全局状态脏"
+        # 的假报警；这时只要文件**已经落盘**（有 filepath，随时能用 文件 打开 回来），
+        # 继续是安全的。没有 filepath 时仍然拒绝：那种情况真的没法恢复。
+        if getattr(bpy.data, "is_dirty", False) and not (bpy.app.background and original_path):
+            self.report({'WARNING'}, "请先保存当前文件（Ctrl+S），再设置启动布局")
+            return {'CANCELLED'}
+
+        workspace_names = [workspace.name for workspace in bpy.data.workspaces]
+        if not workspace_names:
+            self.report({'ERROR'}, "当前文件里没有工作区，无法保存布局")
+            return {'CANCELLED'}
+        active_name = ""
+        for window_manager in bpy.data.window_managers:
+            for window in window_manager.windows:
+                if window.workspace is not None:
+                    active_name = window.workspace.name
+                    break
+            if active_name:
+                break
+
+        # 顺手提示当前文件里的坏引用：它们不再被写进启动文件（新流程只存工作区），
+        # 但会让**这个文件**每次保存都弹「无法打包文件」。
         unused, in_use = _missing_file_blocks()
         missing = [(label, getattr(block, "name", "?"), 0)
                    for label, _collection, block in unused]
         missing += in_use
-        message, ok = layout.save_startup(context)
-        self.report({'INFO' if ok else 'ERROR'}, message)
-        if ok and missing:
-            self.report({'WARNING'},
-                        "当前文件有 {} 个缺失引用，已一并写入启动文件（{}）；"
-                        "建议先点「检查并修复缺失文件」再保存".format(
-                            len(missing), _describe_items(missing, 2)))
-        return {'FINISHED'} if ok else {'CANCELLED'}
+
+        library = layout_library_path()
+        try:
+            bpy.data.libraries.write(library, set(bpy.data.workspaces), fake_user=True)
+        except Exception as error:
+            self.report({'ERROR'}, "写入布局库失败：{}".format(error))
+            return {'CANCELLED'}
+
+        try:
+            # 出厂启动文件 = 空场景，且**不会**重置用户偏好设置
+            # （read_factory_settings 会连偏好一起重置，这里不能用）
+            bpy.ops.wm.read_homefile(use_factory_startup=True, use_empty=True)
+        except Exception as error:
+            self.report({'ERROR'},
+                        "载入出厂启动文件失败：{}；你原来的文件仍在磁盘上，"
+                        "可用 文件 打开 回到它".format(error))
+            return {'CANCELLED'}
+
+        try:
+            before_append = {workspace.as_pointer() for workspace in bpy.data.workspaces}
+            for name in workspace_names:
+                bpy.ops.wm.append(
+                    filepath="{}/{}/{}".format(library, LAYOUT_LIBRARY_FOLDER, name),
+                    directory="{}/{}".format(library, LAYOUT_LIBRARY_FOLDER),
+                    filename=name)
+            added = [workspace for workspace in bpy.data.workspaces
+                     if workspace.as_pointer() not in before_append]
+        except Exception as error:
+            self.report({'ERROR'},
+                        "追加工作区失败：{}；你原来的文件仍在磁盘上，"
+                        "可用 文件 打开 回到它".format(error))
+            return {'CANCELLED'}
+
+        # 校验：每个记录下来的工作区都要真的追加回来（同名冲突时 Blender 会给 .001 后缀）
+        appended = {}
+        for workspace in added:
+            base = workspace.name
+            if base not in workspace_names:
+                base = base.rsplit(".", 1)[0]
+            appended.setdefault(base, workspace)
+        missing_workspaces = [name for name in workspace_names if name not in appended]
+        if missing_workspaces or not added:
+            self.report({'ERROR'},
+                        "追加工作区不完整（缺 {}），已中止、没有写启动文件；"
+                        "你原来的文件仍在磁盘上，可用 文件 打开 回到它".format(
+                            "、".join(missing_workspaces) or "全部"))
+            return {'CANCELLED'}
+
+        # 让窗口停在**你自己**的那个工作区上（Blender 不允许删除工作区，
+        # 出厂自带的那批还在文件里，所以这一步决定新开 Blender 时先看到哪套布局）
+        target = appended.get(active_name) or appended.get(workspace_names[0]) or added[0]
+        for window_manager in bpy.data.window_managers:
+            for window in window_manager.windows:
+                try:
+                    window.workspace = target
+                except Exception:
+                    pass
+
+        try:
+            bpy.ops.wm.save_homefile()
+        except Exception as error:
+            self.report({'ERROR'},
+                        "写启动文件失败：{}；你原来的文件仍在磁盘上，"
+                        "可用 文件 打开 回到它".format(error))
+            return {'CANCELLED'}
+
+        if original_path:
+            try:
+                bpy.ops.wm.open_mainfile(filepath=original_path)
+            except Exception as error:
+                self.report({'ERROR'},
+                            "启动布局已写好，但重新打开原来的文件失败：{}；"
+                            "用 文件 打开 回到 {}".format(error, original_path))
+                return {'CANCELLED'}
+
+        parts = ["启动布局已重建",
+                 "写入了 {} 个工作区".format(len(added)),
+                 "启动文件现在是空场景 + 你的工作区布局（不含当前场景）"]
+        if original_path:
+            parts.append("原来的文件已重新打开：{}".format(os.path.basename(original_path)))
+        else:
+            parts.append("当前会话停在空场景上；你原来的文件没有保存过，不会被改")
+        if missing:
+            parts.append("注意：当前文件还有 {} 个缺失引用（{}），"
+                         "建议先点「检查并修复缺失文件」".format(
+                             len(missing), _describe_items(missing, 2)))
+        parts.append("想连场景一起存，请用 Blender 原生的 文件 默认 保存启动文件")
+        self.report({'INFO'}, "；".join(parts))
+        return {'FINISHED'}
 
 
 class HHZ_OT_theme_save_preferences(bpy.types.Operator):

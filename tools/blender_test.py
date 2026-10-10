@@ -2003,20 +2003,51 @@ def test_save_preferences(module):
           (sorted(before), sorted(os.listdir(config))))
 
 
-def test_startup_layout_warning(module):
-    section("功能：存为启动布局会提示缺失引用（只提示、不阻止）")
+def test_startup_layout(module):
+    section("功能：把当前窗口布局设为启动布局（只存工作区，不含场景）")
     operator = operator_class(module, "layout_save_startup")
     check(operator is not None, "算符 hhz.layout_save_startup 已注册")
     source = source_of(module, "ops.py")
     static = class_source(source, "HHZ_OT_layout_save_startup")
+
+    # ---- 缺陷 7：复用缺失文件扫描，坏引用要提示（但不再被写进启动文件）----
     check("_missing_file_blocks" in static,
           "写启动文件前复用了缺陷 3 的缺失文件扫描函数（没有另写一份）")
     check("'WARNING'" in static and "检查并修复缺失文件" in static,
           "有缺失引用时用 WARNING 提示并指向「检查并修复缺失文件」")
-    check("已一并写入启动文件" in static,
-          "提示里说清「缺失引用会被一起写进启动文件」（这才是复发的根因）")
+    check("已一并写入启动文件" not in static,
+          "不再声称「缺失引用被写进启动文件」（新流程只存工作区，场景不进启动文件）")
+
+    # ---- 缺陷 8：名称 / 描述 / 确认文案如实说明它做什么 ----
+    check("不含场景" in static or "空场景" in static,
+          "算符文案说清启动文件是空场景 + 工作区布局（不再让人以为是存整个文件）")
+    check("保存启动文件" in static,
+          "报告里指向 Blender 原生的「文件 默认 保存启动文件」（连场景一起存的那条路）")
+    check("bl_label" in static and "窗口布局" in static.split("bl_label")[1][:120],
+          "按钮文字就是「把当前窗口布局设为启动布局」这一类的说法（不再叫存为启动布局）",
+          static.split("bl_label")[1][:80] if "bl_label" in static else "")
     check("invoke_confirm" in static,
-          "行为未变：仍然只弹一次原生确认框，没有新增确认框 / 设置项")
+          "仍然只弹一次原生确认框（没有新增确认框 / 设置项）")
+
+    # ---- 缺陷 9：实现步骤的源码级断言 ----
+    check("is_dirty" in static and "请先保存当前文件" in static,
+          "有未保存改动时先报「请先保存当前文件」并中止（绝不带着未保存改动切文件）")
+    check("bpy.app.background" in static and "original_path" in static,
+          "无头环境里 4.x 的 is_dirty 恒为 True 不会把功能锁死（只在文件已落盘时放行）")
+    check("libraries.write" in static and "LAYOUT_LIBRARY_FOLDER" in static,
+          "先把工作区写进布局库（libraries.write），追加目录用的是实测出来的常量")
+    check("read_homefile" in static and "use_factory_startup=True" in static,
+          "载入工厂启动文件用的是 read_homefile(use_factory_startup=True)（不重置偏好设置）")
+    check("use_empty=True" in static,
+          "并且 use_empty=True —— 启动文件是**空场景**，不带当前场景")
+    check("wm.append" in static and "before_append" in static and "added" in static,
+          "追加工作区后有「真的追加回来了」的校验（按 as_pointer 记录前后差集）")
+    check("missing_workspaces" in static and "已中止、没有写启动文件" in static,
+          "校验不通过就中止且不写启动文件（避免存出一个没有布局的启动文件）")
+    check("save_homefile" in static and "open_mainfile" in static,
+          "最后写启动文件并把用户原来的文件重新打开")
+    check("LAYOUT_LIBRARY_NAME" in source and "user_resource('CONFIG')" in source,
+          "布局库放在 Blender 用户配置目录下的固定名字里（不写进用户工程目录）")
 
     config = _isolated_config_dir()
     if config is None:
@@ -2033,28 +2064,101 @@ def test_startup_layout_warning(module):
     except Exception:
         pass
 
-    sound_name, sound_path, note = _make_missing_sample("sound", "hhz_missing_startup", None)
-    check(sound_name is not None, "启动布局用例造出了缺失样本（{}）".format(note), sound_name)
-    if sound_name is None:
-        return
+    # ---- (a) 有未保存改动 -> CANCELLED，且不切换文件 ----
+    # 无头环境里 ``is_dirty`` 两个方向都不可靠（实测：4.x 恒为 True，连保存之后也是；
+    # 5.x 恒为 False，加物体也不置脏）。所以这一条**能真跑就真跑**，
+    # 造不出"脏"就如实 skip，只保留源码级断言 —— 不假装验证过。
+    _purge_test_samples(module)
+    add_cube("hhz_dirty_marker")
+    path_before_dirty = bpy.data.filepath
+    if not bpy.data.is_dirty:
+        skip("无头环境造不出 is_dirty=True（5.x 背景模式下加物体也不置脏），"
+             "「未保存就先拒绝」这一条只保留源码级断言")
+    else:
+        check(bpy.data.is_dirty is True, "造出了未保存改动（is_dirty=True）", bpy.data.is_dirty)
+        try:
+            result = bpy.ops.hhz.layout_save_startup(confirm=True)
+        except Exception as error:
+            result = "抛出异常：{}".format(error)
+        check(result == {'CANCELLED'},
+              "有未保存改动时返回 CANCELLED（不会带着未保存改动切文件）", result)
+        check(bpy.data.filepath == path_before_dirty,
+              "未保存时没有切换文件（会话停在原处）",
+              (path_before_dirty, bpy.data.filepath))
+        check(bpy.data.objects.get("hhz_dirty_marker") is not None,
+              "未保存时当前场景没有被丢掉（那个标记物体还在）")
+    reset_scene()
+
+    # ---- (b)/(c) 完整流程：真的在沙箱里跑一遍 ----
+    sandbox_file = os.path.join(config, "hhz_startup_test.blend")
     try:
+        bpy.ops.wm.save_as_mainfile(filepath=sandbox_file)
+    except Exception as error:
+        skip("无头环境里存不了测试文件（{}），跳过完整流程".format(error))
+        return
+    if bpy.app.version >= (5, 0, 0):
+        check(bpy.data.is_dirty is False,
+              "5.x：保存之后 is_dirty 清零", bpy.data.is_dirty)
+    else:
+        check(bpy.data.is_dirty is True,
+              "4.x 无头环境下保存之后 is_dirty 仍为 True（实测特性，算符已按此放行）",
+              bpy.data.is_dirty)
+
+    recorded_path = bpy.data.filepath
+    recorded_workspaces = [workspace.name for workspace in bpy.data.workspaces]
+    check(len(recorded_workspaces) >= 3, "测试文件里有多个工作区可存",
+          recorded_workspaces[:4])
+
+    _purge_test_samples(module)
+    sound_name, _sound_path, note = _make_missing_sample("sound", "hhz_missing_startup", None)
+    check(sound_name is not None, "启动布局用例造出了缺失样本（{}）".format(note), sound_name)
+    if sound_name is not None:
         unused, in_use = module.ops._missing_file_blocks()
         scanned = [getattr(block, "name", "") for _label, _collection, block in unused]
         check(sound_name in scanned or any(item[1] == sound_name for item in in_use),
               "扫描函数确实检出了这个缺失样本（提示的判据是真的）",
               (sound_name, scanned[:4], len(in_use)))
+        # 造完样本数据块就算"有改动"，先存一次让流程能继续（等于用户先按了 Ctrl+S）
+        bpy.ops.wm.save_as_mainfile(filepath=recorded_path)
 
+    try:
+        result = "未调用"
         try:
             result = bpy.ops.hhz.layout_save_startup(confirm=True)
         except Exception as error:
-            # bpy.ops 在算符报 ERROR 时会抛 RuntimeError —— 这里抓成断言的可读结果
             result = "抛出异常：{}".format(error)
-        check(result == {'FINISHED'},
-              "有缺失引用时算符**仍然保存成功**（只提示、不阻止，行为未变）", result)
+        check(result == {'FINISHED'}, "完整流程返回 FINISHED", result)
+        check(bpy.data.filepath == recorded_path,
+              "跑完之后会话文件路径与开始时一致（用户回到原文件）",
+              (recorded_path, bpy.data.filepath))
         check(os.path.exists(os.path.join(config, "startup.blend")),
-              "启动文件确实写进了隔离目录（沙箱）", config)
+              "启动文件写进了隔离目录（沙箱）", config)
+        check(os.path.exists(os.path.join(config, module.ops.LAYOUT_LIBRARY_NAME)),
+              "布局库写在配置目录里的固定名字上", module.ops.LAYOUT_LIBRARY_NAME)
+
+        # 启动文件里应该：有那批工作区、没有场景物体
+        startup_path = os.path.join(config, "startup.blend")
+        try:
+            with bpy.data.libraries.load(startup_path) as (src, _dst):
+                startup_workspaces = list(src.workspaces)
+                startup_objects = list(src.objects)
+            missing_names = [name for name in recorded_workspaces
+                             if not any(item == name or item.startswith(name + ".")
+                                        for item in startup_workspaces)]
+            check(not missing_names,
+                  "启动文件里覆盖了记录下来的每个工作区（同名冲突允许 .001 后缀）",
+                  (missing_names, startup_workspaces[:4]))
+            check(not startup_objects,
+                  "启动文件是空场景（没有任何物体，场景没被带进去）",
+                  startup_objects[:4])
+        except Exception as error:
+            check(False, "能读回启动文件检查内容", "{}".format(error))
     finally:
         _purge_test_samples(module)
+        try:
+            bpy.ops.wm.open_mainfile(filepath=sandbox_file)
+        except Exception:
+            pass
 
 
 def pie_operator_idnames(source):
@@ -2628,8 +2732,6 @@ def main():
     run("注册与界面结构", test_registration, module_name, module)
     run("图标名合法性", test_icons, module)
     run("饼菜单按钮依赖", test_menu_operator)
-    # 放在前面：要让 Blender 真的写一次启动文件，得趁测试场景还干净的时候跑
-    run("存为启动布局的缺失引用提示", test_startup_layout_warning, module)
     run("键位注册与改键", test_keymap, module)
     run("非法快捷键处理", test_bad_hotkey, module)
     run("一键删除所有材质", test_materials)
@@ -2646,6 +2748,9 @@ def main():
     run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)
     run("算符 poll", test_poll)
+    # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
+    # 会清掉当前场景，所以后面只剩"卸载清理"这种不吃场景数据的用例
+    run("把当前窗口布局设为启动布局", test_startup_layout, module)
     run("卸载清理", test_unregister, module_name, module)
 
     print("\n================ 结果 ================")
