@@ -508,15 +508,18 @@ N 面板 ▸ `红红子lab` ▸ 顶部切到 **工具** 页 ▸ **「面板顺�
 
 | Blender | 安装入口 | 装成的模块 | 断言 | 结果 |
 | --- | --- | --- | --- | --- |
-| 4.0.2 | 插件页 Install from Disk | `redkolab` | 1035 | ✔ |
-| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 1035 | ✔ |
-| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 1033 | ✔ |
-| 4.5.14 LTS | 插件页 Install from Disk | `redkolab` | 1035 | ✔ |
-| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 1028 | ✔ |
-| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 1026 | ✔ |
+| 4.0.2 | 插件页 Install from Disk | `redkolab` | 1045 | ✔ |
+| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 1045 | ✔ |
+| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 1043 | ✔ |
+| 4.5.14 LTS | 插件页 Install from Disk | `redkolab` | 1045 | ✔ |
+| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 1038 | ✔ |
+| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 1036 | ✔ |
 
-> 六条全部 `PASS`，`0 项失败`（退出码 0）。
-> 断言数 1035 / 1035 / 1033 / 1035 / 1028 / 1026 的差别来自安装入口与 Blender 版本，不是少测功能：
+> 六条全部 `PASS`，`0 项失败`（退出码 0）。同一版在 CI（Ubuntu runner）上是
+> 1039 / 1039 / 1032 / 1030，同样 **0 项失败** —— 比本机 Windows 少 6 条是**既有**的平台差
+> （脚本里按平台条件的 `[skip]`，上一版也是 909 -> 903；两边新增的断言数一样多）。
+>
+> 断言数 1045 / 1045 / 1043 / 1045 / 1038 / 1036 的差别来自安装入口与 Blender 版本，不是少测功能：
 > **扩展页安装**下 Blender 会接管元数据（不再暴露 `bl_info`），测试会跳过 2 项元数据检查
 > （所以 4.2.23 与 5.2.2 的扩展页各比同版本的插件页少 2）；5.x 上另有几条 4.x 独有的断言
 > （时间线当前帧色那几项、4.x 无头环境下 `is_dirty` 恒为真的那一组）换成了对应的 5.x 断言 ——
@@ -563,7 +566,7 @@ redkolab/
 │  ├─ build_zips.py             打包（默认 nested 布局，可选其他布局做对比）
 │  ├─ check_version.py          版本号一致性检查（发布守门）
 │  ├─ inspect_zip.py            安装包结构自检（发布守门）
-│  ├─ blender_test.py           Blender 内部真机测试（1035 项断言，随版本与安装入口 1026~1035，含边界情况）
+│  ├─ blender_test.py           Blender 内部真机测试（1045 项断言；随版本与安装入口 1036~1045，Ubuntu CI 上少 6 条，含边界情况）
 │  ├─ run_tests.ps1             在指定 Blender 上跑测试（自动隔离配置目录）
 │  ├─ release.ps1               一键发版：校验 → 升版本 → 本地部署 → 打 tag → 推送
 │  ├─ deploy_local.ps1          把新包复制进本地插件 zip 库并替换旧版本
