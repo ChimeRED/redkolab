@@ -172,6 +172,35 @@ def apply(context, layout):
     return "已还原：补了 {} 个工作区，当前工作区改了 {} 个区域".format(created, applied), True
 
 
+def match_areas(saved_areas, current_boxes):
+    """把当前区域与保存的区域按**几何位置**配对，返回 [(当前下标, 保存项), ...]。
+
+    不能按列表顺序配对：Blender 内部的 screen.areas 顺序与"按位置排序"保存的
+    顺序并不一致，按顺序 zip 会把编辑器类型安到错误的区域上，界面上看起来就是
+    各个功能区乱窜。这里用中心点最近 + 每个保存项只用一次（贪心）。
+    """
+    pairs = []
+    used = set()
+    for index, box in enumerate(current_boxes):
+        centre_x = box["x"] + box["w"] / 2.0
+        centre_y = box["y"] + box["h"] / 2.0
+        best_order = None
+        best_distance = None
+        for order, saved in enumerate(saved_areas):
+            if order in used:
+                continue
+            distance = ((centre_x - (saved["x"] + saved["w"] / 2.0)) ** 2
+                        + (centre_y - (saved["y"] + saved["h"] / 2.0)) ** 2)
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_order = order
+        if best_order is None:
+            continue
+        used.add(best_order)
+        pairs.append((index, saved_areas[best_order]))
+    return pairs
+
+
 def _apply_areas(workspace, saved_areas):
     """按位置把区域类型改回去，返回成功改动的数量。"""
     screens = list(getattr(workspace, "screens", ()) or ())
@@ -179,18 +208,17 @@ def _apply_areas(workspace, saved_areas):
         return 0
     screen = screens[0]
     width, height = _screen_size(screen)
-    current = list(screen.areas)
-    if len(current) != len(saved_areas):
-        # 数量不一致就只改能按顺序对上的前几个，剩下的不动
-        current = current[:len(saved_areas)]
+    areas = list(screen.areas)
+    boxes = [{"x": area.x / width, "y": area.y / height,
+              "w": area.width / width, "h": area.height / height} for area in areas]
 
     changed = 0
-    for area, saved in zip(current, saved_areas):
+    for index, saved in match_areas(saved_areas, boxes):
         area_type = saved.get("type")
-        if not area_type or area.type == area_type:
+        if not area_type or areas[index].type == area_type:
             continue
         try:
-            area.type = area_type
+            areas[index].type = area_type
             changed += 1
         except Exception:
             continue
