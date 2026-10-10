@@ -350,14 +350,19 @@ class HHZ_OT_stairs(bpy.types.Operator):
         # 从饼菜单/面板点进来时事件坐标是点击位置，所以原点等第一次鼠标移动再定
         self._origin = None
 
+        axis = stairs.axis_for_direction(self._direction)
         for obj in targets:
+            # local 是网格自身包围盒（与修改器无关），original 是选中前的尺寸，
+            # original_scale 用来取消时还原 —— 三者都在挂阵列之前抓
             try:
-                original = tuple(obj.dimensions)
+                local = stairs.local_size(obj)
+                original = stairs.mesh_dimensions(obj)
+                original_scale = tuple(obj.scale)
             except Exception:
                 continue
-            stairs.resize_step(obj)
+            stairs.resize_step(obj, axis, local, original)
             stairs.add_array(obj, stairs.factors_for_direction(self._direction), self.count)
-            self._objects.append((obj, original))
+            self._objects.append((obj, local, original, original_scale))
 
         if not self._objects:
             self.report({'WARNING'}, "选中的物体不支持这个操作")
@@ -416,20 +421,24 @@ class HHZ_OT_stairs(bpy.types.Operator):
         }.get(self._direction, self._direction)
 
     def _hint(self):
-        return "楼梯 {} 节 · {} ｜ 移动鼠标换方向 · 滚轮改节数 · 左键确认 · 右键/Esc 取消".format(
-            stairs.clamp_count(self.count), self._direction_label())
+        return ("楼梯 {} 节 · {}（0.3 沿 {} 轴，另一条水平轴保持原尺寸）"
+                " ｜ 移动鼠标换方向 · 滚轮改节数 · 左键确认 · 右键/Esc 取消").format(
+            stairs.clamp_count(self.count), self._direction_label(),
+            stairs.axis_for_direction(self._direction))
 
     def _refresh(self):
-        """按当前方向与节数更新所有阵列修改器。"""
-        for obj, _original in self._objects:
+        """按当前方向与节数更新形状与阵列（换方向时体块朝向跟着换）。"""
+        axis = stairs.axis_for_direction(self._direction)
+        for obj, local, original, _scale in self._objects:
+            stairs.resize_step(obj, axis, local, original)
             stairs.add_array(obj, stairs.factors_for_direction(self._direction), self.count)
 
     def _revert(self):
-        """取消：删掉阵列修改器并把尺寸还原。"""
-        for obj, original in self._objects:
+        """取消：删掉阵列修改器并把缩放还原。"""
+        for obj, _local, _original, original_scale in self._objects:
             stairs.remove_array(obj)
             try:
-                obj.dimensions = original
+                obj.scale = original_scale
             except Exception:
                 pass
 

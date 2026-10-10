@@ -1240,9 +1240,28 @@ def test_stairs(module):
 
     # ---- 纯逻辑：尺寸与默认系数 ----
     check(stairs.STEP_WIDTH == 0.3 and stairs.STEP_HEIGHT == 0.2,
-          "台阶尺寸是 宽 0.3 / 高 0.2", (stairs.STEP_WIDTH, stairs.STEP_HEIGHT))
+          "台阶尺寸是 踏面 0.3 / 高 0.2", (stairs.STEP_WIDTH, stairs.STEP_HEIGHT))
     check(stairs.DEFAULT_FACTORS == (1.0, 0.0, -1.0),
           "默认系数 x=1, y=0, z=-1", stairs.DEFAULT_FACTORS)
+
+    # ---- 方向决定 0.3 放在哪条水平轴，另一条保持选中前尺寸 ----
+    check(stairs.axis_for_direction("RIGHT") == "X" and stairs.axis_for_direction("LEFT") == "X",
+          "左右方向 -> 0.3 放在 X 轴")
+    check(stairs.axis_for_direction("UP") == "Y" and stairs.axis_for_direction("DOWN") == "Y",
+          "上下方向 -> 0.3 放在 Y 轴")
+    check(stairs.step_dimensions("X", (1.0, 4.0, 0.5)) == (0.3, 4.0, 0.2),
+          "左右：X=0.3、Y 不变、Z=0.2", stairs.step_dimensions("X", (1.0, 4.0, 0.5)))
+    check(stairs.step_dimensions("Y", (1.0, 4.0, 0.5)) == (1.0, 0.3, 0.2),
+          "上下：Y=0.3、X 不变、Z=0.2", stairs.step_dimensions("Y", (1.0, 4.0, 0.5)))
+    check(stairs.step_dimensions("Y", (2.5, 7.0, 3.0)) == (2.5, 0.3, 0.2),
+          "上下：X 保持选中前的 2.5（不是 0.3）", stairs.step_dimensions("Y", (2.5, 7.0, 3.0)))
+    check(stairs.step_dimensions("X", (2.5, 7.0, 3.0)) == (0.3, 7.0, 0.2),
+          "左右：Y 保持选中前的 7.0", stairs.step_dimensions("X", (2.5, 7.0, 3.0)))
+    for axis in ("X", "Y"):
+        for original in ((1.0, 4.0, 0.5), (2.5, 7.0, 3.0), (0.1, 0.2, 0.3)):
+            target = stairs.step_dimensions(axis, original)
+            check(abs(target[2] - 0.2) < 1e-9,
+                  "{} 轴时 Z 恒为 0.2".format(axis), target)
 
     # ---- 鼠标位移 -> 方向 -> 系数 ----
     cases = (
@@ -1280,14 +1299,19 @@ def test_stairs(module):
     try:
         obj.dimensions = (1.0, 4.0, 0.5)
         context.view_layer.update()
-        original = tuple(obj.dimensions)
+        local = stairs.local_size(obj)
+        original = stairs.mesh_dimensions(obj)
+        check(all(abs(a - b) < 0.001 for a, b in zip(local, (1.0, 1.0, 1.0))),
+              "local_size 读到网格自身包围盒（不含缩放）", local)
+        check(all(abs(a - b) < 0.001 for a, b in zip(original, (1.0, 4.0, 0.5))),
+              "mesh_dimensions 读到体块当前尺寸（不含修改器）", original)
 
-        check(stairs.resize_step(obj), "体块整型成功")
+        check(stairs.resize_step(obj, "X", local, original), "体块整型成功")
         context.view_layer.update()
-        size = tuple(round(value, 4) for value in obj.dimensions)
-        check(abs(size[0] - 0.3) < 0.001, "宽度被设成 0.3 m", size)
-        check(abs(size[2] - 0.2) < 0.001, "高度被设成 0.2 m", size)
-        check(abs(size[1] - original[1]) < 0.001, "长度保持不变", (size[1], original[1]))
+        size = tuple(round(value, 4) for value in stairs.mesh_dimensions(obj))
+        check(abs(size[0] - 0.3) < 0.001, "左右方向：X 被设成 0.3 m", size)
+        check(abs(size[2] - 0.2) < 0.001, "左右方向：Z 被设成 0.2 m", size)
+        check(abs(size[1] - 4.0) < 0.001, "左右方向：Y 保持选中前的尺寸", size)
 
         modifier = stairs.add_array(obj, stairs.DEFAULT_FACTORS, 5)
         check(modifier is not None and modifier.type == 'ARRAY', "加上了阵列修改器")
@@ -1310,11 +1334,45 @@ def test_stairs(module):
               tuple(modifier.relative_offset_displace))
         check(modifier.count == 3, "节数跟到 3", modifier.count)
 
-        # 相对偏移 × 尺寸 = 每级实际位移：宽度 0.3 -> 每级挪 0.3，高度 0.2 -> 每级降 0.2
-        step_x = modifier.relative_offset_displace[0] * obj.dimensions[0]
-        step_z = modifier.relative_offset_displace[2] * obj.dimensions[2]
-        check(abs(abs(step_x) - 0.3) < 0.001, "每级横向位移正是 0.3 m", step_x)
+        # 相对偏移 × 尺寸 = 每级实际位移：踏面 0.3 -> 每级挪 0.3，高度 0.2 -> 每级降 0.2
+        step_x = modifier.relative_offset_displace[0] * size[0]
+        step_z = modifier.relative_offset_displace[2] * size[2]
+        check(abs(abs(step_x) - 0.3) < 0.001, "左右方向每级位移正是 0.3 m", step_x)
         check(abs(abs(step_z) - 0.2) < 0.001, "每级下降正是 0.2 m", step_z)
+
+        # 关键回归：Blender 的 dimensions **设置器**会把修改器算进去（阵列会放大好几倍，
+        # 3 节阵列设 0.3 会变成 0.9），所以尺寸一律用缩放换算；读取时两者一致。
+        check(all(abs(a - b) < 0.001 for a, b in zip(tuple(obj.dimensions), size)),
+              "obj.dimensions 的读取值与我们的尺寸一致（有坑的是设置器）",
+              tuple(obj.dimensions))
+        stairs_source = source_of(module, "stairs.py")
+        check("obj.dimensions =" not in stairs_source,
+              "stairs.py 里没有用 dimensions 设置器设尺寸（那是会被阵列污染的写法）")
+        check("obj.scale = " in stairs_source, "缩放换算用的才是 obj.scale")
+
+        # 换到上下方向：0.3 挪到 Y 轴，X 回到选中前的尺寸
+        check(stairs.resize_step(obj, "Y", local, original), "换方向时能按新轴向重新整型")
+        context.view_layer.update()
+        switched = tuple(round(value, 4) for value in stairs.mesh_dimensions(obj))
+        check(abs(switched[1] - 0.3) < 0.001, "上下方向：Y 变成 0.3 m", switched)
+        check(abs(switched[0] - original[0]) < 0.001,
+              "上下方向：X 回到选中前的尺寸", (switched[0], original[0]))
+        check(abs(switched[2] - 0.2) < 0.001, "上下方向：Z 仍是 0.2 m", switched)
+
+        modifier_y = stairs.add_array(obj, stairs.factors_for_direction("UP"), 4)
+        step_y = modifier_y.relative_offset_displace[1] * switched[1]
+        check(abs(abs(step_y) - 0.3) < 0.001, "上下方向每级 Y 位移正是 0.3 m", step_y)
+        check(tuple(round(value, 3) for value in modifier_y.relative_offset_displace)
+              == (0.0, 1.0, -1.0), "上下方向系数是 (0, 1, -1)",
+              tuple(modifier_y.relative_offset_displace))
+
+        # 再换回左右：Y 也要回到选中前的尺寸
+        check(stairs.resize_step(obj, "X", local, original), "再换回左右方向")
+        context.view_layer.update()
+        back = tuple(round(value, 4) for value in stairs.mesh_dimensions(obj))
+        check(abs(back[1] - original[1]) < 0.001, "换回左右：Y 回到选中前的尺寸",
+              (back[1], original[1]))
+        check(abs(back[0] - 0.3) < 0.001, "换回左右：X 又是 0.3 m", back)
 
         check(stairs.remove_array(obj), "能删掉阵列修改器")
         check(stairs.find_modifier(obj) is None, "删掉后找不到了")
@@ -1341,7 +1399,8 @@ def test_stairs(module):
     check(module.stairs.DEFAULT_COUNT == 2, "默认节数是 2", module.stairs.DEFAULT_COUNT)
     check("min=stairs.MIN_COUNT" in ops_source and "max=stairs.MAX_COUNT" in ops_source,
           "算符的节数范围接的是 stairs 的上下限")
-    for token in ("MOUSEMOVE", "WHEELUPMOUSE", "WHEELDOWNMOUSE", "LEFTMOUSE", "RUNNING_MODAL"):
+    for token in ("MOUSEMOVE", "WHEELUPMOUSE", "WHEELDOWNMOUSE", "LEFTMOUSE", "RUNNING_MODAL",
+                  "axis_for_direction"):
         check(token in ops_source, "模态处理里用到了 {}".format(token))
 
 
