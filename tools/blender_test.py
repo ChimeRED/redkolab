@@ -19,8 +19,10 @@ BLENDER_USER_EXTENSIONS 环境变量把配置目录指到临时目录，就不�
 """
 
 import ast
+import glob
 import os
 import re
+import struct
 import sys
 import tempfile
 import traceback
@@ -836,6 +838,117 @@ def _clear_unused_missing_images():
             pass
 
 
+def _purge_test_samples(module):
+    """删掉本用例造出来的样本数据块（``hhz_missing*`` / ``hhz_probe*``）。
+
+    不看使用者数 —— 带使用者的样本（字体天生 ``users == 1``、声音用
+    ``use_fake_user`` 抬到 1）不会被算符删掉，必须由测试自己清场，
+    否则会污染后面的"没有缺失项"断言。集合列表直接复用算符自己的扫描函数。
+    """
+    for _label, collection in module.ops._packable_collections():
+        for block in list(collection):
+            name = getattr(block, "name", "") or ""
+            if not (name.startswith("hhz_missing") or name.startswith("hhz_probe")):
+                continue
+            try:
+                block.use_fake_user = False
+            except Exception:
+                pass
+            try:
+                collection.remove(block)
+            except Exception:
+                pass
+
+
+def _write_sample_wav(path):
+    """手写一个最小 PCM WAV（8kHz / 16bit / 单声道，44 字节头 + 静音采样）。"""
+    rate = 8000
+    frames = int(rate * 0.05)
+    data = b"\x00\x00" * frames
+    header = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+    header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    header += b"data" + struct.pack("<I", len(data))
+    with open(path, "wb") as handle:
+        handle.write(header + data)
+
+
+def _make_missing_sample(kind, prefix, temporary_directory):
+    """造一个"指向已删除文件"的**非图像**样本，返回 ``(数据块名字, 落点路径, 说明)``。
+
+    做法与图像样本一致（:func:`_make_missing_image`）：先在临时目录里落一个**真文件**，
+    按正常流程读进 Blender，再把磁盘上的文件删掉 —— 于是数据块仍指向外部文件、
+    自己没有打包数据、而源文件已经不在了，正是保存时触发
+    「无法打包文件，找不到源路径」的那种条目。
+
+    * ``sound`` —— 手写的最小 WAV 能被 ``bpy.data.sounds.load()`` 读进来，
+      读完 ``users == 0``，所以它既能验证"无使用者 → 删除"，也能用
+      ``use_fake_user`` 验证"有使用者 → 绝不删除"。
+    * ``movieclips`` —— 影片剪辑用同一个 WAV 也能读进来（``movieclips.load()`` 接受任何
+      能被探测的文件），所以这一类**可以**端到端验证；它没有 ``packed_file`` 属性，
+      正好验证"没有该属性的类型也照样扫到"。
+    * ``fonts`` —— 复制一个真实存在的字体文件（优先 Blender 自带资源目录，其次系统字体）。
+      找不到任何字体文件时返回 ``(None, None, 原因)``，由调用方 ``skip`` 并说明。
+      读进来的字体数据块 ``users`` 天生是 1（``use_fake_user=False`` 也降不下来），
+      所以它只能验证"有使用者 → 绝不删除"。
+    """
+    folder = tempfile.mkdtemp(prefix="hhz_missing_{}_".format(kind), dir=temporary_directory)
+    if kind == "sound":
+        path = os.path.join(folder, "sample.wav")
+        _write_sample_wav(path)
+        block = bpy.data.sounds.load(path, check_existing=False)
+    elif kind == "movieclip":
+        path = os.path.join(folder, "sample.wav")
+        _write_sample_wav(path)
+        block = bpy.data.movieclips.load(path, check_existing=False)
+    elif kind == "font":
+        source = None
+        for pattern in (os.path.join(bpy.utils.resource_path('LOCAL'), "**", "*.ttf"),
+                        os.path.join(bpy.utils.resource_path('LOCAL'), "**", "*.otf"),
+                        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "*.ttf")):
+            found = sorted(glob.glob(pattern, recursive=True))
+            if found:
+                source = found[0]
+                break
+        if source is None:
+            return None, None, "本机找不到任何 .ttf/.otf 字体文件（Blender 资源目录与系统字体目录都为空）"
+        path = os.path.join(folder, "sample.ttf")
+        with open(source, "rb") as src, open(path, "wb") as dst:
+            dst.write(src.read())
+        block = bpy.data.fonts.load(path, check_existing=False)
+    else:
+        return None, None, "不支持的样本类型 {}".format(kind)
+
+    block.name = prefix
+    os.remove(path)
+    return block.name, path, "由 {} 构造".format(source if kind == "font" else "手写 WAV")
+
+
+def _real_config_dir():
+    """用户**真实**的 Blender 配置目录（Windows 布局），用来确认测试跑在沙箱里。"""
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+    version = "{}.{}".format(bpy.app.version[0], bpy.app.version[1])
+    return os.path.normcase(os.path.abspath(
+        os.path.join(appdata, "Blender Foundation", "Blender", version, "config")))
+
+
+def _isolated_config_dir():
+    """沙箱配置目录；不是沙箱（或目录不存在）时返回 ``None``。
+
+    这道防线来自一次真实事故：沙箱目录**不存在**时，Blender 会静默忽略
+    ``BLENDER_USER_CONFIG``，把偏好设置 / 启动文件写进用户真实配置目录。
+    所以"要写盘的用例"必须先证明自己落在沙箱里。
+    """
+    config = bpy.utils.user_resource('CONFIG')
+    if not config:
+        return None
+    config = os.path.abspath(config)
+    if not os.path.isdir(config):
+        return None
+    if os.path.normcase(config) == _real_config_dir():
+        return None
+    return config
+
+
 def class_source(source, class_name):
     """按函数/类边界取出某个类的源码段（静态检查报告文案用）。
 
@@ -851,14 +964,14 @@ def class_source(source, class_name):
 
 
 def _classify_missing(module, name):
-    """``_missing_image_names()`` 把某个数据块归到了哪一类：unused / in_use / absent。"""
+    """``_missing_file_blocks()`` 把某个数据块归到了哪一类：unused / in_use / absent。"""
     try:
-        unused, in_use = module.ops._missing_image_names()
+        unused, in_use = module.ops._missing_file_blocks()
     except Exception:
         return "error"
-    if any(getattr(image, "name", None) == name for image in unused):
+    if any(getattr(block, "name", None) == name for _label, _collection, block in unused):
         return "unused"
-    if any(item[0] == name for item in in_use):
+    if any(item[1] == name for item in in_use):
         return "in_use"
     return "absent"
 
@@ -885,7 +998,8 @@ def test_fix_missing_files(module):
 
     # 报告文案：运行期抓不到 self.report（后台模式没有 WM 报告收集器，
     # 实测 wm.report 不可赋值），改成按类边界静态读算符源码里的报告文案
-    static = class_source(source_of(module, "ops.py"), "HHZ_OT_fix_missing_files")
+    source = source_of(module, "ops.py")
+    static = class_source(source, "HHZ_OT_fix_missing_files")
     check(bool(static), "静态读到了算符源码段（报告文案检查有依据）")
 
     has_autopack = hasattr(bpy.data, "use_autopack")
@@ -963,12 +1077,114 @@ def test_fix_missing_files(module):
         check("查找缺失文件" in static and "未删除" in static,
               "源码里对仍在使用的那类给了「查找缺失文件」的提示，且说明未删除")
 
-        if used is not None:
-            used.use_fake_user = False
-            bpy.data.images.remove(used)
+        # 报告与 print 都要带"类型 + 名字 + 使用者数"；状态栏只列前 3 项 + 等 N 项
+        check("_describe_items" in static and "使用者" in static,
+              "报告与 print 都带类型 + 名字 + 使用者数")
+        check("等 {} 项" in source and "STATUS_ITEM_LIMIT" in source,
+              "状态栏列表超过 3 项时以「等 N 项」收尾（常量与拼接都在 ops.py 模块级）")
+        check("print(" in static and "已清理：" in static and "仍在用：" in static,
+              "控制台 print 完整列出类型 + 名字 + 使用者数")
+
+        # ---- 5. 扫描范围：覆盖所有可打包类型（不只图像）----
+        scanned = [label for label, _collection in module.ops._packable_collections()]
+        for label in ("图像", "声音", "字体", "影片剪辑"):
+            check(label in scanned, "缺失扫描覆盖「{}」类型".format(label), scanned)
+        check("libraries" not in scanned and "all_ids" not in scanned,
+              "不扫链接库与 all_ids（删它们会断开链接 / 没有意义）", scanned)
+
+        # 非图像类型 1：声音（端到端：手写 WAV -> 读入 -> 删源文件 -> 算符清理）
+        _purge_test_samples(module)
+        sound_name, sound_path, sound_note = _make_missing_sample(
+            "sound", "hhz_missing_sound", None)
+        check(sound_name is not None, "缺失声音样本已构造（{}）".format(sound_note),
+              sound_name)
+        if sound_name is not None:
+            check(not os.path.exists(sound_path), "声音样本的源文件已删除")
+            check(bpy.data.sounds.get(sound_name).users == 0,
+                  "声音样本没有使用者", bpy.data.sounds.get(sound_name).users)
+            check(_classify_missing(module, sound_name) == "unused",
+                  "扫描把缺失声音归到「没有使用者」一类（不是只扫图像）")
+
+            bpy.data.use_autopack = True
+            result = bpy.ops.hhz.fix_missing_files()
+            check(result == {'FINISHED'}, "只剩缺失声音时算符返回 FINISHED", result)
+            check(bpy.data.sounds.get(sound_name) is None,
+                  "没有使用者的缺失声音数据块被移除（新增类型也走同一条删除路径）")
+            check(bpy.data.use_autopack is False,
+                  "存在缺失声音时自动打包资源被关闭", bpy.data.use_autopack)
+
+        # 非图像类型 2：影片剪辑（没有 packed_file 属性，照样要扫到）
+        _purge_test_samples(module)
+        clip_name, clip_path, clip_note = _make_missing_sample(
+            "movieclip", "hhz_missing_clip", None)
+        check(clip_name is not None, "缺失影片剪辑样本已构造（{}）".format(clip_note),
+              clip_name)
+        if clip_name is not None:
+            clip = bpy.data.movieclips.get(clip_name)
+            check(clip is not None and not hasattr(clip, "packed_file"),
+                  "影片剪辑没有 packed_file 属性（判据不能依赖它）",
+                  hasattr(clip, "packed_file") if clip else None)
+            check(_classify_missing(module, clip_name) == "unused",
+                  "扫描把没有使用者的缺失影片剪辑归到「没有使用者」一类")
+            bpy.data.use_autopack = True
+            result = bpy.ops.hhz.fix_missing_files()
+            check(result == {'FINISHED'}, "只剩缺失影片剪辑时算符返回 FINISHED", result)
+            check(bpy.data.movieclips.get(clip_name) is None,
+                  "没有使用者的缺失影片剪辑被移除")
+            check(bpy.data.use_autopack is False,
+                  "存在缺失影片剪辑时自动打包资源被关闭", bpy.data.use_autopack)
+
+        # 非图像类型 3：字体（users 天生为 1 -> 只能验证"有使用者绝不删除"）
+        #   构造不出来的情况：本机找不到任何 .ttf/.otf，这时如实 skip 并说明原因，
+        #   不假装验证过。
+        _purge_test_samples(module)
+        font_name, font_path, font_note = _make_missing_sample(
+            "font", "hhz_missing_font", None)
+        if font_name is None:
+            skip("构造不了字体样本：{}".format(font_note))
+        else:
+            check(not os.path.exists(font_path), "字体样本的源文件已删除")
+            font = bpy.data.fonts.get(font_name)
+            check(font is not None and font.users >= 1,
+                  "字体样本自带使用者（所以它验证的是「有使用者绝不删除」）",
+                  font.users if font else None)
+            check(_classify_missing(module, font_name) == "in_use",
+                  "扫描把带使用者的缺失字体归到「仍在使用」一类")
+            bpy.data.use_autopack = True
+            result = bpy.ops.hhz.fix_missing_files()
+            check(result == {'FINISHED'}, "只剩带使用者的缺失字体时算符返回 FINISHED", result)
+            check(bpy.data.fonts.get(font_name) is not None,
+                  "仍在使用的缺失字体绝不删除")
+            check(bpy.data.use_autopack is False,
+                  "存在缺失字体时自动打包资源被关闭", bpy.data.use_autopack)
+
+        # 声音也有使用者时：绝不删除（对新增类型同样成立）
+        _purge_test_samples(module)
+        kept_name, _kept_path, _note = _make_missing_sample(
+            "sound", "hhz_missing_sound_used", None)
+        if kept_name is not None:
+            kept = bpy.data.sounds.get(kept_name)
+            kept.use_fake_user = True   # users 0 -> 1，等价于"文件里还在用它"
+            check(kept.users >= 1, "声音样本现在有使用者", kept.users)
+            check(_classify_missing(module, kept_name) == "in_use",
+                  "扫描把带使用者的缺失声音归到「仍在使用」一类")
+            bpy.data.use_autopack = True
+            result = bpy.ops.hhz.fix_missing_files()
+            check(result == {'FINISHED'}, "只剩带使用者的缺失声音时算符返回 FINISHED", result)
+            check(bpy.data.sounds.get(kept_name) is not None,
+                  "仍在使用的缺失声音绝不删除（有使用者不删对新类型同样成立）")
+
+        # use_autopack 只在"确实存在缺失项"时才被关：清干净之后再点一次不该动它
+        _purge_test_samples(module)
+        bpy.data.use_autopack = True
+        result = bpy.ops.hhz.fix_missing_files()
+        check(result == {'FINISHED'}, "清理干净之后算符仍然正常结束", result)
+        check(bpy.data.use_autopack is True,
+              "没有缺失项时绝不碰 use_autopack（只在有缺失时才关）", bpy.data.use_autopack)
     finally:
         # 复位，避免污染后面的用例
         _clear_unused_missing_images()
+        _purge_test_samples(module)
         try:
             bpy.data.use_autopack = original_autopack
         except Exception:
@@ -1210,6 +1426,12 @@ def test_theme(module):
         low_contrast = []
         for family_prefix, _label in theme.WIDGET_FAMILIES:
             for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+                if (background_key == "inner_sel"
+                        and family_prefix in theme.LABEL_INDEPENDENT_FAMILIES):
+                    # 标签独立型家族的标签**不在**选中块上，inner_sel vs text_sel 这一对
+                    # 不代表标签可读性；它们由下面更严格的"实际底色"检查覆盖
+                    # （清单与判据见 theme.LABEL_INDEPENDENT_FAMILIES）。
+                    continue
                 background = colors.get(theme.family_path(family_prefix, background_key))
                 text_color = colors.get(theme.family_path(family_prefix, text_key))
                 if background is None:
@@ -1223,42 +1445,40 @@ def test_theme(module):
         check(not low_contrast, "预设「{}」每个家族的文字/底色对比都够".format(preset),
               low_contrast[:6])
 
-        # 「选项类」三个家族的标签不在选中块上（只有小方块 / 小圆点用 inner_sel 上色），
-        # 所以它们的 text_sel 必须与**每一个可能落到的底色**都有足够亮度差，
-        # 否则就是"弹出面板里的选项是黑字落深底，看不见"。
-        option_problems = []
-        for option_prefix in theme.OPTION_BLOCK_FAMILIES:
-            option_text = colors.get(theme.family_path(option_prefix, "text_sel"))
-            if option_text is None:
-                option_problems.append("{}：没给选中文字色".format(option_prefix))
-                continue
-            for back_path, back_color in theme.option_label_backdrops(colors, option_prefix):
-                if abs(theme.luminance(back_color) - theme.luminance(option_text)) < 0.3:
-                    option_problems.append("{}：标签落 {} 上亮度差不足".format(
-                        option_prefix, back_path))
-        check(not option_problems,
-              "预设「{}」选项类家族的标签文字在各底色上都读得清".format(preset),
-              option_problems[:6])
+        # 「标签独立型」家族的标签不在选中块上（只有小方块 / 小圆点 / 开关体用
+        # inner_sel 上色；菜单 / 弹出面板里的选项按钮连标签色都借 wcol_menu_back），
+        # 所以它们的 text / text_sel 必须与**每一个可能落到的底色**都有足够亮度差，
+        # 否则就是"叠加层里打勾后标签变黑、看不见"。
+        label_problems = []
+        for label_prefix in theme.LABEL_INDEPENDENT_FAMILIES:
+            label_problems.extend(theme.label_contrast_problems(colors, label_prefix))
+        check(not label_problems,
+              "预设「{}」标签独立型家族（含 wcol_menu_back）的标签在各实际底色上都读得清".format(preset),
+              label_problems[:6])
 
-    # 3D 视图里当"参照物"的辅助元素不许被预设压暗 —— 压暗就没法和默认一样明显。
-    # 修法不是"换成另一个猜的颜色"，而是根本上不在预设里覆盖它：
-    # 这样套用预设之后，基面网格线与法线保持出厂值（= 与默认一样明显），
-    # 想调仍可在面板的「视口 / 3D 编辑模式」分组里单独改（两项仍在清单里）。
-    dimmed_helpers = []
+    # 视口辅助元素 / 滑块 / 工具按钮类：预设必须把它们**写回出厂默认值**（自愈），
+    # 而不是"不覆盖"—— 旧版写进主题里的暗值 / 强调色不会自己变回来，
+    # 用户看到的就是"套了预设完全没更新"。
+    not_default = []
     for preset in theme.preset_names():
         preset_colors = theme.preset_colors(preset) or {}
-        for helper_path in theme.VIEWPORT_HELPERS:
-            if helper_path in preset_colors:
-                dimmed_helpers.append("{} 覆盖了 {}".format(preset, helper_path))
-    check(not dimmed_helpers, "四套预设都不覆盖视口辅助元素（它们必须和默认一样明显）",
-          dimmed_helpers)
+        for helper_path in theme.factory_locked_paths():
+            default = theme.default_of(helper_path)
+            if default is None:
+                continue
+            if helper_path not in preset_colors:
+                not_default.append("{} 漏了 {}".format(preset, helper_path))
+            elif not color_close(preset_colors[helper_path], default):
+                not_default.append("{} 的 {} 不是出厂默认值".format(preset, helper_path))
+    check(not not_default, "四套预设都把视口辅助元素 / 滑块 / 工具按钮写回记录的出厂默认值",
+          not_default[:6])
     check("view_3d.grid" in theme.default_paths()
           and color_close(theme.default_of("view_3d.grid"),
                           theme.DEFAULT_COLORS["view_3d.grid"]),
           "基面网格线仍记录着出厂默认值（恢复默认能还原它）")
     check(theme.VIEWPORT_HELPERS and
           all(helper in theme.default_paths() for helper in theme.VIEWPORT_HELPERS),
-          "被列为「不许压暗」的辅助元素都有出厂默认值记录（不猜颜色）",
+          "被列为「必须写回默认」的辅助元素都有出厂默认值记录（不猜颜色）",
           theme.VIEWPORT_HELPERS)
 
     # 真套一次，直接查实际主题里的对比度
@@ -1554,6 +1774,11 @@ def test_theme(module):
                 not_greyer.append("{}:{}".format(name, path))
         for family_prefix, _label in theme.WIDGET_FAMILIES:
             for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+                if (background_key == "inner_sel"
+                        and family_prefix in theme.LABEL_INDEPENDENT_FAMILIES):
+                    # 同 test_theme：标签独立型家族的标签不在选中块上，
+                    # inner_sel vs text_sel 这一对不代表标签可读性
+                    continue
                 background = preset_colors.get(theme.family_path(family_prefix, background_key))
                 text_color = preset_colors.get(theme.family_path(family_prefix, text_key))
                 if background is None or text_color is None:
@@ -1592,6 +1817,244 @@ def test_theme(module):
           (low_saturation, theme.saturation_of(second_pass)))
     preferences.preset_saturation = original_saturation
 
+
+
+def test_preset_label_families(module):
+    section("预设：标签独立型家族（叠加层里打勾后标签仍读得清）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    # 清单本身：漏一个就是这样一处用户可见的事故
+    check("wcol_menu_back" in theme.LABEL_INDEPENDENT_FAMILIES,
+          "wcol_menu_back 在「标签独立型家族」清单里（漏了它就是叠加层里打勾后标签变黑）",
+          theme.LABEL_INDEPENDENT_FAMILIES)
+    for option_prefix in theme.OPTION_BLOCK_FAMILIES:
+        check(option_prefix in theme.LABEL_INDEPENDENT_FAMILIES,
+              "{} 也在标签独立型清单里".format(option_prefix),
+              theme.LABEL_INDEPENDENT_FAMILIES)
+    check("wcol_menu_item" not in theme.LABEL_INDEPENDENT_FAMILIES
+          and "wcol_pulldown" not in theme.LABEL_INDEPENDENT_FAMILIES,
+          "菜单高亮行 / 下拉菜单**不**按标签独立处理（它们的标签确实压在选中块上）",
+          theme.LABEL_INDEPENDENT_FAMILIES)
+    check(theme.LABEL_TEXT_COLOR == theme.TOKENS["TEXT_PRIMARY"],
+          "标签色引用的是已有设计 Token（TEXT_PRIMARY），不是新造的颜色",
+          theme.LABEL_TEXT_COLOR)
+
+    for preset in theme.preset_names():
+        colors = theme.preset_colors(preset) or {}
+        problems = []
+        for prefix in theme.LABEL_INDEPENDENT_FAMILIES:
+            problems.extend(theme.label_contrast_problems(colors, prefix))
+        check(not problems,
+              "预设「{}」标签独立型家族的标签在实际底色上亮度差都 >= 0.3".format(preset),
+              problems[:6])
+
+        menu_text = colors.get("user_interface.wcol_menu_back.text_sel")
+        menu_back = colors.get("user_interface.wcol_menu_back.inner")
+        check(menu_text is not None and menu_back is not None
+              and abs(theme.luminance(menu_text) - theme.luminance(menu_back)) >= 0.3,
+              "预设「{}」菜单 / 弹出面板里的选项标签（text_sel）是浅色、在面板底上可读".format(preset),
+              (theme.color_to_hex(menu_text), theme.color_to_hex(menu_back)))
+
+        # 真套一次、再从**实际主题**读回校验（8 位量化，用真实值算亮度差）
+        theme.apply_colors(current, colors)
+        round_trip = []
+        for prefix in theme.LABEL_INDEPENDENT_FAMILIES:
+            text_path = theme.family_path(prefix, "text_sel")
+            text_color = theme.get_color(current, text_path)
+            if text_color is None:
+                continue
+            for path, _preset_background in theme.label_backdrops(colors, prefix):
+                real_background = theme.get_color(current, path)
+                if real_background is None:
+                    continue
+                difference = abs(theme.luminance(real_background) - theme.luminance(text_color))
+                if difference < 0.3:
+                    round_trip.append("{}：{} 实际亮度差 {:.2f}".format(
+                        prefix, path, difference))
+        check(not round_trip,
+              "预设「{}」真的套到主题上之后，标签文字仍然读得清（读回值校验）".format(preset),
+              round_trip[:6])
+
+        # 菜单高亮行 / 下拉菜单保持"强调色底 + 近黑字"的设计（用户要的效果）
+        for prefix in ("wcol_menu_item", "wcol_pulldown"):
+            background = colors.get(theme.family_path(prefix, "inner_sel"))
+            text_color = colors.get(theme.family_path(prefix, "text_sel"))
+            check(background is not None and text_color is not None
+                  and abs(theme.luminance(background) - theme.luminance(text_color)) >= 0.3,
+                  "预设「{}」{} 的「强调色底 + 文字」对比仍在（高亮行设计没被改掉）".format(
+                      preset, prefix),
+                  (theme.color_to_hex(background), theme.color_to_hex(text_color)))
+
+
+def test_preset_factory_locked(module):
+    section("预设：必须保持出厂默认值的项（数值滑块 / 工具按钮 / 视口辅助元素）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    check("wcol_numslider" in theme.FACTORY_LOCKED_FAMILIES,
+          "数值滑块在「必须保持出厂默认」清单里（颜色选择器的 H/S/V/Alpha 与 RGB 滑条）",
+          theme.FACTORY_LOCKED_FAMILIES)
+    check("wcol_tool" in theme.FACTORY_LOCKED_FAMILIES
+          and "wcol_toolbar_item" in theme.FACTORY_LOCKED_FAMILIES,
+          "工具按钮类两个家族都在清单里（左侧工具栏选中项的图标）",
+          theme.FACTORY_LOCKED_FAMILIES)
+    check(theme.resolve(current, "user_interface.wcol_slider.inner") is None,
+          "候选里的 wcol_slider 在当前 Blender 上不存在（真机 bl_rna 查不到）")
+    check(set(theme.VIEWPORT_HELPERS) <= set(theme.factory_locked_paths()),
+          "视口辅助元素也在「写回出厂默认值」的清单里",
+          theme.factory_locked_paths()[:4])
+
+    for preset in theme.preset_names():
+        colors = theme.preset_colors(preset) or {}
+        wrong = []
+        for path in theme.factory_locked_paths():
+            default = theme.default_of(path)
+            if default is None:
+                continue
+            if path not in colors:
+                wrong.append("{} 漏了".format(path))
+            elif not color_close(colors[path], default):
+                wrong.append("{} = {}（应为 {}）".format(
+                    path, theme.color_to_hex(colors[path]), theme.color_to_hex(default)))
+        check(not wrong,
+              "预设「{}」把滑块 / 工具按钮 / 视口辅助元素写成记录的出厂默认值".format(preset),
+              wrong[:6])
+
+        # 数值滑块：轨道 / 拖动轨道 / 填充块必须看得出区别，值文字要读得清
+        slider = "wcol_numslider"
+        inner = colors.get(theme.family_path(slider, "inner"))
+        inner_sel = colors.get(theme.family_path(slider, "inner_sel"))
+        item = colors.get(theme.family_path(slider, "item"))
+        text = colors.get(theme.family_path(slider, "text"))
+        check(inner is not None and inner_sel is not None and item is not None and text is not None,
+              "预设「{}」数值滑块的轨道 / 拖动轨道 / 填充块 / 文字都有值".format(preset))
+        if None not in (inner, inner_sel, item, text):
+            check(not color_close(inner, inner_sel, 0.02)
+                  and not color_close(inner, item, 0.02)
+                  and not color_close(inner_sel, item, 0.02),
+                  "预设「{}」数值滑块三色互不相同（不是整条一个色，拖得出色块）".format(preset),
+                  (theme.color_to_hex(inner), theme.color_to_hex(inner_sel),
+                   theme.color_to_hex(item)))
+            check(abs(theme.luminance(text) - theme.luminance(inner)) >= 0.3,
+                  "预设「{}」数值滑块的值文字与轨道亮度差 >= 0.3".format(preset),
+                  (theme.color_to_hex(text), theme.color_to_hex(inner)))
+
+        # 工具按钮类：选中态图标色 vs 选中态底色（图标色走 wcol->text，选中时是 text_sel）
+        for prefix in ("wcol_tool", "wcol_toolbar_item"):
+            background = colors.get(theme.family_path(prefix, "inner_sel"))
+            icon_color = colors.get(theme.family_path(prefix, "text_sel"))
+            check(background is not None and icon_color is not None
+                  and abs(theme.luminance(background) - theme.luminance(icon_color)) >= 0.3,
+                  "预设「{}」{} 选中态图标色 vs 选中态底色亮度差 >= 0.3".format(preset, prefix),
+                  (theme.color_to_hex(icon_color), theme.color_to_hex(background)))
+
+    # 自愈：先把主题写成"旧版预设留下的坏值"，再套一次预设，必须回到出厂默认值
+    for path in theme.factory_locked_paths():
+        if theme.default_of(path) is None:
+            continue
+        count = theme.component_count(current, path)
+        theme.set_color(current, path, (0.02, 0.03, 0.02, 0.2) if count == 4 else (0.02, 0.03, 0.02))
+    theme.apply_colors(current, theme.preset_colors(theme.preset_names()[0]) or {})
+    healed = [path for path in theme.factory_locked_paths()
+              if theme.default_of(path) is not None
+              and not color_close(theme.get_color(current, path), theme.default_of(path))]
+    check(not healed,
+          "主题里被旧版写坏的滑块 / 工具按钮 / 网格线，再套一次预设就自愈到出厂默认值",
+          healed[:6])
+
+
+def test_save_preferences(module):
+    section("功能：保存到偏好设置（算子名 + 真跑一次）")
+    # 注意：不能用 hasattr(bpy.ops.wm, "save_userpref") —— 项目已知它对不存在的算子名恒为真
+    check("save_userpref" in dir(bpy.ops.wm),
+          "Blender 侧存在 wm.save_userpref（单数，正确名字）")
+    check("save_userprefs" not in dir(bpy.ops.wm),
+          "Blender 侧没有 wm.save_userprefs（复数，就是旧代码写错的那个名字）")
+    source = source_of(module, "ops.py")
+    check("save_userprefs" not in source,
+          "源码里不再出现写错的算子名 save_userprefs")
+    check("bpy.ops.wm.save_userpref()" in source,
+          "源码调用的是正确的 bpy.ops.wm.save_userpref()")
+    static = class_source(source, "HHZ_OT_theme_save_preferences")
+    check("'ERROR'" in static and "'CANCELLED'" in static,
+          "内层失败会 report ERROR 并返回 CANCELLED（不是吞掉后照样 FINISHED）")
+    check("use_preferences_save" in static,
+          "没开「自动保存偏好设置」时报告里会补一句提示（不新增设置项）")
+    check(operator_class(module, "theme_save_preferences") is not None,
+          "算符 hhz.theme_save_preferences 已注册")
+
+    config = _isolated_config_dir()
+    if config is None:
+        skip("配置目录不是隔离沙箱，跳过真实写偏好设置（避免改到用户真实配置）")
+        return
+    before = set(os.listdir(config))
+    result = bpy.ops.hhz.theme_save_preferences()
+    check(result != {'CANCELLED'}, "「保存到偏好设置」不是失败返回（CANCELLED）", result)
+    check(result == {'FINISHED'}, "「保存到偏好设置」返回 FINISHED", result)
+    check("userpref.blend" in set(os.listdir(config)),
+          "偏好设置真的写进了隔离目录（沙箱）里的 userpref.blend",
+          (sorted(before), sorted(os.listdir(config))))
+
+
+def test_startup_layout_warning(module):
+    section("功能：存为启动布局会提示缺失引用（只提示、不阻止）")
+    operator = operator_class(module, "layout_save_startup")
+    check(operator is not None, "算符 hhz.layout_save_startup 已注册")
+    source = source_of(module, "ops.py")
+    static = class_source(source, "HHZ_OT_layout_save_startup")
+    check("_missing_file_blocks" in static,
+          "写启动文件前复用了缺陷 3 的缺失文件扫描函数（没有另写一份）")
+    check("'WARNING'" in static and "检查并修复缺失文件" in static,
+          "有缺失引用时用 WARNING 提示并指向「检查并修复缺失文件」")
+    check("已一并写入启动文件" in static,
+          "提示里说清「缺失引用会被一起写进启动文件」（这才是复发的根因）")
+    check("invoke_confirm" in static,
+          "行为未变：仍然只弹一次原生确认框，没有新增确认框 / 设置项")
+
+    config = _isolated_config_dir()
+    if config is None:
+        skip("配置目录不是隔离沙箱，跳过真实写启动文件（避免改到用户真实配置）")
+        return
+
+    _purge_test_samples(module)
+    # 让 Blender 能干净地写出启动文件：清掉测试留下的孤立数据块（含带坏 from 指针的
+    # 形态键），否则 Blender 自己会在写盘时报 "ShapeKey ... invalid 'from' pointer"，
+    # 那是测试夹具的副作用，不是被测算符的行为。
+    reset_scene()
+    try:
+        bpy.data.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
+    except Exception:
+        pass
+
+    sound_name, sound_path, note = _make_missing_sample("sound", "hhz_missing_startup", None)
+    check(sound_name is not None, "启动布局用例造出了缺失样本（{}）".format(note), sound_name)
+    if sound_name is None:
+        return
+    try:
+        unused, in_use = module.ops._missing_file_blocks()
+        scanned = [getattr(block, "name", "") for _label, _collection, block in unused]
+        check(sound_name in scanned or any(item[1] == sound_name for item in in_use),
+              "扫描函数确实检出了这个缺失样本（提示的判据是真的）",
+              (sound_name, scanned[:4], len(in_use)))
+
+        try:
+            result = bpy.ops.hhz.layout_save_startup(confirm=True)
+        except Exception as error:
+            # bpy.ops 在算符报 ERROR 时会抛 RuntimeError —— 这里抓成断言的可读结果
+            result = "抛出异常：{}".format(error)
+        check(result == {'FINISHED'},
+              "有缺失引用时算符**仍然保存成功**（只提示、不阻止，行为未变）", result)
+        check(os.path.exists(os.path.join(config, "startup.blend")),
+              "启动文件确实写进了隔离目录（沙箱）", config)
+    finally:
+        _purge_test_samples(module)
 
 
 def pie_operator_idnames(source):
@@ -2165,14 +2628,19 @@ def main():
     run("注册与界面结构", test_registration, module_name, module)
     run("图标名合法性", test_icons, module)
     run("饼菜单按钮依赖", test_menu_operator)
+    # 放在前面：要让 Blender 真的写一次启动文件，得趁测试场景还干净的时候跑
+    run("存为启动布局的缺失引用提示", test_startup_layout_warning, module)
     run("键位注册与改键", test_keymap, module)
     run("非法快捷键处理", test_bad_hotkey, module)
     run("一键删除所有材质", test_materials)
     run("一键应用所有修改器", test_apply_modifiers, module)
     run("一键删除所有修改器", test_remove_modifiers)
     run("检查并修复缺失文件", test_fix_missing_files, module)
+    run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
     run("主题颜色（N 面板）", test_theme, module)
+    run("预设：标签独立型家族", test_preset_label_families, module)
+    run("预设：必须保持出厂默认值的项", test_preset_factory_locked, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)

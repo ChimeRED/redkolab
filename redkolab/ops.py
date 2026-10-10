@@ -500,78 +500,190 @@ class HHZ_OT_reset_hotkey(bpy.types.Operator):
 # --------------------------------------------------------- 检查并修复缺失文件
 
 
-def _missing_image_names():
-    """扫描图像数据块，返回 ``(未被使用的缺失项名字, 仍在使用的缺失项名字)``。
+#: 保存时会参与「自动打包资源」的数据块集合：(``bpy.data`` 上的属性名, 中文类型名)。
+#: 依据 Blender 的打包实现 ``BKE_packedfile_pack_all()``：图像（``IMA_SRC_FILE`` /
+#: ``IMA_SRC_TILED``）、字体（非内置）、声音、体积；影片剪辑（``movieclips``）是另一类
+#: "指向外部文件"的数据块，源文件没了同样要清。其它集合（``cache_files`` / ``texts`` 等）
+#: 由 :func:`_packable_collections` 用 ``getattr`` 动态纳入 —— 不为某个版本上不存在的属性写死代码。
+PACKABLE_COLLECTIONS = (
+    ("images", "图像"),
+    ("sounds", "声音"),
+    ("fonts", "字体"),
+    ("movieclips", "影片剪辑"),
+    ("volumes", "体积"),
+)
+
+#: 明确**不扫**的集合：
+#: * ``libraries`` —— 链接库不是可打包数据，删掉它会连带断开链接（缺失的库该用
+#:   「文件 ▸ 外部数据 ▸ 查找缺失文件」重新链接），不属于本算符的范围；
+#: * ``all_ids`` —— 这是"文件里所有 ID"的汇总视图（5.x），删它没有意义，也会与具体集合重复。
+NON_PACKABLE_COLLECTIONS = ("libraries", "all_ids")
+
+#: 明显"不是外部文件"的来源取值：生成 / 查看器 / 只在内存里的数据块没有可打包的源文件，
+#: 保存时也不会去读磁盘，不该被当成"缺失文件"。
+NON_FILE_SOURCES = ('GENERATED', 'VIEWER', 'MEMORY', 'BUILTIN')
+
+#: 图像数据块里算"外部文件"的来源（与旧行为一致：只有 ``FILE``）。
+#: 序列 / 影片来源的图像不能打包（``BKE_packedfile_pack_all()`` 只处理 ``FILE`` / ``TILED``），
+#: 也不是"无法打包文件，找不到源路径"的原因；而序列的 ``filepath`` 可能带 ``#`` 占位符，
+#: 按字面路径判断存在性会误报，所以一律跳过。
+IMAGE_FILE_SOURCE = 'FILE'
+
+
+def _packable_collections():
+    """返回 ``[(类型中文名, 集合), ...]``：五类已知集合 + 其它含 ``filepath`` 的集合。
+
+    "其它"用 ``dir(bpy.data)`` + ``getattr`` + 取第一个元素看有没有 ``filepath`` 来判断，
+    所以不同 Blender 版本上集合的增减不会漏扫，也不会为不存在的属性写死代码。
+    """
+    found = []
+    seen = set()
+    for attribute, label in PACKABLE_COLLECTIONS:
+        collection = getattr(bpy.data, attribute, None)
+        if collection is None:
+            continue
+        found.append((label, collection))
+        seen.add(attribute)
+    for attribute in dir(bpy.data):
+        if attribute.startswith("_") or attribute in seen:
+            continue
+        if attribute in NON_PACKABLE_COLLECTIONS:
+            continue
+        collection = getattr(bpy.data, attribute, None)
+        if not isinstance(collection, bpy.types.bpy_prop_collection):
+            continue
+        for item in collection:
+            # 空集合判不出来，但空集合本来也没有缺失项要报
+            if hasattr(item, "filepath"):
+                found.append((attribute, collection))
+            break
+    return found
+
+
+def _missing_file_path(block):
+    """数据块指向的外部文件路径（不是外部文件 / 读不到就返回 ``""``）。"""
+    source = getattr(block, "source", None)
+    if isinstance(source, str) and source in NON_FILE_SOURCES:
+        return ""
+    filepath = getattr(block, "filepath", "")
+    if not isinstance(filepath, str) or not filepath:
+        return ""
+    try:
+        return bpy.path.abspath(filepath)
+    except Exception:
+        # 路径写法太怪（``bpy.path.abspath`` 自己抛异常）也按"缺失"处理：
+        # 保存时同样打包不了，不让整个算符中断。
+        return filepath
+
+
+def _is_missing_file_block(block):
+    """这个数据块是不是"源文件已不在磁盘、且自己没有打包数据"。
 
     判据与 Blender 报「无法打包文件，找不到源路径」时一致：
-    来源是外部文件（``source == 'FILE'``）、自己没有打包数据（``not packed_file``）、
-    而且磁盘上的源文件确实不在了。``bpy.path.abspath`` 本身也可能抛异常
-    （路径写法太怪），这里按「缺失」处理，不让整个算符中断。
+    指向外部文件、自己没有打包数据（``packed_file`` 为空 —— 影片剪辑这类没有该属性的
+    数据块按"没打包"处理）、而且磁盘上的源文件确实不在了。
+    """
+    if isinstance(block, bpy.types.Image) and getattr(block, "source", None) != IMAGE_FILE_SOURCE:
+        # 图像只有 ``source == 'FILE'`` 才算外部文件（与旧行为一致）
+        return False
+    path = _missing_file_path(block)
+    if not path:
+        return False
+    if getattr(block, "packed_file", None) is not None:
+        return False
+    try:
+        return not os.path.exists(path)
+    except Exception:
+        return True
+
+
+def _missing_file_blocks():
+    """扫描**所有可打包**的数据块，返回 ``(没有使用者的, 仍在使用中的)``。
+
+    旧版只看图像，所以字体 / 声音 / 影片剪辑缺失时保存照样报错。返回结构：
+
+    * 没有使用者的：``[(类型中文名, 集合, 数据块)]`` —— 调用方按集合删除（遍历前已 ``list()``）；
+    * 仍在使用的：``[(类型中文名, 名字, 使用者数)]`` —— 绝不删除，只报告。
     """
     unused = []
     in_use = []
-    for img in list(bpy.data.images):
-        if img.source != 'FILE' or img.packed_file:
-            continue
-        try:
-            path = bpy.path.abspath(img.filepath)
-            exists = bool(path) and os.path.exists(path)
-        except Exception:
-            exists = False
-        if exists:
-            continue
-        if img.users == 0:
-            unused.append(img)
-        else:
-            in_use.append((img.name, img.users))
+    for label, collection in _packable_collections():
+        for block in list(collection):
+            if not _is_missing_file_block(block):
+                continue
+            name = getattr(block, "name", "?")
+            users = int(getattr(block, "users", 0) or 0)
+            if users == 0:
+                unused.append((label, collection, block))
+            else:
+                in_use.append((label, name, users))
     return unused, in_use
+
+
+#: 状态栏最多列几项（Blender 的状态栏放不下长列表）
+STATUS_ITEM_LIMIT = 3
+
+
+def _describe_items(items, limit=STATUS_ITEM_LIMIT):
+    """把 ``(类型, 名字, 使用者数)`` 列表拼成一行；超过 ``limit`` 项时以"等 N 项"收尾。"""
+    parts = ["{} {}（{} 使用者）".format(label, name, users) for label, name, users in items[:limit]]
+    text = "、".join(parts)
+    if len(items) > limit:
+        text += " 等 {} 项".format(len(items))
+    return text
 
 
 class HHZ_OT_fix_missing_files(bpy.types.Operator):
     bl_idname = "hhz.fix_missing_files"
     bl_label = "检查并修复缺失文件"
     bl_description = (
-        "清理指向已删除文件的图像数据块（只清没有任何使用者的），"
+        "清理指向已删除文件的数据块（图像 / 声音 / 字体 / 影片剪辑等，只清没有任何使用者的），"
         "并在必要时关闭本文件的自动打包资源"
     )
 
     def execute(self, context):
-        unused, in_use = _missing_image_names()
+        unused, in_use = _missing_file_blocks()
         if not unused and not in_use:
             # 幂等：一个缺失项都没有时，一个字节都不改（use_autopack 也不动）
             self.report({'INFO'}, "没有发现缺失文件，未做任何修改")
             return {'FINISHED'}
 
-        removed_names = []
-        for img in unused:
+        removed = []
+        for label, collection, block in unused:
             # 先记名字：remove() 之后这个数据块就失效了，不能再读它的属性
-            name = img.name
+            name = getattr(block, "name", "?")
             try:
-                bpy.data.images.remove(img)
+                collection.remove(block)
             except Exception as error:
-                self.report({'WARNING'}, "无法清理 {}：{}".format(name, error))
+                self.report({'WARNING'}, "无法清理 {} {}：{}".format(label, name, error))
                 continue
-            removed_names.append(name)
+            removed.append((label, name))
 
-        # 弹窗的直接原因就是「自动打包资源」：文件里既然还有指向已删除文件的图像，
+        # 弹窗的直接原因就是「自动打包资源」：文件里既然还有指向已删除文件的数据块，
         # 每次保存都会再去打包它们。这里只在这个文件确实有缺失项时才关掉。
         auto_pack_off = False
         if getattr(bpy.data, "use_autopack", False):
             bpy.data.use_autopack = False
             auto_pack_off = True
 
-        parts = ["发现 {} 个指向已删除文件的图像".format(len(unused) + len(in_use))]
-        if removed_names:
-            parts.append("已清理 {} 个没有使用者的引用（{}）".format(
-                len(removed_names), "、".join(removed_names)))
+        parts = ["发现 {} 个指向已删除文件的数据块".format(len(unused) + len(in_use))]
+        if removed:
+            parts.append("已清理 {} 个没有使用者的（{}）".format(
+                len(removed),
+                _describe_items([(label, name, 0) for label, name in removed])))
         if in_use:
-            parts.append("仍有 {} 个在使用中，未删除（{}）：{}".format(
-                len(in_use),
-                "、".join("{} 使用者 {}".format(name, users) for name, users in in_use),
-                "可用 文件 ▸ 外部数据 ▸ 查找缺失文件 重新链接",
-            ))
+            parts.append("仍有 {} 个在使用中，未删除（{}）：可用 文件 ▸ 外部数据 ▸ 查找缺失文件 重新链接".format(
+                len(in_use), _describe_items(in_use)))
         if auto_pack_off:
             parts.append("已关闭本文件的自动打包资源，所以保存时不会再弹这个错")
+
+        # 控制台完整列出（状态栏只列前几项）—— 类型 + 名字 + 使用者数
+        print("[红红子lab] 缺失文件：共 {} 项".format(len(unused) + len(in_use)))
+        for label, name in removed:
+            print("  已清理：{} {}（0 使用者）".format(label, name))
+        for label, name, users in in_use:
+            print("  仍在用：{} {}（{} 使用者）".format(label, name, users))
+
         self.report({'INFO'}, "；".join(parts))
         return {'FINISHED'}
 
@@ -1194,8 +1306,19 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
         return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
+        # 只提示、不阻止：缺失引用会被一起写进启动文件，于是**每个新建文件**都带着它、
+        # 保存时继续报"无法打包文件"。行为保持原样（用户可能就是要存），只多一句警告。
+        unused, in_use = _missing_file_blocks()
+        missing = [(label, getattr(block, "name", "?"), 0)
+                   for label, _collection, block in unused]
+        missing += in_use
         message, ok = layout.save_startup(context)
         self.report({'INFO' if ok else 'ERROR'}, message)
+        if ok and missing:
+            self.report({'WARNING'},
+                        "当前文件有 {} 个缺失引用，已一并写入启动文件（{}）；"
+                        "建议先点「检查并修复缺失文件」再保存".format(
+                            len(missing), _describe_items(missing, 2)))
         return {'FINISHED'} if ok else {'CANCELLED'}
 
 
@@ -1206,11 +1329,19 @@ class HHZ_OT_theme_save_preferences(bpy.types.Operator):
 
     def execute(self, context):
         try:
-            bpy.ops.wm.save_userprefs()
+            # 算子名是**单数** ``wm.save_userpref``：实测 4.0.2 / 4.2.23 / 5.2.2 三版
+            # 都只有这个名字，多带一个复数 s 的那个名字不存在，调用直接 AttributeError。
+            bpy.ops.wm.save_userpref()
         except Exception as error:
+            # 内层失败必须报错并取消，不能吞掉后照样返回 FINISHED（那样看起来一直是好的）
             self.report({'ERROR'}, "保存失败：{}".format(error))
             return {'CANCELLED'}
-        self.report({'INFO'}, "主题颜色已保存到偏好设置")
+        message = "主题颜色已保存到偏好设置"
+        preferences = getattr(context, "preferences", None)
+        if preferences is not None and not getattr(preferences, "use_preferences_save", True):
+            # 没开"自动保存偏好设置"也不影响这里：刚才是显式写盘
+            message += "（未开启自动保存偏好设置，退出 Blender 时不会再覆盖）"
+        self.report({'INFO'}, message)
         return {'FINISHED'}
 
 

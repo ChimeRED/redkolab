@@ -920,11 +920,13 @@ def family_contrast_report(theme, prefix):
 
 
 #: 视口里当"参照物"的辅助元素：基面网格线（grid）与法线（normal）。
-#: 这两项原本被预设覆盖成"半透明暗色 / 低饱和冷色"，比出厂值更暗 ——
-#: 结果就是"网格线被减淡、法线看不清"。四套预设一律**不覆盖**它们，
-#: 套用后保持出厂默认值（= 与默认一样明显）；它们仍在颜色清单里，
-#: 用户想单独调可以自己调，只是"预设"不该替用户把它们调暗。
-#: 对应出厂默认值见 ``DEFAULT_COLORS["view_3d.grid"]``（真机 dump，不是猜的）。
+#: 这两项被旧版预设写成"半透明暗色 / 低饱和冷色"，比出厂值更暗 ——
+#: 结果就是"网格线被减淡、法线看不清"。
+#:
+#: 修法**不是**"预设里不覆盖它们"：主题里已经被旧版写进去的暗值不会自己变回来，
+#: 用户看到的就是"完全没更新"。所以四套预设一律把它们**显式写回出厂默认值**
+#: （见 :func:`factory_locked_colors`）—— 再套一次预设就自愈。
+#: 两项仍在颜色清单里，用户想单独调可以自己调。
 #:
 #: 不在这一组里的：``view_3d.wire_edit`` / ``view_3d.vertex_active`` 之类被预设
 #: 改的是**提亮**（出厂是纯黑，预设给浅灰或纯白），不是压暗，所以不适用本约束。
@@ -950,6 +952,63 @@ OPTION_BLOCK_FACTOR = 0.6
 #: 不再用 ``TEXT_ON_ACCENT``（近黑）—— 那会把标签画成黑字落深色面板。
 OPTION_LABEL_COLOR = TOKENS["TEXT_PRIMARY"]
 
+#: **标签独立型家族**：标签文字**不画在选中块 ``inner_sel`` 上**的控件家族。
+#: 这些家族的 ``text`` / ``text_sel`` 是**标签**色，落点是面板 / 菜单 / 工具提示的底色，
+#: 所以预设必须让它们在**每一个可能落到的底色**上都读得清（见
+#: :func:`label_contrast_problems`）。判据逐个来自 Blender 源码（三版一致）：
+#:
+#: * ``wcol_option``（复选）：``widget_optionbut()`` 把绘制矩形收成左边那个小方块后
+#:   把 ``rect->xmin`` 推到方块右边 —— 标签的矩形**完全不含**选中块。
+#:   源码里那行注释就是 "option buttons have strings outside"。
+#: * ``wcol_menu_back``（菜单 / 弹出面板里的选项按钮）：``widget_state_option_menu()``
+#:   在 ``BLOCK_THEME_STYLE_POPUP`` 里把选项按钮的 ``text`` / ``text_sel`` 覆盖成
+#:   ``wcol_menu_back.text`` / ``.text_sel``，而底色仍是弹出面板自己的 ``inner``。
+#:   这就是"叠加层里勾选后标签变黑看不见"的真凶（旧版把这族也套上了近黑 ``text_sel``）。
+#: * ``wcol_radio`` / ``wcol_toggle``：与复选同一类选项按钮，弹出面板里同样走
+#:   ``widget_state_option_menu()``；项目从 v2.10.1 起就把它们一起按"标签独立"处理
+#:   （选中块只留小圆点 / 开关体，标签用浅色）。
+#:
+#: **不在**这一族里的（判据：标签确实压在选中块上，见 :func:`label_backdrops` 的说明）：
+#: ``wcol_menu_item``（``widget_menu_itembut()`` 整行填充，``widget_state_menu_item()``
+#: 把 ``text`` 换成 ``text_sel`` —— 就是用户要保留的"强调色底 + 近黑字"高亮行）、
+#: ``wcol_pulldown``（``widget_pulldownbut()`` 整块填充 ``inner_sel`` 并把 ``text_sel``
+#: 拷进 ``text``）。
+LABEL_INDEPENDENT_FAMILIES = ("wcol_menu_back",) + OPTION_BLOCK_FAMILIES
+
+#: 标签独立型家族的标签文字色（hex 写法，与 :data:`OPTION_LABEL_COLOR` 同源）：
+#: 浅灰白 —— 落在四套预设的深色菜单 / 弹出面板底上都读得清。
+LABEL_TEXT_COLOR = OPTION_LABEL_COLOR
+
+#: **必须保持 Blender 出厂默认值**的控件家族：预设一律不套强调色，改回默认值。
+#: 这些控件要么是"用户靠它做精确拖动、必须看得见把手"的滑块，要么是
+#: "选中态底 + 图标"的工具栏按钮（图标色取 ``wcol->text``，一旦底色被强调色占掉
+#: 而图标仍按另一支颜色画，就会出现"图标压在强调色上看不清"）。
+#:
+#: * ``wcol_numslider``（数值滑块）：颜色选择器的色相 / 饱和度 / 明度 / Alpha 与
+#:   RGB 滑条都是 ``UI_BTYPE_NUM_SLIDER``（源码依据：4.0.2 ``interface_region_color_picker.cc``
+#:   里这些行都是 ``UI_BTYPE_NUM_SLIDER``；5.2.2 同名模板同构），而
+#:   ``widget_type(UI_WTYPE_SLIDER)`` / ``WidgetStyle::Slider`` 取的就是 ``wcol_numslider``
+#:   （4.0.2 / 4.2.23 / 5.2.2 一致）。旧预设把它整族套上强调色后，
+#:   拖动时 ``widget_state()`` 会把 ``inner`` 换成 ``inner_sel``（整条轨道变强调色）、
+#:   并把 ``text`` 换成近黑 ``text_sel`` —— "整条饱和度都变成荧光绿、值文字变黑"，
+#:   原版那种"深色轨道 + 可拖动的色块"随之消失。
+#: * ``wcol_tool``（工具按钮 / 图标按钮）：``WidgetStyle::Exec``（``ButtonType::But`` /
+#:   ``Decorator`` 这类只有图标的按钮）用它，左侧 T 型工具栏的工具按钮就走这里；
+#:   图标颜色取 ``wcol->text``（``widget_draw_text_icon()``：``icon_color = wcol->text``）。
+#: * ``wcol_toolbar_item``（顶部工具项）：``WidgetStyle::ToolbarItem`` 用它，
+#:   同样走 ``widget_roundbut_exec`` + ``widget_state`` 的图标按钮绘制。
+#:   实测这两个家族在 4.0.2 / 4.2.23 / 5.2.2 上都有出厂默认值记录（真机 dump）。
+#:
+#: 不在这一组里的：``wcol_scroll``（滚动条，把手是 ``item``，与拖动色块无关）、
+#: ``wcol_num``（数字输入框，不是滑块，没有可拖的填充条）、
+#: ``wcol_progress``（进度条，只读）。``wcol_slider`` 这个家族**在三个版本上都不存在**
+#: （真机 ``bl_rna`` 查不到），所以它不是候选。
+FACTORY_LOCKED_FAMILIES = (
+    "wcol_numslider",
+    "wcol_tool",
+    "wcol_toolbar_item",
+)
+
 
 def _option_block_override(block_color, label_color):
     """修正「选项类」三个家族的选中态配色，返回 ``{路径: 颜色}``。
@@ -969,6 +1028,31 @@ def _option_block_override(block_color, label_color):
     colors = {}
     for prefix in OPTION_BLOCK_FAMILIES:
         colors[family_path(prefix, "inner_sel")] = block_color
+        colors[family_path(prefix, "text_sel")] = label_color
+    return colors
+
+
+def _label_family_override(block_color, label_color):
+    """修正「标签独立型」家族的标签色，返回 ``{路径: 颜色}``。
+
+    * 选项块（复选 / 单选圈 / 开关）：选中块仍是强调色调暗后的颜色（语义不变），
+      **选中态**标签换成浅色（理由见 :func:`_option_block_override`）。
+      常态 ``text`` 不动 —— 它落在**本家族自己的底色**上，浅灰卡那套是浅底配深字，
+      统一改成浅色反而会让那套的常态标签糊掉（预设自己已经给了对的颜色）。
+    * ``wcol_menu_back``：``text`` 与 ``text_sel`` **都**要浅色 —— 弹出面板里被勾选的
+      选项按钮，标签色取的就是它的 ``text_sel``（``widget_state_option_menu()``），
+      底色是面板自己的 ``inner``。旧版只在"浅灰卡"那一套顺手改过它，另外三套漏了，
+      于是"打勾后标签变黑、落在深色弹出面板上看不见"。
+
+    **不碰** ``inner_sel``：那是"菜单选中行"的语义位，四套预设各自的强调色底 + 近黑字
+    是用户要的效果（真正的高亮行 ``wcol_menu_item`` 也一样，见
+    :data:`LABEL_INDEPENDENT_FAMILIES` 的说明）。
+    """
+    colors = _option_block_override(block_color, label_color)
+    for prefix in LABEL_INDEPENDENT_FAMILIES:
+        if prefix in OPTION_BLOCK_FAMILIES:
+            continue
+        colors[family_path(prefix, "text")] = label_color
         colors[family_path(prefix, "text_sel")] = label_color
     return colors
 
@@ -1011,6 +1095,65 @@ def option_label_contrast_problems(colors, prefix, threshold=0.3):
         difference = abs(luminance(background) - luminance(text_color))
         if difference < threshold:
             problems.append("{}：标签与 {} 亮度差只有 {:.2f}".format(prefix, path, difference))
+    return problems
+
+
+def label_backdrops(colors, prefix):
+    """一个「标签独立型」家族的标签**实际**会落在哪些底色上。
+
+    * 复选 / 单选圈 / 开关：标签在选中块之外，可能落在菜单 / 饼菜单 / 普通面板底上，
+      也可能被某个控件画在选中块上 —— 交给 :func:`option_label_backdrops` 全列出来。
+    * 菜单 / 弹出面板（``wcol_menu_back``）：它的 ``text`` / ``text_sel`` 就是**这块面板
+      里的普通文字色**（弹出面板里的选项按钮由 ``widget_state_option_menu()`` 借用它），
+      所以实际底色是它自己的 ``inner``；``inner_sel`` 不是它的标签底（那是主题里
+      "菜单选中行"的语义位，绘制 ``widget_menu_back()`` 只用 ``inner`` / ``outline``）。
+    """
+    if prefix in OPTION_BLOCK_FAMILIES:
+        return option_label_backdrops(colors, prefix)
+    result = []
+    seen = set()
+    for path in (family_path(prefix, "inner"),
+                 "user_interface.wcol_menu_back.inner",
+                 "user_interface.wcol_pie_menu.inner",
+                 "user_interface.panel_back"):
+        if path in seen:
+            continue
+        seen.add(path)
+        color = colors.get(path)
+        if color is not None:
+            result.append((path, color))
+    return result
+
+
+def label_contrast_problems(colors, prefix, threshold=0.3):
+    """「标签独立型」家族的标签可读性检查，返回问题描述列表。
+
+    两件事都要过：
+
+    * **常态标签** ``text`` 落在本家族自己的底色 ``inner`` 上（面板 / 菜单面板底）；
+    * **选中标签** ``text_sel`` 落在 :func:`label_backdrops` 的每个底色上 ——
+      包括菜单 / 饼菜单 / 普通面板底，因为勾选后的标签走 ``text_sel`` 而底色是面板底。
+      这正是"叠加层里打勾后标签变黑看不见"的漏网处（旧版只看了 ``inner_sel`` 那一对）。
+    """
+    problems = []
+    text_color = colors.get(family_path(prefix, "text"))
+    own_inner = colors.get(family_path(prefix, "inner"))
+    if text_color is None:
+        problems.append("{}：预设没给常态文字色".format(prefix))
+    elif own_inner is not None:
+        difference = abs(luminance(own_inner) - luminance(text_color))
+        if difference < threshold:
+            problems.append("{}：text 与 {} 亮度差只有 {:.2f}".format(
+                prefix, family_path(prefix, "inner"), difference))
+
+    selected_color = colors.get(family_path(prefix, "text_sel"))
+    if selected_color is None:
+        problems.append("{}：预设没给选中文字色".format(prefix))
+        return problems
+    for path, background in label_backdrops(colors, prefix):
+        difference = abs(luminance(background) - luminance(selected_color))
+        if difference < threshold:
+            problems.append("{}：text_sel 与 {} 亮度差只有 {:.2f}".format(prefix, path, difference))
     return problems
 
 
@@ -1077,15 +1220,14 @@ def _marathon_preset(style):
         # 浅灰卡这套里，菜单底 / 选中行底仍是深色（``panel`` / ``ink``），
         # 而菜单里的复选、单选圈走的是 ``wcol_menu_back.text`` 与 ``.text_sel``
         # （``interface_widgets.cc`` 的 ``widget_state_option_menu()`` 会用它覆盖家族色），
-        # 所以这两个必须换成浅色，否则就是"弹出菜单里的选项是黑字落深底"。
-        # 顺带把**菜单选中行**底色压深：它上面配的就是这个浅色（差 0.75/0.79），
+        # 所以标签文字必须是浅色 —— 这一条现在由 ``_label_family_override()`` 对
+        # **四套预设**统一处理（不再只有浅灰卡这一套）。
+        # 这里只保留"菜单选中行底色压深"：它上面配的就是那个浅色（差 0.75/0.79），
         # 而原来的浅色选中行 + 浅色文字只有 0.13，改完两头都读得清。
-        colors["user_interface.wcol_menu_back.text"] = hex_color(MARATHON["text"])
-        colors["user_interface.wcol_menu_back.text_sel"] = hex_color(MARATHON["text"])
         colors["user_interface.wcol_menu_back.inner_sel"] = hex_color(MARATHON["ink"])
-    # 选项类家族的标签文字：四套预设统一用浅色（理由见 _option_block_override）
-    colors.update(_option_block_override(scale_color(hex_color(accent), OPTION_BLOCK_FACTOR),
-                                         hex_color(OPTION_LABEL_COLOR)))
+    # 标签独立型家族的标签文字：四套预设统一用浅色（理由见 _label_family_override）
+    colors.update(_label_family_override(scale_color(hex_color(accent), OPTION_BLOCK_FACTOR),
+                                          hex_color(LABEL_TEXT_COLOR)))
     colors.update(_marathon_frame_colors(hex_color(accent)))
     return {path: color for path, color in colors.items() if color is not None}
 
@@ -1164,10 +1306,9 @@ def _marathon_preset_work():
         "view_3d.edge_crease": hex_color(TOKENS["ACCENT_TERTIARY_CALM"]),
         "view_3d.edge_bevel": hex_color(TOKENS["STATE_WARNING"]),
         "view_3d.wire_edit": hex_color(TOKENS["TEXT_SECONDARY"]),
-        # 基面网格线（view_3d.grid）与法线（view_3d.normal）**故意不覆盖**：
-        # 预设原来把它们写成"半透明暗色 / 低饱和冷色"，比出厂值暗，
-        # 用户反馈"基面线被减淡"。辅助元素保持出厂值 = 与默认一样明显；
-        # 想调仍可在面板的「视口 / 3D 编辑模式」分组里单独改（本项仍在清单里）。
+        # 基面网格线（view_3d.grid）与法线（view_3d.normal）不在这里出现：
+        # 它们属于「必须写回出厂默认值」的项，由 preset_colors() 统一补上
+        # （见 factory_locked_colors()）—— 旧版留在主题里的暗值靠这一步自愈。
         # 状态色语义
         "user_interface.wcol_state.inner_changed": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
         "user_interface.wcol_state.inner_changed_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
@@ -1181,10 +1322,10 @@ def _marathon_preset_work():
         "user_interface.wcol_state.inner_overridden_sel": hex_color(TOKENS["STATE_ERROR"]),
     })
     colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
-    # 选项类家族的标签文字：四套预设统一用浅色（理由见 _option_block_override）
-    colors.update(_option_block_override(
+    # 标签独立型家族的标签文字：四套预设统一用浅色（理由见 _label_family_override）
+    colors.update(_label_family_override(
         scale_color(hex_color(TOKENS["ACCENT_PRIMARY_CALM"]), OPTION_BLOCK_FACTOR),
-        hex_color(OPTION_LABEL_COLOR)))
+        hex_color(LABEL_TEXT_COLOR)))
     colors.update(_marathon_frame_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
     return {path: color for path, color in colors.items() if color is not None}
 
@@ -1327,14 +1468,55 @@ def has_default(path, version=None):
     return path in defaults_table(version)
 
 
+def factory_locked_paths():
+    """**必须写回出厂默认值**的颜色项路径：视口辅助元素 + 必须保持原版手感的家族。
+
+    * :data:`VIEWPORT_HELPERS` —— 基面网格线 / 法线（预设不许压暗它们）；
+    * :data:`FACTORY_LOCKED_FAMILIES` 的全部成员 —— 数值滑块、工具按钮类。
+
+    取成员时用 :data:`WIDGET_MEMBERS`（含 ``item`` / ``outline_sel``），所以整族都会回到原版。
+    """
+    paths = list(VIEWPORT_HELPERS)
+    for prefix in FACTORY_LOCKED_FAMILIES:
+        for member, _label, _group in WIDGET_MEMBERS:
+            paths.append(family_path(prefix, member))
+    return paths
+
+
+def factory_locked_colors(version=None):
+    """``{路径: 出厂默认值}``：预设必须把这些项**写回**默认值。
+
+    值全部取自真机 dump 的默认值表（``DEFAULT_COLORS*``，经 :func:`default_of` 按版本合并），
+    绝不臆造；当前版本没有的项（``default_of`` 返回 None）自动跳过。
+
+    为什么是"写回"而不是"不覆盖"：主题里可能已经被旧版预设写进了更暗 / 更花的值，
+    "不覆盖"不会把它们改回来 —— 用户看到的就是"套了预设完全没更新"。写回之后
+    再套一次预设就自愈。
+    """
+    result = {}
+    for path in factory_locked_paths():
+        color = default_of(path, version)
+        if color is not None:
+            result[path] = color
+    return result
+
+
 def preset_names():
     return [name for name, _ in PRESETS]
 
 
 def preset_colors(name):
+    """预设 ``{路径: 颜色}``。
+
+    每次都会把「必须写回出厂默认值」的项（:func:`factory_locked_colors`）合并进来，
+    所以四套预设、以及"按当前饱和度重新套用"这条路径都会自愈，
+    也保证以后新增预设不会再漏掉它们。
+    """
     for preset_name, colors in PRESETS:
         if preset_name == name:
-            return colors
+            merged = dict(colors)
+            merged.update(factory_locked_colors())
+            return merged
     return None
 
 
