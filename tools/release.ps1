@@ -47,15 +47,18 @@ function Resolve-Tool {
         [string[]]$Globs
     )
     if ($Explicit) { return $Explicit }
-    foreach ($name in $Names) {
-        $command = Get-Command $name -ErrorAction SilentlyContinue
-        if ($command) { return $command.Source }
-    }
+    # Hint files first: they are written by an explicit setup step and mean
+    # "use exactly this one". On Windows a bare "py" may resolve to the
+    # Microsoft Store stub, which returns non-zero without doing anything.
     foreach ($file in $HintFiles) {
         if (Test-Path -LiteralPath $file) {
             $path = (Get-Content -LiteralPath $file -Raw).Trim()
             if ($path -and (Test-Path -LiteralPath $path)) { return $path }
         }
+    }
+    foreach ($name in $Names) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
     }
     foreach ($pattern in $Globs) {
         $hit = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
