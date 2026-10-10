@@ -976,6 +976,29 @@ def _classify_missing(module, name):
     return "absent"
 
 
+def _api_calls(source, dotted):
+    """源码里**真的调用过**的 ``dotted(...)``，返回行号列表（注释 / 字符串不算）。
+
+    用 AST 判"有没有调用"，所以"把错名写在注释里"不会影响判断，
+    也不会因为注释里提到正确写法就误判成"用过"。
+    """
+    parts = dotted.split(".")
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        names = []
+        func = node.func
+        while isinstance(func, ast.Attribute):
+            names.append(func.attr)
+            func = func.value
+        if isinstance(func, ast.Name):
+            names.append(func.id)
+        if list(reversed(names)) == parts:
+            lines.append(node.lineno)
+    return lines
+
+
 def test_fix_missing_files(module):
     section("功能：检查并修复缺失文件")
     operator = operator_class(module, "fix_missing_files")
@@ -2034,14 +2057,25 @@ def test_startup_layout(module):
           "有未保存改动时先报「请先保存当前文件」并中止（绝不带着未保存改动切文件）")
     check("bpy.app.background" in static and "original_path" in static,
           "无头环境里 4.x 的 is_dirty 恒为 True 不会把功能锁死（只在文件已落盘时放行）")
-    check("libraries.write" in static and "LAYOUT_LIBRARY_FOLDER" in static,
-          "先把工作区写进布局库（libraries.write），追加目录用的是实测出来的常量")
+    check("libraries.write" in static and "LAYOUT_LIBRARY_NAME" in source,
+          "先把工作区写进布局库（libraries.write，配置目录里的固定名字）")
     check("read_homefile" in static and "use_factory_startup=True" in static,
           "载入工厂启动文件用的是 read_homefile(use_factory_startup=True)（不重置偏好设置）")
     check("use_empty=True" in static,
           "并且 use_empty=True —— 启动文件是**空场景**，不带当前场景")
-    check("wm.append" in static and "before_append" in static and "added" in static,
-          "追加工作区后有「真的追加回来了」的校验（按 as_pointer 记录前后差集）")
+    # 回归：用户实测「bpy.ops.wm.append.poll() failed, context is incorrect」——
+    # wm.append 的 poll（wm_link_append_poll）要求 WM_operator_winactive，而 read_homefile
+    # 之后界面里的窗口 context 已经失效，所以这条算子路在真实界面里必然失败。
+    check(not _api_calls(source, "bpy.ops.wm.append"),
+          "源码里没有 bpy.ops.wm.append() 调用（切换文件后它的 poll 在界面里必失败）",
+          _api_calls(source, "bpy.ops.wm.append"))
+    check(bool(_api_calls(source, "bpy.data.libraries.load"))
+          and "target.workspaces" in static,
+          "改用纯数据 API bpy.data.libraries.load() 载入工作区（没有算子 poll）")
+    check("before_append" in static and "added" in static,
+          "载入工作区后有「真的进来了」的校验（按 as_pointer 记录前后差集）")
+    check("restore_original" in static and "会话已恢复到原来的文件" in static,
+          "切换文件之后任何一步失败，都会把会话自动恢复回原来的文件")
     check("missing_workspaces" in static and "已中止、没有写启动文件" in static,
           "校验不通过就中止且不写启动文件（避免存出一个没有布局的启动文件）")
     check("save_homefile" in static and "open_mainfile" in static,

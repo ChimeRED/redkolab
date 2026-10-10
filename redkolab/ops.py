@@ -1294,9 +1294,13 @@ class HHZ_OT_layout_delete(bpy.types.Operator):
 #: 只放工作区布局的临时布局库：放在 Blender 用户配置目录里，**不写进用户工程目录**。
 LAYOUT_LIBRARY_NAME = "redkolab_startup_layout.blend"
 
-#: 布局库里工作区所在的"追加目录"（实测 5.2.2：``<库路径>/WorkSpace``，大写 S；
-#: ``bpy.ops.wm.append`` 用它才能把 Workspace 追加回来 —— 测试里有真机断言）。
-LAYOUT_LIBRARY_FOLDER = "WorkSpace"
+# 追加工作区**不能**用 ``bpy.ops.wm.append``：它的 poll 是 ``wm_link_append_poll()``
+# （4.0.2 / 4.2.23 / 5.2.2 三版一致），要求 ``WM_operator_winactive(C)``。
+# ``read_homefile()`` 会把当前窗口/屏幕重建，切换文件之后那个 context 已经失效 ——
+# 于是真实界面里点这个按钮必然报
+# 「bpy.ops.wm.append.poll() failed, context is incorrect」（用户实测，无头环境里恰好不触发）。
+# 改用纯数据 API ``bpy.data.libraries.load()``：不经过算子、没有 poll、不需要窗口，
+# 无头与界面两种环境都一样能用（测试里有真机断言守着）。
 
 
 def layout_library_path():
@@ -1361,30 +1365,40 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
             self.report({'ERROR'}, "写入布局库失败：{}".format(error))
             return {'CANCELLED'}
 
+        def restore_original(reason):
+            """失败之后尽量把会话恢复到用户原来的文件，并给出如实的报告。"""
+            if not original_path:
+                self.report({'ERROR'}, "{}；当前会话停在空场景上，"
+                                       "你原来的文件没有保存过，不会被改".format(reason))
+                return {'CANCELLED'}
+            try:
+                bpy.ops.wm.open_mainfile(filepath=original_path)
+            except Exception as restore_error:
+                self.report({'ERROR'},
+                            "{}；而且自动恢复会话也失败了（{}），"
+                            "请用 文件 打开 回到 {}".format(reason, restore_error, original_path))
+                return {'CANCELLED'}
+            self.report({'ERROR'}, "{}；会话已恢复到原来的文件（{}）".format(
+                reason, os.path.basename(original_path)))
+            return {'CANCELLED'}
+
         try:
             # 出厂启动文件 = 空场景，且**不会**重置用户偏好设置
             # （read_factory_settings 会连偏好一起重置，这里不能用）
             bpy.ops.wm.read_homefile(use_factory_startup=True, use_empty=True)
         except Exception as error:
-            self.report({'ERROR'},
-                        "载入出厂启动文件失败：{}；你原来的文件仍在磁盘上，"
-                        "可用 文件 打开 回到它".format(error))
-            return {'CANCELLED'}
+            return restore_original("载入出厂启动文件失败：{}".format(error))
 
         try:
+            # 纯数据 API：不经过算子、没有窗口 poll，界面与无头都一样能用
+            # （用 bpy.ops.wm.append 会报 poll() failed / context is incorrect，见上面注释）
             before_append = {workspace.as_pointer() for workspace in bpy.data.workspaces}
-            for name in workspace_names:
-                bpy.ops.wm.append(
-                    filepath="{}/{}/{}".format(library, LAYOUT_LIBRARY_FOLDER, name),
-                    directory="{}/{}".format(library, LAYOUT_LIBRARY_FOLDER),
-                    filename=name)
+            with bpy.data.libraries.load(library, link=False) as (source, target):
+                target.workspaces = list(source.workspaces)
             added = [workspace for workspace in bpy.data.workspaces
                      if workspace.as_pointer() not in before_append]
         except Exception as error:
-            self.report({'ERROR'},
-                        "追加工作区失败：{}；你原来的文件仍在磁盘上，"
-                        "可用 文件 打开 回到它".format(error))
-            return {'CANCELLED'}
+            return restore_original("追加工作区失败：{}".format(error))
 
         # 校验：每个记录下来的工作区都要真的追加回来（同名冲突时 Blender 会给 .001 后缀）
         appended = {}
@@ -1395,29 +1409,26 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
             appended.setdefault(base, workspace)
         missing_workspaces = [name for name in workspace_names if name not in appended]
         if missing_workspaces or not added:
-            self.report({'ERROR'},
-                        "追加工作区不完整（缺 {}），已中止、没有写启动文件；"
-                        "你原来的文件仍在磁盘上，可用 文件 打开 回到它".format(
-                            "、".join(missing_workspaces) or "全部"))
-            return {'CANCELLED'}
+            return restore_original(
+                "追加工作区不完整（缺 {}），已中止、没有写启动文件".format(
+                    "、".join(missing_workspaces) or "全部"))
 
         # 让窗口停在**你自己**的那个工作区上（Blender 不允许删除工作区，
         # 出厂自带的那批还在文件里，所以这一步决定新开 Blender 时先看到哪套布局）
-        target = appended.get(active_name) or appended.get(workspace_names[0]) or added[0]
+        target_workspace = (appended.get(active_name)
+                            or appended.get(workspace_names[0])
+                            or added[0])
         for window_manager in bpy.data.window_managers:
             for window in window_manager.windows:
                 try:
-                    window.workspace = target
+                    window.workspace = target_workspace
                 except Exception:
                     pass
 
         try:
             bpy.ops.wm.save_homefile()
         except Exception as error:
-            self.report({'ERROR'},
-                        "写启动文件失败：{}；你原来的文件仍在磁盘上，"
-                        "可用 文件 打开 回到它".format(error))
-            return {'CANCELLED'}
+            return restore_original("写启动文件失败：{}".format(error))
 
         if original_path:
             try:
