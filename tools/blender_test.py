@@ -1,0 +1,769 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""红红子lab · Blender 内部真机测试
+
+会真的把安装包装进一个临时的用户目录，启用插件，然后跑一整套功能断言。
+
+用法：
+    blender --background --factory-startup --python tools/blender_test.py -- \
+        --zip dist/redkolab-1.1.0.zip --mode auto
+
+--mode 可选：
+    auto           默认。看包内布局决定用哪种安装方式（4.2+ 有清单就走扩展，
+                   否则走传统插件安装）
+    addon_install  强制用 preferences.addon_install（= 偏好设置里的「从磁盘安装」）
+    extensions     强制用 extensions.package_install_files（= 扩展页的安装）
+
+脚本自己负责隔离：调用方通过 BLENDER_USER_CONFIG / BLENDER_USER_SCRIPTS /
+BLENDER_USER_EXTENSIONS 环境变量把配置目录指到临时目录，就不会污染真实配置。
+"""
+
+import os
+import re
+import sys
+import traceback
+import zipfile
+
+import bpy
+
+ARGS = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+
+PACKAGE_HINT = "redkolab"
+PIE_IDNAME = "OBJECT_MT_hhz_pie"
+
+#: --mode 的历史别名
+MODE_ALIASES = {"legacy": "addon_install", "extension": "extensions"}
+
+FAILURES = []
+CHECK_COUNT = [0]
+
+
+def argument(name, default=None):
+    if name in ARGS:
+        index = ARGS.index(name)
+        if index + 1 < len(ARGS):
+            return ARGS[index + 1]
+    return default
+
+
+MODE = argument("--mode", "auto")
+MODE = MODE_ALIASES.get(MODE, MODE)
+ZIP_PATH = argument("--zip")
+
+
+# ------------------------------------------------------------------ 断言工具
+
+
+def check(condition, label, detail=""):
+    CHECK_COUNT[0] += 1
+    if condition:
+        print("  [ ok ] {}".format(label))
+    else:
+        text = "{}  ->  {}".format(label, detail) if detail != "" else label
+        print("  [FAIL] {}".format(text))
+        FAILURES.append(text)
+
+
+def section(title):
+    print("\n=== {} ===".format(title))
+
+
+def skip(reason):
+    print("  [skip] {}".format(reason))
+
+
+def run(title, function, *args):
+    """跑一个测试函数，异常不让整个测试中断。"""
+    try:
+        function(*args)
+    except Exception:
+        FAILURES.append("{} 抛出异常".format(title))
+        print("  [FAIL] {} 抛出异常".format(title))
+        traceback.print_exc()
+
+
+# ------------------------------------------------------------------ 场景工具
+
+
+def reset_scene():
+    """清空场景但不动偏好设置（read_factory_settings 会重置偏好，不能用）。"""
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    for collection in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.shape_keys):
+        for block in list(collection):
+            if block.users == 0:
+                try:
+                    collection.remove(block)
+                except Exception:
+                    pass
+
+
+def add_cube(name):
+    bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+    obj = bpy.context.view_layer.objects.active
+    obj.name = name
+    return obj
+
+
+def add_curve(name):
+    bpy.ops.curve.primitive_bezier_curve_add(location=(4, 0, 0))
+    obj = bpy.context.view_layer.objects.active
+    obj.name = name
+    return obj
+
+
+def select_only(objects):
+    for obj in bpy.context.view_layer.objects:
+        obj.select_set(False)
+    for obj in objects:
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = objects[0] if objects else None
+
+
+def assigned_materials(obj):
+    total = 0
+    for slot in obj.material_slots:
+        if slot.material is not None:
+            total += 1
+    return total
+
+
+# --------------------------------------------------------------- 安装与启用
+
+
+def snapshot_modules():
+    """记录当前已导入的模块，用来识别刚装进去的插件。"""
+    return set(sys.modules.keys())
+
+
+def _is_our_package(module):
+    """靠 compat 模块的特征属性认领，而不是靠插件叫什么名字。
+
+    传统安装的模块名可能来自 zip 文件名，4.2+ 扩展则是 bl_ext.<仓库>.<id>，
+    写死名字的测试在「一份通吃包」上会失效。
+    """
+    try:
+        compat = getattr(module, "compat", None)
+    except Exception:
+        return False
+    if compat is None:
+        return False
+    return all(hasattr(compat, attribute) for attribute in ("ADDON_ID", "ADDON_NAME_EN", "run_op"))
+
+
+def available_addon_names():
+    """addon_utils 当前能看到的插件模块名。"""
+    names = set()
+    try:
+        import addon_utils
+        addon_utils.modules(refresh=True)
+        for module in addon_utils.modules():
+            names.add(module.__name__)
+    except Exception:
+        pass
+    try:
+        names.update(bpy.context.preferences.addons.keys())
+    except Exception:
+        pass
+    return names
+
+
+def discover_installed_module(before_modules, before_available):
+    """找出刚安装进来的插件包名（不依赖它叫什么名字）。"""
+    candidates = []
+
+    for name, module in list(sys.modules.items()):
+        if name in before_modules or not hasattr(module, "__path__"):
+            continue
+        if _is_our_package(module):
+            candidates.append(name)
+
+    for name in sorted(available_addon_names() - before_available):
+        if name in candidates:
+            continue
+        try:
+            module = __import__(name, fromlist=["compat"])
+        except Exception:
+            continue
+        if _is_our_package(module):
+            candidates.append(name)
+
+    # 再直接按常见命名探一次（有的版本 addon_utils 刷新后仍列不出新装的插件）
+    for name in (PACKAGE_HINT, "bl_ext.user_default." + PACKAGE_HINT):
+        if name in candidates or name in before_modules:
+            continue
+        try:
+            module = __import__(name, fromlist=["compat"])
+        except Exception:
+            continue
+        if _is_our_package(module):
+            candidates.append(name)
+
+    # 包名短的是包本身，子模块（xxx.compat 之类）排在后面
+    candidates.sort(key=len)
+    return candidates
+
+
+def _zip_layout(zip_path):
+    """看包内布局：根目录有没有扩展清单、有哪些顶层目录。"""
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            names = archive.namelist()
+    except Exception as error:
+        print("  读取安装包失败：{}".format(error))
+        return False, []
+    has_root_manifest = "blender_manifest.toml" in names
+    folders = sorted({name.split("/")[0] for name in names if "/" in name})
+    return has_root_manifest, folders
+
+
+def install_package():
+    """按包内布局和当前版本选择安装方式，返回 (是否成功, 方式说明)。"""
+    has_root_manifest, folders = _zip_layout(ZIP_PATH)
+    print("  包内布局：根目录清单={}，顶层目录={}".format(has_root_manifest, folders))
+
+    extension_ready = has_root_manifest and hasattr(bpy.ops, "extensions")
+    if MODE == "extensions":
+        order = ["extensions"]
+    elif MODE == "addon_install":
+        order = ["addon_install"]
+    elif extension_ready:
+        order = ["extensions", "addon_install"]
+    else:
+        order = ["addon_install", "extensions"]
+
+    for mode in order:
+        if mode == "extensions":
+            if not hasattr(bpy.ops, "extensions"):
+                print("  当前版本没有扩展接口，跳过扩展安装")
+                continue
+            for kwargs in (
+                {"filepath": ZIP_PATH, "repo": "user_default", "enable_on_install": True, "overwrite": True},
+                {"filepath": ZIP_PATH, "repo": "user_default", "enable_on_install": True},
+                {"filepath": ZIP_PATH},
+            ):
+                try:
+                    result = bpy.ops.extensions.package_install_files(**kwargs)
+                    print("  extensions.package_install_files({}) -> {}".format(kwargs, result))
+                    return True, "extensions.package_install_files"
+                except Exception as error:
+                    print("  扩展安装尝试失败 {}：{}".format(kwargs, error))
+        else:
+            try:
+                bpy.ops.preferences.addon_install(filepath=ZIP_PATH, overwrite=True)
+                print("  preferences.addon_install 成功")
+                return True, "preferences.addon_install"
+            except Exception as error:
+                print("  preferences.addon_install 失败：{}".format(error))
+
+    return False, "无可用安装方式"
+
+
+def install_and_enable():
+    section("安装与启用")
+    print("  Blender {} | temp_override={} | 扩展接口={}".format(
+        bpy.app.version_string,
+        hasattr(bpy.context, "temp_override"),
+        hasattr(bpy.ops, "extensions"),
+    ))
+
+    before_modules = snapshot_modules()
+    before_available = available_addon_names()
+
+    installed, how = install_package()
+    check(installed, "安装包安装成功（方式：{}）".format(how))
+
+    # 让 addon_utils 重新扫描刚装进去的模块
+    try:
+        import addon_utils
+        addon_utils.modules(refresh=True)
+    except Exception:
+        pass
+
+    discovered = discover_installed_module(before_modules, before_available)
+    print("  新发现的插件模块：{}".format(discovered))
+
+    enabled_keys = list(bpy.context.preferences.addons.keys())
+    module_name = None
+    for name in discovered:
+        if name in enabled_keys:
+            module_name = name
+            break
+    if module_name is None and discovered:
+        module_name = discovered[0]
+
+    if module_name is not None and module_name not in bpy.context.preferences.addons.keys():
+        try:
+            bpy.ops.preferences.addon_enable(module=module_name)
+            print("  已启用 {}".format(module_name))
+        except Exception as error:
+            print("  addon_enable({}) 失败：{}".format(module_name, error))
+
+    if module_name is None:
+        # 兜底：按常见命名规则猜
+        for candidate in (PACKAGE_HINT, "bl_ext.user_default." + PACKAGE_HINT):
+            try:
+                bpy.ops.preferences.addon_enable(module=candidate)
+                module_name = candidate
+                break
+            except Exception as error:
+                print("  addon_enable({}) 失败：{}".format(candidate, error))
+
+    check(module_name is not None, "插件已启用（模块名 {}）".format(module_name))
+    if module_name is not None:
+        check(module_name in bpy.context.preferences.addons.keys(),
+              "插件出现在已启用插件列表里")
+    return module_name
+
+
+# -------------------------------------------------------------------- 测试
+
+
+def test_registration(module_name, module):
+    section("注册与界面结构")
+    check(getattr(bpy.types, PIE_IDNAME, None) is not None, "饼菜单类已注册")
+    check(getattr(bpy.types, "HHZ_PT_main", None) is not None, "N 面板类已注册")
+
+    category = getattr(bpy.ops, "hhz", None)
+    check(category is not None, "算符分类 hhz 存在")
+    for idname in (
+        "remove_all_materials", "apply_all_modifiers", "remove_all_modifiers",
+        "open_preferences", "capture_hotkey", "reset_hotkey",
+    ):
+        check(category is not None and hasattr(category, idname), "算符 hhz.{} 存在".format(idname))
+
+    check(module.compat.PACKAGE == module_name,
+          "compat.PACKAGE 与真实模块名一致", module.compat.PACKAGE)
+    check(module.compat.ADDON_ID == PACKAGE_HINT,
+          "compat.ADDON_ID 与包名一致", module.compat.ADDON_ID)
+    check(module.compat.ADDON_NAME == "红红子lab",
+          "中文名保留为 红红子lab", module.compat.ADDON_NAME)
+    check(module.compat.ADDON_NAME_EN == "REDKOlab",
+          "英文名为 REDKOlab", module.compat.ADDON_NAME_EN)
+    check(tuple(bpy.app.version) >= tuple(module.compat.MIN_BLENDER_VERSION),
+          "当前 Blender 满足最低版本要求",
+          "{} vs {}".format(bpy.app.version, module.compat.MIN_BLENDER_VERSION))
+
+    bl_info = getattr(module, "bl_info", None)
+    if bl_info:
+        check(bl_info["name"] == "红红子lab (REDKOlab)",
+              "bl_info 名字同时含中英文名", bl_info["name"])
+        check(tuple(bl_info["blender"]) == (4, 0, 0),
+              "bl_info 声明最低 4.0", bl_info["blender"])
+    else:
+        skip("当前安装方式下没有 bl_info（由扩展清单接管元数据）")
+
+    preferences = module.compat.get_preferences()
+    check(preferences is not None, "偏好设置对象可访问")
+    if preferences is not None:
+        check(preferences.key_type == "ACCENT_GRAVE", "默认按键是 `（ACCENT_GRAVE）", preferences.key_type)
+        check(preferences.enable_pie is True, "默认启用饼菜单快捷键")
+        check(preferences.hotkey_label() == "`", "快捷键显示文本正确", preferences.hotkey_label())
+
+    panel = getattr(bpy.types, "HHZ_PT_main", None)
+    if panel is not None:
+        check(panel.bl_category == "红红子lab", "N 面板标签页名称正确", panel.bl_category)
+        check(panel.bl_space_type == 'VIEW_3D' and panel.bl_region_type == 'UI',
+              "N 面板挂在 3D 视图侧栏")
+
+
+def test_icons(module):
+    section("图标名合法性（避免界面报错）")
+    keys = set()
+    try:
+        parameter = bpy.types.UILayout.bl_rna.functions["operator"].parameters["icon"]
+        keys = set(parameter.enum_items.keys())
+        if not keys:
+            keys = set(parameter.enum_items_static.keys())
+    except Exception as error:
+        skip("无法内省图标枚举：{}".format(error))
+        return
+    if not keys:
+        skip("该版本拿不到图标枚举")
+        return
+
+    # 直接扫源码里所有 icon='...' 用法，插件用到哪个就查哪个（换图标不会漏测）
+    package_dir = os.path.dirname(os.path.abspath(module.__file__))
+    used = set()
+    for name in sorted(os.listdir(package_dir)):
+        if not name.endswith(".py"):
+            continue
+        with open(os.path.join(package_dir, name), encoding="utf-8") as handle:
+            used.update(re.findall(r"icon\s*=\s*['\"]([A-Za-z_0-9]+)['\"]", handle.read()))
+    check(bool(used), "从源码里扫到了图标用法", sorted(used))
+    for icon in sorted(used):
+        check(icon in keys, "图标 {} 在 Blender {} 上存在".format(icon, bpy.app.version_string))
+
+
+def _pie_shortcut_items(keyconfig):
+    keymap = keyconfig.keymaps.get("3D View")
+    if keymap is None:
+        return []
+    return [item for item in keymap.keymap_items if item.idname == "wm.call_menu_pie"]
+
+
+def test_keymap(module):
+    section("键位注册与改键")
+    keyconfig = module.compat.addon_keyconfig()
+    if keyconfig is None:
+        skip("当前环境没有 addon keyconfig（后台模式），跳过键位测试")
+        return
+    check(keyconfig is not None, "addon keyconfig 可用")
+
+    items = _pie_shortcut_items(keyconfig)
+    check(len(items) == 1, "3D View 里注册了 1 个饼菜单快捷键", len(items))
+    if len(items) == 1:
+        check(items[0].type == "ACCENT_GRAVE", "默认绑定 ` 键", items[0].type)
+        check(getattr(items[0].properties, "name", None) == PIE_IDNAME,
+              "快捷键指向饼菜单", getattr(items[0].properties, "name", None))
+
+    preferences = module.compat.get_preferences()
+    preferences.key_type = "K"
+    preferences.ctrl = True
+    items = _pie_shortcut_items(keyconfig)
+    check(len(items) == 1 and items[0].type == "K" and items[0].ctrl,
+          "改偏好设置后键位自动重建",
+          [(item.type, item.ctrl) for item in items])
+
+    # 描述文本也要跟着变
+    check(preferences.hotkey_label() == "Ctrl + K", "显示文本随设置变化", preferences.hotkey_label())
+
+    bpy.ops.hhz.reset_hotkey()
+    items = _pie_shortcut_items(keyconfig)
+    check(len(items) == 1 and items[0].type == "ACCENT_GRAVE" and not items[0].ctrl,
+          "恢复默认快捷键生效",
+          [(item.type, item.ctrl) for item in items])
+
+    preferences.enable_pie = False
+    check(len(_pie_shortcut_items(keyconfig)) == 0, "关掉开关后快捷键被移除")
+    preferences.enable_pie = True
+    check(len(_pie_shortcut_items(keyconfig)) == 1, "重新打开开关后快捷键回来了")
+
+
+def test_materials():
+    section("功能：一键删除所有材质")
+    reset_scene()
+    material_a = bpy.data.materials.new("MatA")
+    material_b = bpy.data.materials.new("MatB")
+    material_c = bpy.data.materials.new("MatC")
+
+    cube_a = add_cube("CubeA")
+    cube_a.data.materials.append(material_a)
+    cube_a.data.materials.append(material_b)
+
+    cube_b = add_cube("CubeB")
+    cube_b.data.materials.append(material_a)
+
+    empty = bpy.data.objects.new("EmptyObject", None)
+    bpy.context.collection.objects.link(empty)
+
+    select_only([cube_a, cube_b, empty])
+    result = bpy.ops.hhz.remove_all_materials()
+    check(result == {'FINISHED'}, "算符返回 FINISHED", result)
+    check(len(cube_a.data.materials) == 0, "CubeA 材质槽已清空", len(cube_a.data.materials))
+    check(len(cube_b.data.materials) == 0, "CubeB 材质槽已清空", len(cube_b.data.materials))
+    check(assigned_materials(cube_a) == 0 and assigned_materials(cube_b) == 0,
+          "没有残留已挂载的材质")
+    check(bpy.data.materials.get("MatA") is not None, "材质数据块本身保留")
+    check(len(empty.material_slots) == 0, "无数据的空物体不会报错")
+
+    # 物体级（link == 'OBJECT'）材质槽
+    cube_c = add_cube("CubeC")
+    cube_c.data.materials.append(material_a)
+    cube_c.data.materials.append(material_b)
+    cube_c.material_slots[0].link = 'OBJECT'
+    cube_c.material_slots[0].material = material_c
+    select_only([cube_c])
+    result = bpy.ops.hhz.remove_all_materials()
+    check(result == {'FINISHED'}, "物体级材质槽：算符返回 FINISHED", result)
+    check(assigned_materials(cube_c) == 0, "物体级材质槽也被清空", assigned_materials(cube_c))
+
+    # 曲线上的材质
+    curve = add_curve("CurveMaterial")
+    curve.data.materials.append(material_a)
+    select_only([curve])
+    result = bpy.ops.hhz.remove_all_materials()
+    check(result == {'FINISHED'} and len(curve.data.materials) == 0,
+          "曲线物体的材质也被清空", len(curve.data.materials))
+
+    # 库链接物体：只跳过、不报错
+    linked = add_cube("FakeLinked")
+    select_only([linked])
+    result = bpy.ops.hhz.remove_all_materials()
+    check(result == {'FINISHED'}, "选中没有材质的物体时正常结束", result)
+
+
+def test_apply_modifiers(module):
+    section("功能：一键应用所有修改器")
+
+    # 先单独验证最底层的上下文覆盖：让活动物体不是目标物体，逼出覆盖逻辑
+    reset_scene()
+    target = add_cube("CubeOverrideTarget")
+    subsurf = target.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 1
+    other = add_cube("CubeOtherActive")
+    select_only([other])
+    try:
+        module.compat.run_op(bpy.ops.object.modifier_apply, target, modifier="Subsurf")
+        override_ok = len(target.modifiers) == 0
+        override_error = ""
+    except Exception as error:
+        override_ok = False
+        override_error = "{}: {}".format(type(error).__name__, error)
+    check(override_ok, "compat.run_op 上下文覆盖可用（活动物体不是目标物体）", override_error)
+
+    reset_scene()
+    cube = add_cube("CubeModifiers")
+    before = len(cube.data.vertices)
+    subsurf = cube.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 2
+    subsurf.render_levels = 2
+    cube.modifiers.new("Solidify", 'SOLIDIFY')
+    select_only([cube])
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(result == {'FINISHED'}, "算符返回 FINISHED", result)
+    check(len(cube.modifiers) == 0, "修改器已全部应用", [m.name for m in cube.modifiers])
+    check(len(cube.data.vertices) > before, "几何真的烘焙进网格了",
+          "{} -> {}".format(before, len(cube.data.vertices)))
+
+    # 视口里被禁用的修改器
+    reset_scene()
+    disabled = add_cube("CubeDisabledModifier")
+    subsurf = disabled.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 1
+    subsurf.show_viewport = False
+    select_only([disabled])
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(len(disabled.modifiers) == 0, "视口中被禁用的修改器也能应用",
+          [m.name for m in disabled.modifiers])
+
+    # 多用户（共享网格）数据
+    reset_scene()
+    shared = add_cube("CubeSharedA")
+    subsurf = shared.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 1
+    other = bpy.data.objects.new("CubeSharedB", shared.data)
+    bpy.context.collection.objects.link(other)
+    select_only([shared])
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(result == {'FINISHED'}, "多用户数据：算符返回 FINISHED", result)
+    check(len(shared.modifiers) == 0, "多用户数据的修改器已应用")
+    check(shared.data != other.data, "数据已自动复制成单用户")
+
+    # 带形态键：走「转换为网格」兜底
+    reset_scene()
+    keyed = add_cube("CubeShapeKeys")
+    keyed.shape_key_add(name="Basis", from_mix=False)
+    subsurf = keyed.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 1
+    select_only([keyed])
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(result == {'FINISHED'}, "形态键物体：算符返回 FINISHED", result)
+    check(len(keyed.modifiers) == 0, "形态键物体的修改器已应用（转换兜底）",
+          [m.name for m in keyed.modifiers])
+
+    # 隐藏的物体
+    reset_scene()
+    hidden = add_cube("CubeHidden")
+    subsurf = hidden.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 1
+    select_only([hidden])
+    hidden.hide_viewport = True
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(len(hidden.modifiers) == 0, "隐藏物体的修改器也能应用",
+          [m.name for m in hidden.modifiers])
+    check(hidden.hide_viewport is True, "隐藏状态已还原", hidden.hide_viewport)
+
+    # 曲线上的构建类修改器：Blender 本身不允许应用，插件必须优雅失败（不崩、不改数据）
+    reset_scene()
+    curve = add_curve("CurveModifier")
+    try:
+        curve.modifiers.new("Build", 'BUILD')
+    except Exception as error:
+        skip("该版本曲线不支持 BUILD 修改器：{}".format(error))
+    else:
+        select_only([curve])
+        raised = None
+        try:
+            bpy.ops.hhz.apply_all_modifiers()
+        except RuntimeError as error:
+            # 算符报告 ERROR 时，脚本层会收到 RuntimeError —— 这是预期行为
+            raised = str(error)
+        if raised is None:
+            check(len(curve.modifiers) == 0, "曲线修改器已应用（该版本允许）",
+                  [m.name for m in curve.modifiers])
+        else:
+            check("CurveModifier" in raised, "曲线无法应用时给出明确原因", raised)
+            check(len(curve.modifiers) == 1, "曲线无法应用时不改动原数据",
+                  [m.name for m in curve.modifiers])
+
+    # 网格 + 曲线混合：网格照常应用，曲线明确报错但不影响整体
+    reset_scene()
+    cube_ok = add_cube("CubeMixed")
+    subsurf = cube_ok.modifiers.new("Subsurf", 'SUBSURF')
+    subsurf.levels = 1
+    curve_mixed = add_curve("CurveMixed")
+    has_curve_modifier = True
+    try:
+        curve_mixed.modifiers.new("Build", 'BUILD')
+    except Exception:
+        has_curve_modifier = False
+    select_only([cube_ok, curve_mixed])
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(result == {'FINISHED'}, "网格+曲线混合时算符仍返回 FINISHED", result)
+    check(len(cube_ok.modifiers) == 0, "混合场景里网格部分正常应用",
+          [m.name for m in cube_ok.modifiers])
+    if has_curve_modifier:
+        check(len(curve_mixed.modifiers) == 1, "混合场景里无法应用的曲线保持原样",
+              [m.name for m in curve_mixed.modifiers])
+
+    # 链接库物体以外：没有修改器时也要正常结束
+    reset_scene()
+    plain = add_cube("CubeNoModifier")
+    select_only([plain])
+    result = bpy.ops.hhz.apply_all_modifiers()
+    check(result == {'FINISHED'}, "没有修改器时正常结束", result)
+
+
+def test_remove_modifiers():
+    section("功能：一键删除所有修改器")
+    reset_scene()
+    cube_a = add_cube("CubeRemoveA")
+    for index, kind in enumerate(("SUBSURF", "SOLIDIFY", "BEVEL")):
+        cube_a.modifiers.new("Mod{}".format(index), kind)
+    cube_b = add_cube("CubeRemoveB")
+    cube_b.modifiers.new("Subsurf", 'SUBSURF')
+
+    before = len(cube_a.data.vertices)
+    select_only([cube_a, cube_b])
+    result = bpy.ops.hhz.remove_all_modifiers()
+    check(result == {'FINISHED'}, "算符返回 FINISHED", result)
+    check(len(cube_a.modifiers) == 0, "CubeRemoveA 修改器已全部删除", len(cube_a.modifiers))
+    check(len(cube_b.modifiers) == 0, "CubeRemoveB 修改器已全部删除", len(cube_b.modifiers))
+    check(len(cube_a.data.vertices) == before, "确认只是删除、没有烘焙几何",
+          "{} -> {}".format(before, len(cube_a.data.vertices)))
+
+    reset_scene()
+    plain = add_cube("CubeNoModifier")
+    select_only([plain])
+    result = bpy.ops.hhz.remove_all_modifiers()
+    check(result == {'FINISHED'}, "没有修改器时正常结束", result)
+
+
+def test_poll():
+    section("算符 poll（模式判定）")
+    reset_scene()
+    cube = add_cube("CubePoll")
+    select_only([cube])
+    check(bpy.ops.hhz.apply_all_modifiers.poll(), "物体模式下 poll 为真")
+    check(bpy.ops.hhz.remove_all_materials.poll(), "物体模式下 poll 为真（材质）")
+    check(bpy.ops.hhz.remove_all_modifiers.poll(), "物体模式下 poll 为真（删除修改器）")
+
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+    except Exception as error:
+        skip("无法进入编辑模式：{}".format(error))
+    else:
+        try:
+            check(not bpy.ops.hhz.apply_all_modifiers.poll(), "编辑模式下 poll 为假")
+            check(not bpy.ops.hhz.remove_all_modifiers.poll(), "编辑模式下 poll 为假（删除修改器）")
+        finally:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+    reset_scene()
+    check(not bpy.ops.hhz.apply_all_modifiers.poll(), "空场景下 poll 为假")
+
+
+def test_menu_operator():
+    section("饼菜单按钮依赖的算符属性")
+    # 内置算符不会出现在 bpy.types 上，要走 bpy.ops + RNA 内省
+    call = getattr(bpy.ops.wm, "call_menu_pie", None)
+    check(call is not None, "wm.call_menu_pie 算符存在")
+    if call is None:
+        return
+    try:
+        identifiers = [prop.identifier for prop in call.get_rna_type().properties]
+    except Exception as error:
+        skip("无法读取该算符的属性列表：{}".format(error))
+        return
+    # N 面板上的「呼出饼菜单」按钮靠 call.name 指定菜单，属性不存在就会在绘制时报错
+    check("name" in identifiers, "wm.call_menu_pie 支持 name 属性", identifiers)
+
+
+def test_bad_hotkey(module):
+    section("非法快捷键的安全处理")
+    keyconfig = module.compat.addon_keyconfig()
+    if keyconfig is None:
+        skip("当前环境没有 addon keyconfig，跳过")
+        return
+    try:
+        registered = module.ui.apply_hotkey(
+            bpy.context, "NOT_A_REAL_KEY", False, False, False, False)
+        check(registered is False, "非法按键标识被安全拒绝（返回 False）", registered)
+    except Exception as error:
+        check(False, "非法按键标识不应抛异常", "{}: {}".format(type(error).__name__, error))
+
+    module.ui.apply_hotkey(bpy.context, "ACCENT_GRAVE", False, False, False, False)
+    check(len(_pie_shortcut_items(keyconfig)) == 1, "随后恢复默认键位成功",
+          len(_pie_shortcut_items(keyconfig)))
+
+
+def test_unregister(module_name, module):
+    section("卸载清理")
+    keyconfig = module.compat.addon_keyconfig()
+    try:
+        bpy.ops.preferences.addon_disable(module=module_name)
+        disabled = True
+    except Exception as error:
+        disabled = False
+        print("  停用失败：{}".format(error))
+    check(disabled, "插件可以正常停用")
+    check(getattr(bpy.types, PIE_IDNAME, None) is None, "饼菜单类已注销")
+    check(getattr(bpy.types, "HHZ_PT_main", None) is None, "N 面板类已注销")
+    if keyconfig is not None:
+        check(len(_pie_shortcut_items(keyconfig)) == 0, "注册的键位已清理",
+              len(_pie_shortcut_items(keyconfig)))
+
+
+# ---------------------------------------------------------------------- main
+
+
+def main():
+    print("红红子lab 真机测试 | 模式={} | 安装包={}".format(MODE, ZIP_PATH))
+
+    if not ZIP_PATH or not os.path.exists(ZIP_PATH):
+        print("找不到安装包：{}".format(ZIP_PATH))
+        return 1
+
+    module_name = install_and_enable()
+    if module_name is None:
+        print("\n插件没有启用，测试中止")
+        return 1
+
+    module = __import__(module_name, fromlist=["compat"])
+    print("  模块 __package__ = {}".format(getattr(module.compat, "PACKAGE", "?")))
+
+    run("注册与界面结构", test_registration, module_name, module)
+    run("图标名合法性", test_icons, module)
+    run("饼菜单按钮依赖", test_menu_operator)
+    run("键位注册与改键", test_keymap, module)
+    run("非法快捷键处理", test_bad_hotkey, module)
+    run("一键删除所有材质", test_materials)
+    run("一键应用所有修改器", test_apply_modifiers, module)
+    run("一键删除所有修改器", test_remove_modifiers)
+    run("算符 poll", test_poll)
+    run("卸载清理", test_unregister, module_name, module)
+
+    print("\n================ 结果 ================")
+    print("Blender {}：{} 项断言，{} 项失败".format(
+        bpy.app.version_string, CHECK_COUNT[0], len(FAILURES)))
+    for failure in FAILURES:
+        print("  - {}".format(failure))
+    return 1 if FAILURES else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

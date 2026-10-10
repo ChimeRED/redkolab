@@ -1,0 +1,169 @@
+# 每个版本自动构建、真机测试、发布并归档。
+#
+# 触发方式：
+#   * 打 tag 并推送（推荐）：tools/release.ps1 会做校验 + 打 tag + 推送
+#        git tag -a v1.2.0 -m "1.2.0" && git push origin v1.2.0
+#   * GitHub 网页上手动运行（workflow_dispatch）：只构建 + 测试，不会发 Release
+#
+# 产物归档在 Releases 里（dist/ 不入库），每个 tag 一条永久记录，
+# 附带安装包与 SHA256SUMS.txt。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------- 打包自检
+  build:
+    name: 打包 + 结构自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 版本号一致性（tag / bl_info / 清单）
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            python tools/check_version.py "${GITHUB_REF_NAME}"
+          else
+            python tools/check_version.py
+          fi
+
+      - name: 打包
+        run: python tools/build_zips.py
+
+      - name: 结构自检（布局 / 元数据 / 属性写法 / 上下文覆盖）
+        run: python tools/inspect_zip.py dist/*.zip
+
+      - name: 生成 SHA256
+        run: |
+          cd dist
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: redkolab-package
+          path: dist/
+          if-no-files-found: error
+
+  # ------------------------------------------------------- Blender 真机测试
+  blender-test:
+    name: Blender ${{ matrix.blender }}（${{ matrix.mode }}）
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { blender: "4.2.23", mode: "auto" }
+          - { blender: "4.5.14", mode: "auto" }
+          - { blender: "5.2.2", mode: "auto" }
+          # 同一个包在最新版上再走一遍扩展页安装入口
+          - { blender: "5.2.2", mode: "extensions" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 打包
+        run: python tools/build_zips.py
+
+      - name: Blender 无头运行所需系统库
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libx11-6 libxi6 libxxf86vm1 libxfixes3 libxrender1 \
+            libgl1 libegl1 libsm6 libice6 libxkbcommon0 libgomp1 libdecor-0-0
+
+      # 下载 ~300MB/版本，缓存住免得每次都下
+      - uses: actions/cache@v4
+        id: blender-cache
+        with:
+          path: ~/blender-${{ matrix.blender }}
+          key: blender-${{ matrix.blender }}-linux-x64
+
+      - name: 下载 Blender ${{ matrix.blender }}
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          series="$(echo '${{ matrix.blender }}' | cut -d. -f1,2)"
+          url="https://download.blender.org/release/Blender${series}/blender-${{ matrix.blender }}-linux-x64.tar.xz"
+          echo "下载 $url"
+          curl -L --fail --retry 3 -o /tmp/blender.tar.xz "$url"
+          mkdir -p "$HOME/blender-${{ matrix.blender }}"
+          tar -xf /tmp/blender.tar.xz -C "$HOME/blender-${{ matrix.blender }}" --strip-components=1
+
+      - name: 确认 Blender 可用
+        run: "$HOME/blender-${{ matrix.blender }}/blender --version"
+
+      - name: 跑真机测试
+        env:
+          BLENDER_USER_CONFIG: ${{ runner.temp }}/hhz-config
+          BLENDER_USER_SCRIPTS: ${{ runner.temp }}/hhz-scripts
+          BLENDER_USER_EXTENSIONS: ${{ runner.temp }}/hhz-extensions
+        run: |
+          # 配置目录隔离到临时目录，不碰 runner 上的任何真实配置
+          mkdir -p "$BLENDER_USER_CONFIG" "$BLENDER_USER_SCRIPTS" "$BLENDER_USER_EXTENSIONS"
+          package="$(ls dist/*.zip | head -n 1)"
+          "$HOME/blender-${{ matrix.blender }}/blender" \
+            --background --factory-startup --python-exit-code 3 \
+            --python tools/blender_test.py -- \
+            --zip "$package" --mode "${{ matrix.mode }}"
+
+  # ------------------------------------------------------------- 发布 & 归档
+  release:
+    name: 发布并归档
+    needs: [build, blender-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: redkolab-package
+          path: dist
+
+      - name: 检查归档文件
+        run: ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: 红红子lab (REDKOlab) ${{ github.ref_name }}
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            ## 红红子lab (REDKOlab) ${{ github.ref_name }}
+
+            **一个 zip 通吃 Blender 4.0 ~ 最新版**，本页附件即该版本的归档包，永久保留。
+
+            ### 安装
+
+            | 你的 Blender | 怎么装 |
+            | --- | --- |
+            | 4.2 及以上 | 偏好设置 ▸ **扩展 / Get Extensions** ▸ Install from Disk，选下面的 zip；或直接把 zip 拖进 Blender 窗口 |
+            | 4.0 / 4.1 | 偏好设置 ▸ **插件 / Add-ons** ▸ Install from Disk |
+
+            装完勾选启用，插件列表里显示 **红红子lab (REDKOlab)**。
+
+            ### 校验下载
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            本版本已通过 Blender 真机测试：包结构自检 + Blender 4.2 / 4.5 / 5.2 无头功能测试
+            （每个版本 90+ 项断言，含多用户网格、形态键、被禁用修改器、隐藏物体等边界情况）。

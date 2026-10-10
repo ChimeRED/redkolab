@@ -1,0 +1,22 @@
+# Blender 4.0 及以上通用（一份包通吃 4.0 ~ 最新版）。
+#
+# 4.2 起 Blender 改用扩展（extension）体系，本文件就是扩展清单；
+# 4.0 / 4.1 只认 __init__.py 里的 bl_info，会把同一个包当传统插件安装，
+# 所以本文件在旧版上会被忽略，不影响使用。
+#
+# 注意：version 会在打包时由 tools/build_zips.py 用 __init__.py 里 bl_info
+# 的版本号自动覆盖，不需要手动同步。
+
+schema_version = "1.0.0"
+
+id = "redkolab"
+version = "1.1.0"
+name = "红红子lab (REDKOlab)"
+tagline = "一键清空材质、应用或删除所有修改器"
+maintainer = "Red04"
+type = "add-on"
+
+blender_version_min = "4.0.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["Object", "Material"]
