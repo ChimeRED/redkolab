@@ -866,7 +866,7 @@ def test_theme(module):
 
     # 预设：Marathon 酸性配色，改的是按钮 / 状态色
     names = theme.preset_names()
-    check(any("Marathon" in name for name in names), "预设里有 Marathon 酸性配色", names)
+    check(any("马拉松" in name for name in names), "预设里有马拉松配色", names)
     preset_name = names[0]
     colors = theme.preset_colors(preset_name)
     check(blue_path in colors and grey_path in colors,
@@ -876,9 +876,9 @@ def test_theme(module):
     check(color_close(theme.get_color(current, blue_path), colors[blue_path]),
           "预设把「选中按钮」改成了酸性绿", theme.get_color(current, blue_path))
     check(color_close(theme.get_color(current, grey_path), colors[grey_path]),
-          "预设把「灰色按钮」改成了近黑绿", theme.get_color(current, grey_path))
+          "预设把「灰色按钮」改成了预设里的底色", theme.get_color(current, grey_path))
     check(theme.get_color(current, blue_path)[1] > theme.get_color(current, blue_path)[2],
-          "酸性绿的 G 分量高于 B（确实是绿不是蓝）", theme.get_color(current, blue_path))
+          "选中的主行动色是黄绿系（G > B）", theme.get_color(current, blue_path))
 
     # hex -> 浮点 的换算（主题里存的就是显示值，不需要线性转换）
     check(color_close(theme.hex_color("#C6FF00"), (0.7765, 1.0, 0.0, 1.0)),
@@ -1077,11 +1077,15 @@ def test_theme(module):
     check(theme.color_to_hex((0.7765, 1.0, 0.0, 1.0)) == "#C6FF00",
           "颜色转十六进制正确", theme.color_to_hex((0.7765, 1.0, 0.0, 1.0)))
 
+    preferences.simple_mode = False
+    preferences.family = prefix
+    preferences.part_inner = (0.5, 0.5, 0.5, 1.0)   # 中间灰最容易配错文字色
     result = bpy.ops.hhz.theme_auto_contrast()
     check(result == {'FINISHED'}, "「自动配文字色」算符可用", result)
-    check(not theme.family_contrast_report(current, prefix),
-          "自动配文字色之后该家族没有对比度问题",
-          theme.family_contrast_report(current, prefix))
+    report = theme.family_contrast_report(current, prefix)
+    check(not report, "自动配文字色之后该家族没有对比度问题",
+          (report, theme.color_to_hex(theme.get_color(current, theme.family_path(prefix, "inner"))),
+           theme.color_to_hex(theme.get_color(current, theme.family_path(prefix, "text")))))
     result = bpy.ops.hhz.theme_part_load()
     check(result == {'FINISHED'}, "「从当前主题读回」算符可用", result)
 

@@ -784,19 +784,33 @@ class HHZ_OT_theme_auto_contrast(bpy.types.Operator):
             self.report({'WARNING'}, "先在上面选一个控件家族或分组")
             return {'CANCELLED'}
 
-        changed = 0
+        # 1) 先算出每个家族该用的文字色，并把面板上的值更新到位
+        plan = []
         for prefix in families:
             for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
                 background = theme.get_color(current, theme.family_path(prefix, background_key))
                 if background is None:
                     continue
-                text_color = theme.readable_text_color(background)
-                if theme.write_family(current, prefix, text_key, text_color):
+                plan.append((prefix, text_key, background))
+                try:
+                    setattr(preferences, "part_" + text_key,
+                            theme.readable_text_color(background))
+                except Exception:
+                    pass
+
+        # 2) 面板值都定下来之后，最后一次性只写主题：自检不达标就换另一种字色。
+        #    这一段中间不碰偏好设置，避免回调再把旧值写回来。
+        changed = 0
+        for prefix, text_key, background in plan:
+            for text_color in (theme.readable_text_color(background),
+                               theme.TEXT_ON_LIGHT, theme.TEXT_ON_DARK):
+                if not theme.write_family(current, prefix, text_key, text_color):
+                    continue
+                written = theme.get_color(current, theme.family_path(prefix, text_key))
+                if (written is not None
+                        and abs(theme.luminance(written) - theme.luminance(background)) >= 0.3):
                     changed += 1
-                    try:
-                        setattr(preferences, "part_" + text_key, text_color)
-                    except Exception:
-                        pass
+                    break
 
         if not changed:
             self.report({'WARNING'}, "这个家族没有可配的底色项")

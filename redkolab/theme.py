@@ -494,17 +494,32 @@ DEFAULT_COLORS_4X = {
 # 失落星船：马拉松（Marathon）那种"酸性"观感：近黑底 + 高饱和酸性绿 + 橙色状态提示。
 # 色值直接写 hex，方便你自己微调；主题色存的就是显示值（0-255 归一化），不需要做线性转换。
 
-ACID = {
-    "acid": "#C6FF00",       # 主酸性绿（选中按钮）
-    "acid_hot": "#D8FF3D",   # 高对比酸性绿
-    "acid_dim": "#8FBF00",   # 暗一档（列表选中）
-    "ink": "#0B0D08",        # 近黑（带绿）
-    "panel": "#171A12",      # 按钮底
-    "panel_hi": "#232819",   # 按钮底（亮）
-    "edge": "#3D4726",       # 描边（橄榄灰）
-    "text": "#DCE8C8",       # 文字（偏绿白）
-    "orange": "#FF7A18",     # 状态橙（已修改）
+#: 失落星船 马拉松 的界面配色（照着游戏实拍图取色）
+#: 近黑底 + 浅灰任务卡 + 酸性黄绿主行动色（READY 按钮）+ 洋红 / 青蓝点缀
+MARATHON = {
+    "lime": "#D6F32B",        # 主行动色：READY 按钮、警示文字、罗盘标记
+    "lime_dim": "#9FB420",
+    "magenta": "#E85BC8",     # 任务横幅、货币数字、队伍标识
+    "magenta_dim": "#A03E8B",
+    "cyan": "#3FB6E0",        # 副标题、次要标识（HUD 里的 IN A SINGLE RUN）
+    "cyan_dim": "#2A7E9E",
+    "crimson": "#E03A2F",     # 危险 / 禁止
+    "card": "#C4C6C9",        # 浅灰任务卡底色
+    "card_edge": "#8A8F96",
+    "ink": "#0B0D12",         # 近黑：卡片上的文字、HUD 底色
+    "panel": "#141821",       # 深色面板
+    "panel_hi": "#1E2430",    # 深色面板（亮一档）
+    "text": "#DDE3E8",        # 暗底上的浅灰文字
 }
+
+#: 旧名字保留（早期版本叫 ACID）
+ACID = MARATHON
+
+
+def marathon_color(key, alpha=1.0):
+    """取调色板里的颜色（hex 转 0-1 浮点）。"""
+    return hex_color(MARATHON.get(key, "#FFFFFF"), alpha)
+
 
 
 def hex_color(value, alpha=1.0):
@@ -552,14 +567,17 @@ TEXT_ON_DARK = (0.94, 0.96, 0.90, 1.0)
 
 
 def readable_text_color(background, threshold=0.45):
-    """按背景亮度挑一个看得清的文字色。
+    """按背景亮度挑一个看得清的文字色：深色字与浅色字里取对比更强的那个。
 
-    这就是"按钮统一颜色后字看不清"的解法：底色一变，文字色跟着换成
-    深色或浅色，保证对比度。
+    这就是"按钮统一颜色后字看不清"的解法：底色一变，文字色跟着换，
+    而且一定是两者里差距更大的那个（中间灰也能挑对）。
     """
-    if luminance(background) > threshold:
-        return TEXT_ON_LIGHT
-    return TEXT_ON_DARK
+    level = luminance(background)
+    light_diff = abs(luminance(TEXT_ON_DARK) - level)
+    dark_diff = abs(luminance(TEXT_ON_LIGHT) - level)
+    if light_diff >= dark_diff:
+        return TEXT_ON_DARK
+    return TEXT_ON_LIGHT
 
 
 def family_path(prefix, member):
@@ -700,82 +718,89 @@ def family_contrast_report(theme, prefix):
     return problems
 
 
-def _acid_preset(hot=False):
-    """生成一套酸性配色（hot=True 是高对比版本）。
+def _marathon_preset(style):
+    """按游戏实拍图生成三套配色。
 
-    关键：**每个家族的底色、文字与图标、边框、选中态都成对给出** ——
-    底色统一改深（或改成酸性绿）时，文字色必须跟着换，
-    否则就会出现"按钮上的图案和字看不清"。
+    * ``card``  —— 浅灰任务卡：浅灰底 + 黑字 + 酸性黄绿选中
+    * ``hud``   —— 暗色 HUD：近黑底 + 浅灰字 + 青蓝选中
+    * ``alert`` —— 洋红警戒：深面板 + 浅灰字 + 洋红选中
     """
-    accent = ACID["acid_hot"] if hot else ACID["acid"]
-    base = ACID["ink"] if hot else ACID["panel"]
-    text = "#FFFFFF" if hot else ACID["text"]
-    edge = ACID["acid_dim"] if hot else ACID["edge"]
+    if style == "card":
+        base, text, edge = MARATHON["card"], MARATHON["ink"], MARATHON["card_edge"]
+        accent, accent_text = MARATHON["lime"], MARATHON["ink"]
+    elif style == "alert":
+        base, text, edge = MARATHON["panel"], MARATHON["text"], MARATHON["magenta_dim"]
+        accent, accent_text = MARATHON["magenta"], MARATHON["ink"]
+    else:
+        base, text, edge = MARATHON["ink"], MARATHON["text"], MARATHON["cyan_dim"]
+        accent, accent_text = MARATHON["cyan"], MARATHON["ink"]
 
     colors = {}
     for prefix, _label in WIDGET_FAMILIES:
         colors[family_path(prefix, "inner")] = hex_color(base)
-        colors[family_path(prefix, "outline")] = hex_color(edge)
         colors[family_path(prefix, "text")] = hex_color(text)
+        colors[family_path(prefix, "outline")] = hex_color(edge)
         colors[family_path(prefix, "inner_sel")] = hex_color(accent)
+        colors[family_path(prefix, "text_sel")] = hex_color(accent_text)
         colors[family_path(prefix, "outline_sel")] = hex_color(accent)
-        colors[family_path(prefix, "text_sel")] = hex_color(ACID["ink"])
         colors[family_path(prefix, "item")] = hex_color(accent)
 
-    # 需要保持透明 / 需要特别的几项，单独覆盖
     colors.update({
-        "user_interface.wcol_regular.item": hex_color(ACID["ink"], 0.5),
         "user_interface.wcol_list_item.inner": hex_color(base, 0.0),
         "user_interface.wcol_scroll.inner": hex_color(base, 0.0),
-        "user_interface.wcol_box.inner": hex_color(ACID["ink"], 0.5),
-        "user_interface.wcol_menu_back.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_pie_menu.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_text.inner": hex_color(ACID["ink"]),
+        "user_interface.wcol_menu_back.inner": marathon_color("panel"),
+        "user_interface.wcol_menu_back.text": marathon_color("text"),
+        "user_interface.wcol_pie_menu.inner": marathon_color("panel"),
+        "user_interface.wcol_pie_menu.text": marathon_color("text"),
+        "user_interface.wcol_tab.inner": marathon_color("panel"),
+        "user_interface.wcol_tab.text": marathon_color("text"),
+        "user_interface.wcol_tab.inner_sel": hex_color(accent),
+        "user_interface.wcol_tab.text_sel": hex_color(accent_text),
+        "user_interface.wcol_text.inner": marathon_color("ink"),
+        "user_interface.wcol_text.text": marathon_color("text"),
         "user_interface.wcol_text.inner_sel": hex_color(accent),
-        "user_interface.wcol_text.text_sel": hex_color(ACID["ink"]),
-        "user_interface.wcol_tab.inner": hex_color(ACID["ink"]),
-        # 当前标签页 / 分组框标题：用暗一档的酸性绿，这样配黑字也看得清
-        "user_interface.wcol_tab.inner_sel": hex_color(ACID["acid_dim"]),
-        "user_interface.wcol_box.inner_sel": hex_color(ACID["acid_dim"]),
-        "user_interface.wcol_list_item.inner_sel": hex_color(ACID["acid_dim"]),
+        "user_interface.wcol_text.text_sel": hex_color(accent_text),
+        "user_interface.wcol_box.inner": hex_color(base, 0.5),
+        "user_interface.wcol_box.inner_sel": hex_color(accent),
+        "user_interface.wcol_list_item.inner_sel": hex_color(accent),
         "user_interface.panel_active": hex_color(accent),
-        # 状态色
-        "user_interface.wcol_state.inner_changed": hex_color(ACID["orange"]),
-        "user_interface.wcol_state.inner_changed_sel": hex_color(ACID["orange"]),
-        "user_interface.wcol_state.inner_anim": hex_color(ACID["acid_dim"]),
-        "user_interface.wcol_state.inner_anim_sel": hex_color(accent),
-        "user_interface.wcol_state.inner_key": hex_color("#E8C547"),
-        "user_interface.wcol_state.inner_key_sel": hex_color(ACID["orange"]),
+        "user_interface.wcol_state.inner_changed": marathon_color("lime"),
+        "user_interface.wcol_state.inner_changed_sel": marathon_color("lime_dim"),
+        "user_interface.wcol_state.inner_anim": marathon_color("cyan"),
+        "user_interface.wcol_state.inner_anim_sel": marathon_color("cyan_dim"),
+        "user_interface.wcol_state.inner_key": marathon_color("card"),
+        "user_interface.wcol_state.inner_key_sel": marathon_color("magenta"),
+        "user_interface.wcol_state.inner_driven": marathon_color("magenta"),
+        "user_interface.wcol_state.inner_driven_sel": marathon_color("magenta_dim"),
+        "user_interface.wcol_state.inner_overridden": marathon_color("crimson"),
+        "user_interface.wcol_state.inner_overridden_sel": marathon_color("crimson"),
     })
-    # 各编辑器里的全局选中高亮（大纲选中行等）也一起酸起来
+
     colors.update(global_highlight_colors(hex_color(accent)))
+    colors.update(_marathon_frame_colors(hex_color(accent)))
     return {path: color for path, color in colors.items() if color is not None}
 
 
-def _acid_frame_colors():
-    """时间线 / 当前帧也一起酸起来（4.x 才有这些项，5.x 上写入会自然失败）。"""
+def _marathon_frame_colors(accent):
+    """时间线 / 当前帧跟着强调色走（4.x 才有这些项，5.x 上写入会自然失败）。"""
     return {
-        "dopesheet_editor.frame_current": hex_color(ACID["acid"]),
-        "graph_editor.frame_current": hex_color(ACID["acid"]),
-        "nla_editor.frame_current": hex_color(ACID["acid"]),
-        "sequence_editor.frame_current": hex_color(ACID["acid"]),
-        "clip_editor.frame_current": hex_color(ACID["acid"]),
-        "image_editor.frame_current": hex_color(ACID["acid"]),
-        "view_3d.frame_current": hex_color(ACID["acid"]),
+        "dopesheet_editor.frame_current": accent,
+        "graph_editor.frame_current": accent,
+        "nla_editor.frame_current": accent,
+        "sequence_editor.frame_current": accent,
+        "clip_editor.frame_current": accent,
+        "image_editor.frame_current": accent,
+        "view_3d.frame_current": accent,
     }
 
 
-def _preset(hot):
-    colors = _acid_preset(hot)
-    colors.update(_acid_frame_colors())
-    return colors
-
-
-#: 配色预设：改的是**可互动的按钮与状态色**（外加时间线当前帧），不动视口
+#: 配色预设：照着失落星船 马拉松 的三张实拍图做的
 PRESETS = (
-    ("Marathon 酸性", _preset(False)),
-    ("Marathon 酸性 高对比", _preset(True)),
+    ("马拉松 浅灰卡", _marathon_preset("card")),
+    ("马拉松 暗色 HUD", _marathon_preset("hud")),
+    ("马拉松 洋红警戒", _marathon_preset("alert")),
 )
+
 
 
 # ------------------------------------------------------------------- 基础操作
