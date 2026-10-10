@@ -381,14 +381,27 @@ def test_registration(module_name, module):
         check(panel.bl_space_type == 'VIEW_3D' and panel.bl_region_type == 'UI',
               "N 面板挂在 3D 视图侧栏")
 
+    # 侧栏 N 面板不保证绘制子面板（Blender 自己的 N 面板脚本里一个 bl_parent_id 都没有），
+    # 所以本插件的面板必须全部是顶层面板，否则会出现"注册成功但界面上找不到"
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
+    with open(ui_path, encoding="utf-8") as handle:
+        ui_source = handle.read()
+    offenders = panels_with_parent_id(ui_source)
+    check(not offenders, "没有任何面板使用 bl_parent_id（否则可能不在 N 面板显示）",
+          offenders)
+
     for idname in ("HHZ_PT_theme", "HHZ_PT_hotkey", "HHZ_PT_settings", "HHZ_PT_order"):
-        sub = getattr(bpy.types, idname, None)
-        check(sub is not None, "子面板 {} 已注册".format(idname))
-        if sub is not None:
-            check(getattr(sub, "bl_parent_id", "") == "HHZ_PT_main",
-                  "{} 挂在主面板下".format(idname), getattr(sub, "bl_parent_id", ""))
-            check(getattr(sub, "bl_category", "") == "红红子lab",
-                  "{} 属于同一个 N 面板标签页".format(idname), getattr(sub, "bl_category", ""))
+        panel = getattr(bpy.types, idname, None)
+        check(panel is not None, "面板 {} 已注册".format(idname))
+        if panel is not None:
+            check(not getattr(panel, "bl_parent_id", ""),
+                  "{} 是顶层面板（N 面板里独立可见）".format(idname),
+                  getattr(panel, "bl_parent_id", ""))
+            check(getattr(panel, "bl_category", "") == "红红子lab",
+                  "{} 属于同一个 N 面板标签页".format(idname), getattr(panel, "bl_category", ""))
+            check(getattr(panel, "bl_space_type", "") == 'VIEW_3D'
+                  and getattr(panel, "bl_region_type", "") == 'UI',
+                  "{} 在 3D 视图侧栏".format(idname))
 
 
 def test_icons(module):
@@ -856,9 +869,11 @@ def test_theme(module):
 
     # 面板挂在 N 面板里（需求：只进 N 面板）
     panel = getattr(bpy.types, "HHZ_PT_theme", None)
-    check(panel is not None, "主题子面板已注册")
+    check(panel is not None, "主题面板已注册")
     if panel is not None:
-        check(panel.bl_parent_id == "HHZ_PT_main", "主题面板挂在主面板下", panel.bl_parent_id)
+        check(not getattr(panel, "bl_parent_id", ""),
+              "主题面板是顶层面板（N 面板里必定显示）", getattr(panel, "bl_parent_id", ""))
+        check(panel.bl_category == "红红子lab", "主题面板在红红子lab 标签页里", panel.bl_category)
         check(panel.bl_space_type == 'VIEW_3D' and panel.bl_region_type == 'UI',
               "主题面板在 3D 视图侧栏（N 面板）")
 
@@ -885,6 +900,24 @@ def class_operator_idnames(source, class_name):
                     found.add(inner.args[0].value)
             return found
     return set()
+
+
+def panels_with_parent_id(source):
+    """列出真正定义了 bl_parent_id 的面板类（文档字符串里提到不算）。"""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = [getattr(base, "id", getattr(base, "attr", "")) for base in node.bases]
+        if "Panel" not in bases:
+            continue
+        for statement in node.body:
+            if not isinstance(statement, ast.Assign):
+                continue
+            for target in statement.targets:
+                if isinstance(target, ast.Name) and target.id == "bl_parent_id":
+                    found.append("{}（行 {}）".format(node.name, statement.lineno))
+    return found
 
 
 def test_pie_unchanged(module):
@@ -939,14 +972,22 @@ def test_panel_order(module):
     preferences = module.compat.get_preferences()
     check(preferences is not None, "偏好设置可访问")
     preferences.panel_order = "settings,theme,hotkey"
-    check(getattr(bpy.types, "HHZ_PT_settings", None).bl_order == 0,
-          "第 1 位分块的 bl_order = 0", getattr(bpy.types.HHZ_PT_settings, "bl_order", None))
-    check(bpy.types.HHZ_PT_theme.bl_order == 1, "第 2 位分块的 bl_order = 1",
+    check(bpy.types.HHZ_PT_main.bl_order == panels.MAIN_PANEL_ORDER,
+          "主面板固定在最前（bl_order={}）".format(panels.MAIN_PANEL_ORDER),
+          bpy.types.HHZ_PT_main.bl_order)
+    check(getattr(bpy.types, "HHZ_PT_settings", None).bl_order == 1,
+          "第 1 位面板的 bl_order = 1", getattr(bpy.types.HHZ_PT_settings, "bl_order", None))
+    check(bpy.types.HHZ_PT_theme.bl_order == 2, "第 2 位面板的 bl_order = 2",
           bpy.types.HHZ_PT_theme.bl_order)
-    check(bpy.types.HHZ_PT_hotkey.bl_order == 2, "第 3 位分块的 bl_order = 2",
+    check(bpy.types.HHZ_PT_hotkey.bl_order == 3, "第 3 位面板的 bl_order = 3",
           bpy.types.HHZ_PT_hotkey.bl_order)
     check(bpy.types.HHZ_PT_order.bl_order == panels.ORDER_PANEL_ORDER,
           "顺序编辑器被固定在最后", bpy.types.HHZ_PT_order.bl_order)
+
+    values = [bpy.types.HHZ_PT_main.bl_order, bpy.types.HHZ_PT_settings.bl_order,
+              bpy.types.HHZ_PT_theme.bl_order, bpy.types.HHZ_PT_hotkey.bl_order,
+              bpy.types.HHZ_PT_order.bl_order]
+    check(len(set(values)) == len(values), "各面板 bl_order 互不相同（顺序无歧义）", values)
 
     order = ui.apply_panel_order(context)
     check(order == ["settings", "theme", "hotkey"], "注册时的应用函数返回当前顺序", order)

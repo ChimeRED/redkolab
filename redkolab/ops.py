@@ -676,7 +676,8 @@ class HHZ_OT_section_drag(_DragReorderBase):
         preferences = compat.get_preferences(context)
         if preferences is not None:
             preferences.panel_order = ",".join(items)
-        panels.apply_section_order(items, {"HHZ_PT_order": panels.ORDER_PANEL_ORDER})
+        # 走统一入口：顺手把标签页分组顺序也按偏好设置重施一遍
+        ui.apply_panel_order(context)
 
 
 class HHZ_OT_tab_drag(_DragReorderBase):

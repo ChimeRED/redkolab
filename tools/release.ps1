@@ -32,7 +32,10 @@ param(
     [string]$Python = "",
     # Local add-on zip library: every release is copied there, replacing older versions
     [string]$DeployTo = "D:\build\Blender\4.0\4.0chajian",
+    # Installed add-on folder: keeps the copy Blender actually loads up to date
+    [string]$InstallTo = "$env:APPDATA\Blender Foundation\Blender\4.0\scripts\addons",
     [switch]$NoDeploy,
+    [switch]$NoInstall,
     [switch]$DryRun
 )
 
@@ -154,12 +157,18 @@ if ($LASTEXITCODE -ne 0) { throw "package self-check failed - release aborted" }
 # Do this before pushing: the local library gets the new zip even if the network
 # is down and the push has to be retried later.
 $newestZip = ($zips | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+$installTarget = ""
+if (-not $NoInstall) { $installTarget = $InstallTo }
 if ($DryRun) {
     Write-Host "DryRun: would copy $([System.IO.Path]::GetFileName($newestZip)) to $DeployTo" -ForegroundColor Yellow
-} elseif ($NoDeploy) {
-    Write-Host "local deploy skipped (-NoDeploy)"
+    if ($installTarget) { Write-Host "DryRun: would refresh the installed add-on in $installTarget" -ForegroundColor Yellow }
+} elseif ($NoDeploy -and -not $installTarget) {
+    Write-Host "local deploy skipped"
 } else {
-    & (Join-Path $PSScriptRoot "deploy_local.ps1") -Zip $newestZip -Target $DeployTo
+    $deployArgs = @{ Zip = $newestZip }
+    if ($NoDeploy) { $deployArgs.Target = "" } else { $deployArgs.Target = $DeployTo }
+    if ($installTarget) { $deployArgs.InstallTo = $installTarget }
+    & (Join-Path $PSScriptRoot "deploy_local.ps1") @deployArgs
 }
 
 # --- 5. commit / tag / push -------------------------------------------------

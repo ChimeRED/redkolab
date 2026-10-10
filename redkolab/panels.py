@@ -35,6 +35,9 @@ DEFAULT_SECTION_ORDER = tuple(section_id for section_id, _, _ in SECTIONS)
 #: 顺序编辑器自己的 bl_order（固定在最后）
 ORDER_PANEL_ORDER = 100
 
+#: 主面板固定在最前
+MAIN_PANEL_ORDER = 0
+
 #: 标签页分组的基础 bl_order 间隔（同组内保持各自相对顺序）
 TAB_ORDER_STEP = 1000
 
@@ -136,14 +139,26 @@ def _section_panel(section_id):
 
 
 def apply_section_order(order, extra_orders=None):
-    """按给定顺序写各分块面板的 ``bl_order``，返回实际改到的面板数。"""
+    """按给定顺序写各面板的 ``bl_order``，返回实际改到的面板数。
+
+    ``bl_order`` 小的排在前面（官方 RNA 说明），主面板固定 0、可排序面板从 1 开始，
+    这样"主面板永远在最上"，其余按用户拖出来的顺序排。
+    """
     applied = 0
+
+    main_panel = getattr(bpy.types, "HHZ_PT_main", None)
+    if main_panel is not None:
+        try:
+            main_panel.bl_order = MAIN_PANEL_ORDER
+        except Exception:
+            pass
+
     for index, section_id in enumerate(order):
         panel = _section_panel(section_id)
         if panel is None:
             continue
         try:
-            panel.bl_order = index
+            panel.bl_order = index + 1
             applied += 1
         except Exception:
             pass

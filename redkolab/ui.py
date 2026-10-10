@@ -244,11 +244,14 @@ class HHZ_PT_main(bpy.types.Panel):
 
 
 class HHZ_PT_hotkey(bpy.types.Panel):
-    """饼菜单与快捷键（属于可拖动排序的分块）。"""
+    """饼菜单与快捷键。
+
+    顶层面板（不用 bl_parent_id）：侧栏 N 面板不保证绘制子面板，
+    做成子面板会出现"注册成功但在界面上找不到"的情况。
+    """
 
     bl_idname = "HHZ_PT_hotkey"
     bl_label = "饼菜单与快捷键"
-    bl_parent_id = "HHZ_PT_main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
@@ -272,14 +275,13 @@ class HHZ_PT_hotkey(bpy.types.Panel):
 
 
 class HHZ_PT_settings(bpy.types.Panel):
-    """插件设置（属于可拖动排序的分块）。
+    """插件设置。
 
-    这个入口原来放在饼菜单里，按需求挪到 N 面板。
+    顶层面板；这个入口原来放在饼菜单里，按需求挪到 N 面板。
     """
 
     bl_idname = "HHZ_PT_settings"
     bl_label = "插件设置"
-    bl_parent_id = "HHZ_PT_main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
@@ -298,11 +300,10 @@ class HHZ_PT_settings(bpy.types.Panel):
 
 
 class HHZ_PT_order(bpy.types.Panel):
-    """面板顺序：拖动调整本插件分块与侧栏标签页的顺序（固定排在最后）。"""
+    """面板顺序：拖动调整本插件各面板与侧栏标签页的顺序（固定排在最后）。"""
 
     bl_idname = "HHZ_PT_order"
     bl_label = "面板顺序"
-    bl_parent_id = "HHZ_PT_main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
@@ -347,14 +348,13 @@ class HHZ_PT_order(bpy.types.Panel):
 
 
 class HHZ_PT_theme(bpy.types.Panel):
-    """主题颜色子面板。
+    """主题颜色。
 
-    按需求只放在 N 面板里，饼菜单不收录这个功能。
+    顶层面板，按需求只放在 N 面板里，饼菜单不收录这个功能。
     """
 
     bl_idname = "HHZ_PT_theme"
     bl_label = "主题颜色"
-    bl_parent_id = "HHZ_PT_main"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME

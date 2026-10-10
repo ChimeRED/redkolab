@@ -16,8 +16,8 @@
 三种呼出方式：
 
 1. **饼菜单** —— 默认快捷键 <kbd>Ctrl</kbd>+<kbd>E</kbd>（可改成任意按键）—— **只有上面 1~3 三个功能**
-2. **N 面板** —— 3D 视图 ▸ 侧栏（<kbd>N</kbd>）▸ `红红子lab` 标签页 —— 三个功能 +
-   「主题颜色 / 饼菜单与快捷键 / 插件设置 / 面板顺序」四个子面板
+2. **N 面板** —— 3D 视图 ▸ 侧栏（<kbd>N</kbd>）▸ `红红子lab` 标签页 —— 里面是 5 个独立面板：
+   主面板（三个功能按钮）+ **主题颜色 / 饼菜单与快捷键 / 插件设置 / 面板顺序** 四个可拖动排序的面板
 3. 搜索菜单（<kbd>F3</kbd>）里直接搜「红红子lab」或「REDKO」
 
 > 「插件设置」原来在饼菜单里，已按需求挪到 N 面板；主题颜色也只放 N 面板。
@@ -105,7 +105,7 @@ redkolab/
 
 ### 主题颜色（N 面板）
 
-N 面板 ▸ `红红子lab` ▸ 展开 **「主题颜色」** 子面板：
+N 面板 ▸ `红红子lab` ▸ **「主题颜色」** 面板（在 N 面板里是独立的一块，不用展开别的东西）：
 
 1. 下拉选一个颜色项（按分组列出：视口 / 界面 / 面板（5.x）/ 节点 / 动画）
 2. 拖颜色选择器 —— **实时生效**，不用点应用
@@ -126,13 +126,23 @@ N 面板 ▸ `红红子lab` ▸ 展开 **「主题颜色」** 子面板：
 
 ### 面板顺序（拖动排序）
 
-N 面板 ▸ `红红子lab` ▸ 展开 **「面板顺序」** 子面板（它自己固定在最后）：
+N 面板 ▸ `红红子lab` ▸ **「面板顺序」** 面板（它自己固定在最后）：
 
-**本插件的分块**：按住每行左边的手柄上下拖，实时换位，松开确认、<kbd>Esc</kbd> 取消。
+**本插件的面板**：按住每行左边的手柄上下拖，实时换位，松开确认、<kbd>Esc</kbd> 取消。
 顺序存在插件偏好设置里，重启后仍然生效。
 
 **侧栏标签页**：同一套拖动操作，用来排整个侧栏里各插件的标签页（Item / Tool / View /
 红红子lab / 其它插件……）。旁边有 **「恢复默认标签页顺序」** 一键还原。
+
+> **为什么不能直接按住标签页本身拖动**：侧栏那一列标签是 Blender 用 C 代码绘制和处理的
+> （`panel_category_tabs_*`，源码里只有绘制与点击，没有任何重排逻辑），Python 拿不到标签栏的
+> 鼠标事件，插件无法拦截"按住标签拖"这个动作 —— 社区里要排标签页也得另外装
+> SIMPLE TABS 这类插件。所以这里的做法是：在面板里给出同一份标签页列表，
+> 按住手柄拖动即可改顺序（效果等价，只是拖动发生在列表上）。
+
+> 这些面板全部是**顶层面板**（没有用 `bl_parent_id`）：侧栏 N 面板不保证绘制子面板，
+> Blender 自己的 N 面板脚本里一个子面板都没有，所以本插件一律用顶层面板，
+> 并由测试静态守住这条（AST 检查类体里不许出现 `bl_parent_id`）。
 
 原理与注意事项（都是实测/查源码得出的，不是猜的）：
 
@@ -208,13 +218,13 @@ N 面板 ▸ `红红子lab` ▸ 展开 **「面板顺序」** 子面板（它自
 
 | Blender | 安装入口 | 装成的模块 | 断言 | 结果 |
 | --- | --- | --- | --- | --- |
-| 4.0.2 | 插件页 Install from Disk | `redkolab` | 174 | ✔ |
-| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 174 | ✔ |
-| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 172 | ✔ |
-| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 174 | ✔ |
-| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 172 | ✔ |
+| 4.0.2 | 插件页 Install from Disk | `redkolab` | 182 | ✔ |
+| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 182 | ✔ |
+| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 180 | ✔ |
+| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 182 | ✔ |
+| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 180 | ✔ |
 
-> 断言数 174 / 172 的差别：扩展安装下 Blender 会接管元数据（不再暴露 `bl_info`），
+> 断言数 182 / 180 的差别：扩展安装下 Blender 会接管元数据（不再暴露 `bl_info`），
 > 测试会跳过 2 项元数据检查，功能断言一项不少。
 
 扩展清单另外用官方校验器验过（4.2 与 5.2 都验）：
@@ -307,10 +317,14 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 **本地插件 zip 库**默认是 `D:\build\Blender\4.0\4.0chajian`（放 Boxcutter / HardOps / MACHIN3tools
 这类安装包的地方）：每次发版会把新的 `redkolab-<版本>.zip` 复制进去，并删掉里面的旧版本
 （只删该目录下匹配 `redkolab-*.zip` 的文件，别的插件包与文件夹一律不碰）。
-想换目录用 `-DeployTo`，想保留历史版本用 `-NoDeploy` 跳过或给 `deploy_local.ps1` 加 `-KeepOld`：
+
+**已安装副本**默认是 `%APPDATA%\Blender Foundation\Blender\4.0\scripts\addons`：每次发版会把
+`redkolab\` 整个替换成新版本的内容，这样 Blender 下次启动加载的就是最新的
+（**装完记得重启 Blender**，或停用再启用插件）。想换目录用 `-DeployTo` / `-InstallTo`，
+不想动本地用 `-NoDeploy` / `-NoInstall` 跳过，想留历史 zip 用 `-KeepOld`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "D:\其它\插件库"
+powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "D:\其它\插件库" -InstallTo "D:\其它\addons"
 ```
 
 推送后 [.github/workflows/release.yml](.github/workflows/release.yml) 自动执行：
@@ -343,4 +357,7 @@ powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "D:\其�
   它的顺序可能被重置，重新拖一次即可
 * 默认快捷键 <kbd>Ctrl</kbd>+<kbd>E</kbd> 在**编辑模式**下会与 Blender 的「边」菜单冲突（Blender 优先），
   所以饼菜单在编辑模式下不弹出；偏好设置里可以随时换成别的键
+* **侧栏的标签页本身没法用鼠标拖动排序**：那部分是 Blender 的 C 代码绘制并处理鼠标的，
+  Python 没有钩子（社区里排标签页也要另装 SIMPLE TABS 之类插件）。本插件的做法是在
+  「面板顺序」面板里给一份标签页列表，拖动列表即改顺序
 * 许可证：GPL-3.0-or-later（Blender 插件的通行许可）
