@@ -1049,6 +1049,7 @@ def test_theme(module):
               theme.family_contrast_report(current, family_prefix))
 
     # ---- 调色盘 / 十六进制 / 应用颜色 ----
+    preferences.simple_mode = False   # 下面要按单个家族名设置，先关掉简洁模式
     preferences.family = prefix
     preferences.theme_target = grey_path
     check(module.ui.load_family_parts(context, preferences) >= 4, "能把家族颜色读进面板属性")
@@ -1139,6 +1140,45 @@ def test_theme(module):
     check(not bad_labels, "颜色项标签里没有中点号这类符号", bad_labels[:5])
     bad_groups = [group for _path, _label, group in theme.TARGETS if "\u00b7" in group]
     check(not bad_groups, "分组名里也没有中点号", bad_groups[:5])
+
+    # ---- 简洁模式：选项要少，但关掉之后仍能拿到全部 ----
+    preferences.simple_mode = True
+    family_keys = [item[0] for item in module.ui.family_items(preferences, context)]
+    check(len(family_keys) <= 8, "简洁模式下控件家族选项 <= 8 个", family_keys)
+    check("ALL" in family_keys and "BUTTONS" in family_keys,
+          "简洁模式有「全部控件」与「按钮」分组", family_keys)
+    check(theme.families_for_key("ALL") == tuple(
+        prefix for prefix, _name in theme.WIDGET_FAMILIES),
+        "「全部控件」= 全部家族")
+    check(len(theme.families_for_key("BUTTONS")) >= 3,
+          "「按钮」分组至少含 3 个家族", theme.families_for_key("BUTTONS"))
+    check(theme.families_for_key("wcol_menu") == ("wcol_menu",),
+          "直接给家族名也认（精调时用）")
+    check(theme.families_for_key("__none__") == (), "无效键返回空")
+
+    simple_paths = [item[0] for item in theme.target_items(preferences, context)]
+    check(len(simple_paths) <= 40, "简洁模式下颜色项 <= 40 个", len(simple_paths))
+    check("outliner.selected_highlight" in simple_paths, "简洁模式保留了常用的全局选中高亮")
+    preferences.simple_mode = False
+    full_paths = [item[0] for item in theme.target_items(preferences, context)]
+    check(len(full_paths) > len(simple_paths) * 3,
+          "关掉简洁模式后能看到全部颜色项", (len(simple_paths), len(full_paths)))
+    preferences.simple_mode = True
+
+    # 选「全部控件」改一次底色 -> 所有家族一起变
+    preferences.family = "ALL"
+    check(len(module.ui.family_keys(preferences)) == len(theme.WIDGET_FAMILIES),
+          "面板把「全部控件」展开成全部家族")
+    before_one = theme.get_color(current, theme.family_path("wcol_tab", "inner"))
+    preferences.part_inner = (0.25, 0.5, 0.75, 1.0)
+    after_all = [theme.get_color(current, theme.family_path(prefix, "inner"))
+                 for prefix, _name in theme.WIDGET_FAMILIES]
+    check(all(item is not None and theme.color_close(item, (0.25, 0.5, 0.75, 1.0))
+              for item in after_all),
+          "选「全部控件」时改底色会应用到每个家族", (before_one, after_all[:2]))
+    preferences.simple_mode = False
+    preferences.family = prefix
+    preferences.simple_mode = True
 
     # ---- 默认值表：全部恢复之后每一项都要真的回到记录值 ----
     # 这是"全部恢复完还有地方是绿的"的防线：预设/全局配色改过的项（大纲选中行等）

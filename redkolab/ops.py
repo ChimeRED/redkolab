@@ -779,23 +779,24 @@ class HHZ_OT_theme_auto_contrast(bpy.types.Operator):
             self.report({'ERROR'}, "读不到偏好设置或主题")
             return {'CANCELLED'}
 
-        prefix = getattr(preferences, "family", "")
-        if not prefix:
-            self.report({'WARNING'}, "先在上面选一个控件家族")
+        families = ui.family_keys(preferences)
+        if not families:
+            self.report({'WARNING'}, "先在上面选一个控件家族或分组")
             return {'CANCELLED'}
 
         changed = 0
-        for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
-            background = theme.get_color(current, theme.family_path(prefix, background_key))
-            if background is None:
-                continue
-            text_color = theme.readable_text_color(background)
-            if theme.write_family(current, prefix, text_key, text_color):
-                changed += 1
-                try:
-                    setattr(preferences, "part_" + text_key, text_color)
-                except Exception:
-                    pass
+        for prefix in families:
+            for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+                background = theme.get_color(current, theme.family_path(prefix, background_key))
+                if background is None:
+                    continue
+                text_color = theme.readable_text_color(background)
+                if theme.write_family(current, prefix, text_key, text_color):
+                    changed += 1
+                    try:
+                        setattr(preferences, "part_" + text_key, text_color)
+                    except Exception:
+                        pass
 
         if not changed:
             self.report({'WARNING'}, "这个家族没有可配的底色项")

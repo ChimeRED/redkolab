@@ -153,7 +153,21 @@ def custom_items(self, context):
 
 
 def family_items(self, context):
-    """控件家族下拉项（只列当前版本真实存在的）。"""
+    """控件家族下拉项。
+
+    简洁模式下只有 6 个分组（一个选项 = 一批家族一起改），
+    关掉简洁模式才列出全部 20 个家族 —— 选项太多反而没法用。
+    """
+    if getattr(self, "simple_mode", True):
+        available = {prefix for prefix, _label in theme.family_items(context)}
+        items = [(key, label) for key, label, _tip in theme.simple_family_items()]
+        keep = []
+        for key, label in items:
+            members = theme.families_for_key(key)
+            if members and any(member in available for member in members):
+                keep.append((key, label, "一起改「{}」这一批控件".format(label)))
+        if keep:
+            return keep
     items = theme.family_items(context)
     if not items:
         return [("__none__", "（没有可用控件）", "这个 Blender 版本读不到控件颜色")]
@@ -161,13 +175,18 @@ def family_items(self, context):
             for prefix, label in items]
 
 
+def family_keys(preferences):
+    """当前选择的家族键 -> 实际要处理的家族列表。"""
+    return theme.families_for_key(getattr(preferences, "family", ""))
+
+
 def load_family_parts(context, preferences):
-    """把当前控件家族的各项颜色读进面板属性，返回读到的项数。"""
+    """把当前选择（可能是分组）的代表家族颜色读进面板属性，返回读到的项数。"""
     current = theme.current_theme(context)
-    prefix = getattr(preferences, "family", "")
-    if current is None or not prefix or prefix == "__none__":
+    members = family_keys(preferences)
+    if current is None or not members:
         return 0
-    colors = theme.read_family(current, prefix)
+    colors = theme.read_family(current, members[0])
     filled = 0
     for member, color in colors.items():
         name = "part_" + member
@@ -190,20 +209,21 @@ def _on_family_update(self, context):
 
 
 def _on_part_update(self, context):
-    """面板上改了某个成员的颜色 -> 立刻写进主题（只写真的变了的）。"""
+    """面板上改了某个成员的颜色 -> 立刻写进主题（选了分组就是一批家族一起改）。"""
     current = theme.current_theme(context)
-    prefix = getattr(self, "family", "")
-    if current is None or not prefix:
+    members = family_keys(self)
+    if current is None or not members:
         return
     for member, _label, _group in theme.PART_MEMBERS:
         value = getattr(self, "part_" + member, None)
         if value is None:
             continue
-        path = theme.family_path(prefix, member)
-        existing = theme.get_color(current, path)
-        if existing is None or theme.color_close(existing, tuple(value)):
-            continue
-        theme.set_color(current, path, tuple(value))
+        for prefix in members:
+            path = theme.family_path(prefix, member)
+            existing = theme.get_color(current, path)
+            if existing is None or theme.color_close(existing, tuple(value)):
+                continue
+            theme.set_color(current, path, tuple(value))
     theme.read_into_preferences(context, self)
 
 
@@ -518,6 +538,7 @@ class HHZ_PT_theme(bpy.types.Panel):
         # ---- 控件颜色分开设置：每一项旁边都有自己的小调色盘 ----
         box = layout.box()
         box.label(text="控件颜色分开设置")
+        box.prop(preferences, "simple_mode")
         prefix = getattr(preferences, "family", "")
         box.prop(preferences, "family", text="")
         shown_parts = 0
@@ -719,9 +740,16 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
     )
     family: EnumProperty(
         name="控件家族",
-        description="要分开设置颜色的控件（按钮 / 菜单 / 标签页……）",
+        description="要分开设置颜色的控件；简洁模式下是一个分组（一批一起改）",
         items=family_items,
         update=_on_family_update,
+    )
+    simple_mode: BoolProperty(
+        name="简洁模式",
+        description="关掉之后颜色项与控件家族会列出全部选项（适合精调）",
+        default=True,
+        update=lambda self, context: (load_family_parts(context, self),
+                                      theme.read_into_preferences(context, self)),
     )
     part_inner: FloatVectorProperty(
         name="底色", description="按钮本体的颜色",

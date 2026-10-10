@@ -90,6 +90,69 @@ GLOBAL_TARGETS = (
     ("user_interface.editor_outline_active", "编辑器图标高亮 5.x", "选中态 全局"),
 )
 
+#: 简洁模式下的控件家族分组：一个选项 = 一批家族一起改
+SIMPLE_FAMILY_GROUPS = (
+    ("ALL", "全部控件 一起改", None),
+    ("BUTTONS", "按钮", ("wcol_regular", "wcol_tool", "wcol_toolbar_item")),
+    ("CHOICE", "选项与开关", ("wcol_option", "wcol_toggle", "wcol_radio")),
+    ("INPUT", "输入框与滑块", ("wcol_num", "wcol_numslider", "wcol_text")),
+    ("MENU", "菜单与列表", ("wcol_menu", "wcol_menu_back", "wcol_menu_item",
+                            "wcol_pulldown", "wcol_pie_menu", "wcol_tab",
+                            "wcol_list_item")),
+    ("PANEL", "面板与其它", ("wcol_box", "wcol_tooltip", "wcol_progress", "wcol_scroll")),
+)
+
+#: 简洁模式下颜色项下拉里保留的常用项（前缀 + 精确名字）
+SIMPLE_KEEP_PREFIXES = (
+    "user_interface.wcol_regular.",
+    "user_interface.wcol_tool.",
+)
+SIMPLE_KEEP_EXACT = (
+    "outliner.selected_highlight",
+    "outliner.active",
+    "file_browser.selected_file",
+    "properties.active_modifier",
+    "user_interface.editor_outline",
+    "user_interface.icon_object",
+    "user_interface.icon_modifier",
+    "user_interface.icon_collection",
+    "user_interface.icon_folder",
+    "dopesheet_editor.frame_current",
+    "graph_editor.frame_current",
+    "view_3d.frame_current",
+    "user_interface.panel_active",
+    "view_3d.space.gradients.high_gradient",
+    "view_3d.grid",
+    "user_interface.wcol_state.inner_changed",
+    "user_interface.wcol_state.inner_anim",
+)
+
+
+def is_simple_path(path):
+    """简洁模式下是否保留这个颜色项。"""
+    return path in SIMPLE_KEEP_EXACT or path.startswith(SIMPLE_KEEP_PREFIXES)
+
+
+def simple_family_items():
+    """简洁模式的家族下拉项。"""
+    return tuple((key, label, "") for key, label, _members in SIMPLE_FAMILY_GROUPS)
+
+
+def families_for_key(key):
+    """家族下拉的键 -> 要一起改的家族列表（分组键或单个家族名都认）。"""
+    if not key or key == "__none__":
+        return ()
+    for group_key, _label, members in SIMPLE_FAMILY_GROUPS:
+        if group_key != key:
+            continue
+        if members is None:
+            return tuple(prefix for prefix, _name in WIDGET_FAMILIES)
+        return tuple(members)
+    if any(prefix == key for prefix, _name in WIDGET_FAMILIES):
+        return (key,)
+    return ()
+
+
 #: 图标颜色（Blender 按对象类型给图标上的色）
 ICON_TARGETS = (
     ("user_interface.icon_scene", "场景图标", "图标颜色"),
@@ -800,10 +863,17 @@ def set_color(theme, path, color):
 
 
 def target_items(self=None, context=None):
-    """给 EnumProperty 用的动态条目：只列出当前 Blender 真的有的颜色。"""
+    """给 EnumProperty 用的动态条目：只列出当前 Blender 真的有的颜色。
+
+    简洁模式（``preferences.simple_mode``）下只留下常用项，避免两百多项把人绕晕；
+    关掉简洁模式就能看到全部条目。
+    """
+    simple = bool(getattr(self, "simple_mode", False))
     theme = current_theme(context if context is not None else bpy.context)
     items = []
     for path, label, group in TARGETS:
+        if simple and not is_simple_path(path):
+            continue
         if resolve(theme, path) is None:
             continue
         items.append((path, "{} {}".format(group, label), path))
