@@ -14,7 +14,10 @@
       3. version consistency check (tools/check_version.py)
       4. build the package (tools/build_zips.py)
       5. package self-check (tools/inspect_zip.py)
-      6. commit, tag and push (with retries)
+      6. real-Blender gate (tools/run_tests.ps1, default 4.0.2 / auto) - the
+         release is aborted here if the add-on cannot be installed, enabled and
+         pass its assertions, so a broken package can never reach a tag
+      7. commit, tag and push (with retries)
 
     NOTE: this file is intentionally ASCII-only. Windows PowerShell 5.1 reads
     .ps1 files using the system code page, which mangles non-ASCII text and can
@@ -24,6 +27,7 @@
     powershell -ExecutionPolicy Bypass -File tools\release.ps1
     powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
     powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump minor -DryRun
+    powershell -ExecutionPolicy Bypass -File tools\release.ps1 -SkipRealTest
 #>
 param(
     [ValidateSet("none", "patch", "minor", "major")][string]$Bump = "none",
@@ -34,6 +38,11 @@ param(
     [string]$DeployTo = "D:\build\Blender\4.0\4.0chajian",
     # Installed add-on folder: keeps the copy Blender actually loads up to date
     [string]$InstallTo = "$env:APPDATA\Blender Foundation\Blender\4.0\scripts\addons",
+    # Real-Blender gate: runs before anything is committed, tagged or pushed.
+    # Defaults to the widest-coverage combo (4.0.2 supports both install entries).
+    [string]$RealTestBlender = "D:\SteamLibrary\steamapps\common\Blender\blender.exe",
+    [ValidateSet("auto", "extensions")][string]$RealTestMode = "auto",
+    [switch]$SkipRealTest,
     [switch]$NoDeploy,
     [switch]$NoInstall,
     [switch]$DryRun
@@ -99,12 +108,16 @@ function Set-Version {
     $text = Get-Content -LiteralPath $initPath -Raw -Encoding UTF8
     $text = [regex]::Replace($text, '("version"\s*:\s*\()\d+\s*,\s*\d+\s*,\s*\d+(\))',
         ('${1}' + $Parts[0] + ', ' + $Parts[1] + ', ' + $Parts[2] + '${2}'))
-    Set-Content -LiteralPath $initPath -Value $text -Encoding UTF8 -NoNewline
+    # Must be BOM-free UTF-8. "Set-Content -Encoding UTF8" writes EF BB BF on
+    # Windows PowerShell 5.1, and that BOM makes ast.parse in check_version.py /
+    # build_zips.py die with "invalid non-printable character U+FEFF", i.e. the
+    # -Bump release path would break itself.
+    [System.IO.File]::WriteAllText($initPath, $text, (New-Object System.Text.UTF8Encoding($false)))
 
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
     $manifest = [regex]::Replace($manifest, '(?m)^version\s*=\s*"[^"]*"',
         ('version = "' + ($Parts -join '.') + '"'))
-    Set-Content -LiteralPath $manifestPath -Value $manifest -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($manifestPath, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 function Invoke-GitPush {
@@ -153,10 +166,37 @@ $zips = Get-ChildItem -LiteralPath (Join-Path $projectRoot "dist") -Filter "*.zi
 & $pythonExe (Join-Path $PSScriptRoot "inspect_zip.py") $zips.FullName
 if ($LASTEXITCODE -ne 0) { throw "package self-check failed - release aborted" }
 
-# --- 4. local add-on zip library -------------------------------------------
+# The artifact that gets gated, deployed and published: the newest zip, i.e. the
+# one build_zips.py just wrote for the version check_version.py just approved.
+$newestZip = ($zips | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+
+# --- 4. real-Blender gate ---------------------------------------------------
+# inspect_zip.py only checks the structure of the archive; it never enables the
+# add-on, so a structurally valid zip can still be a package that no Blender
+# version can load. That is how a dead build got tagged once, so tagging now
+# requires one real install + enable + full assertion run on the exact zip that
+# is about to be released. Skipping it is possible but never the default.
+if ($SkipRealTest) {
+    Write-Host "real-Blender gate skipped (-SkipRealTest)" -ForegroundColor Yellow
+} else {
+    if (-not (Test-Path -LiteralPath $RealTestBlender)) {
+        throw "Blender not found for the release gate: $RealTestBlender (pass -RealTestBlender, or -SkipRealTest to bypass)"
+    }
+    Write-Host ("real-Blender gate: {0} (mode {1})" -f $RealTestBlender, $RealTestMode) -ForegroundColor Cyan
+    # Native Blender prints warnings to stderr; keep those from becoming
+    # terminating errors here and judge by the exit code alone.
+    $ErrorActionPreference = "Continue"
+    & (Join-Path $PSScriptRoot "run_tests.ps1") -Blender $RealTestBlender -Mode $RealTestMode -Zip $newestZip
+    $gateCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($gateCode -ne 0) {
+        throw "real-Blender gate failed (exit=$gateCode) - release aborted, nothing committed, tagged or pushed"
+    }
+}
+
+# --- 5. local add-on zip library -------------------------------------------
 # Do this before pushing: the local library gets the new zip even if the network
 # is down and the push has to be retried later.
-$newestZip = ($zips | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
 $installTarget = ""
 if (-not $NoInstall) { $installTarget = $InstallTo }
 if ($DryRun) {
@@ -171,7 +211,7 @@ if ($DryRun) {
     & (Join-Path $PSScriptRoot "deploy_local.ps1") @deployArgs
 }
 
-# --- 5. commit / tag / push -------------------------------------------------
+# --- 6. commit / tag / push -------------------------------------------------
 $branch = (& $gitExe rev-parse --abbrev-ref HEAD).Trim()
 
 if ($DryRun) {
