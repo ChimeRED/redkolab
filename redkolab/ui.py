@@ -369,12 +369,14 @@ class HHZ_PT_theme(bpy.types.Panel):
         row = layout.row(align=True)
         operation = row.operator("hhz.theme_restore_default", text="恢复默认")
         operation.scope = 'CURRENT'
+        operation = row.operator("hhz.theme_restore_default", text="全部控件")
+        operation.scope = 'WIDGET'
         operation = row.operator("hhz.theme_restore_default", text="全部视口")
         operation.scope = 'VIEWPORT'
 
         box = layout.box()
-        box.label(text="视口配色预设")
-        grid = box.grid_flow(row_major=True, columns=3, align=True)
+        box.label(text="配色预设（按钮 / 状态色）")
+        grid = box.grid_flow(row_major=True, columns=2, align=True)
         for name in theme.preset_names():
             operation = grid.operator("hhz.theme_apply_preset", text=name)
             operation.preset = name

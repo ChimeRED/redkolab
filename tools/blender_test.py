@@ -845,22 +845,52 @@ def test_theme(module):
     check(color_close(theme.get_color(current, rgb_path), (0.11, 0.22, 0.33, 1.0)),
           "改偏好设置里的颜色会实时写进主题", theme.get_color(current, rgb_path))
 
-    # 预设
-    preset_name = theme.preset_names()[0]
-    changed = theme.apply_preset(current, preset_name)
-    check(changed >= 3, "预设至少改到 3 个颜色项", changed)
-    expected = theme.preset_colors(preset_name)["view_3d.space.gradients.high_gradient"]
-    check(color_close(theme.get_color(current, rgb_path), expected),
-          "预设把视口背景改成了预期值", theme.get_color(current, rgb_path))
+    # 需求：这个功能针对的是「可互动的灰色按钮 + 选中后的蓝色按钮」，不是视口
+    grey_path = "user_interface.wcol_regular.inner"
+    blue_path = "user_interface.wcol_regular.inner_sel"
+    check(theme.TARGETS[0][2].startswith("按钮"),
+          "按钮类颜色排在列表最前面", theme.TARGETS[0])
+    check(grey_path in listed, "灰色按钮颜色在列表里")
+    check(blue_path in listed, "选中按钮颜色在列表里")
+    check(theme.component_count(current, grey_path) == 4,
+          "按钮颜色是 RGBA（4 分量）", theme.component_count(current, grey_path))
+    check(theme.has_default(grey_path) and theme.has_default(blue_path),
+          "按钮颜色记录了出厂默认值")
+    check(not theme.has_default("user_interface.wcol_state.error"),
+          "5.x 专属颜色不记录默认值（避免套到旧版上）")
+    original_grey = theme.get_color(current, grey_path)
+    original_blue = theme.get_color(current, blue_path)
 
-    # 默认值：只对视口那一组有记录（跨版本实测一致），界面色不记录
-    check(theme.has_default(rgb_path), "视口背景记录了默认值")
-    check(not theme.has_default("user_interface.wcol_menu.inner"),
-          "界面色没有记录默认值（避免把 5.x 默认值套到旧版上）")
-    check(theme.restore_default(current, rgb_path), "恢复单项默认值成功")
-    check(color_close(theme.get_color(current, rgb_path), theme.DEFAULT_COLORS[rgb_path]),
-          "恢复后与记录的默认值一致", theme.get_color(current, rgb_path))
-    check(theme.restore_viewport_defaults(current) >= 11, "批量恢复视口默认值成功")
+    # 预设：Marathon 酸性配色，改的是按钮 / 状态色
+    names = theme.preset_names()
+    check(any("Marathon" in name for name in names), "预设里有 Marathon 酸性配色", names)
+    preset_name = names[0]
+    colors = theme.preset_colors(preset_name)
+    check(blue_path in colors and grey_path in colors,
+          "预设同时覆盖灰色按钮与选中按钮", sorted(colors)[:3])
+    changed = theme.apply_preset(current, preset_name)
+    check(changed >= 20, "预设改到 20 个以上颜色项", changed)
+    check(color_close(theme.get_color(current, blue_path), colors[blue_path]),
+          "预设把「选中按钮」改成了酸性绿", theme.get_color(current, blue_path))
+    check(color_close(theme.get_color(current, grey_path), colors[grey_path]),
+          "预设把「灰色按钮」改成了近黑绿", theme.get_color(current, grey_path))
+    check(theme.get_color(current, blue_path)[1] > theme.get_color(current, blue_path)[2],
+          "酸性绿的 G 分量高于 B（确实是绿不是蓝）", theme.get_color(current, blue_path))
+
+    # hex -> 浮点 的换算（主题里存的就是显示值，不需要线性转换）
+    check(color_close(theme.hex_color("#C6FF00"), (0.7765, 1.0, 0.0, 1.0)),
+          "#C6FF00 换算正确", theme.hex_color("#C6FF00"))
+
+    # 恢复默认：按钮那一组也要能整组还原
+    check(theme.restore_default(current, blue_path), "恢复单项默认值成功")
+    check(theme.restore_widget_defaults(current) >= 20, "批量恢复控件默认值成功")
+    restored_blue = theme.get_color(current, blue_path)
+    check(restored_blue[2] > restored_blue[0],
+          "恢复默认后选中按钮回到蓝色（默认确实是蓝的）", restored_blue)
+    check(theme.has_default(rgb_path) and theme.restore_viewport_defaults(current) >= 11,
+          "视口那一组仍可批量恢复默认")
+    theme.set_color(current, grey_path, original_grey)
+    theme.set_color(current, blue_path, original_blue)
 
     # 算符存在 + 真跑一遍
     for idname in ("theme_read", "theme_apply_preset", "theme_restore_default",
@@ -874,6 +904,8 @@ def test_theme(module):
     check(result == {'FINISHED'}, "「应用预设」算符可用", result)
     result = bpy.ops.hhz.theme_restore_default(scope='VIEWPORT')
     check(result == {'FINISHED'}, "「全部视口恢复默认」算符可用", result)
+    result = bpy.ops.hhz.theme_restore_default(scope='WIDGET')
+    check(result == {'FINISHED'}, "「全部控件恢复默认」算符可用", result)
 
     # 面板挂在 N 面板里（需求：只进 N 面板）
     panel = getattr(bpy.types, "HHZ_PT_theme", None)

@@ -475,12 +475,12 @@ class HHZ_OT_theme_read(bpy.types.Operator):
 
 class HHZ_OT_theme_apply_preset(bpy.types.Operator):
     bl_idname = "hhz.theme_apply_preset"
-    bl_label = "应用视口配色预设"
-    bl_description = "一键套用一套视口配色（背景上/下 + 网格）"
+    bl_label = "应用配色预设"
+    bl_description = "一键套用一套配色（若按钮常态 / 选中色 / 状态色）"
 
     preset: bpy.props.EnumProperty(
         name="预设",
-        items=[(name, name, "套用「{}」视口配色".format(name)) for name in theme.preset_names()],
+        items=[(name, name, "套用「{}」配色".format(name)) for name in theme.preset_names()],
     )
 
     def execute(self, context):
@@ -505,12 +505,13 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
 class HHZ_OT_theme_restore_default(bpy.types.Operator):
     bl_idname = "hhz.theme_restore_default"
     bl_label = "恢复颜色默认值"
-    bl_description = "把当前颜色（或整组视口颜色）恢复为 Blender 出厂默认"
+    bl_description = "把当前颜色（或整组控件 / 视口颜色）恢复为 Blender 出厂默认"
 
     scope: bpy.props.EnumProperty(
         name="范围",
         items=(
             ('CURRENT', "当前颜色", "只恢复当前选中的这一项"),
+            ('WIDGET', "全部控件颜色", "恢复按钮与状态色（灰色按钮 / 选中蓝色那一批）"),
             ('VIEWPORT', "全部视口颜色", "恢复视口那一组的全部颜色"),
         ),
         default='CURRENT',
@@ -522,7 +523,13 @@ class HHZ_OT_theme_restore_default(bpy.types.Operator):
             self.report({'ERROR'}, "读不到当前主题")
             return {'CANCELLED'}
 
-        if self.scope == 'VIEWPORT':
+        if self.scope == 'WIDGET':
+            changed = theme.restore_widget_defaults(current)
+            if not changed:
+                self.report({'WARNING'}, "没有可恢复的控件颜色")
+                return {'CANCELLED'}
+            self.report({'INFO'}, "已恢复 {} 项控件颜色（按钮 / 状态）".format(changed))
+        elif self.scope == 'VIEWPORT':
             changed = theme.restore_viewport_defaults(current)
             if not changed:
                 self.report({'WARNING'}, "没有可恢复的视口颜色")
