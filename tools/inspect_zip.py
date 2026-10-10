@@ -29,6 +29,7 @@ EXPECTED_ENTRIES = {
     "{}/blender_manifest.toml".format(PACKAGE_NAME),
     "{}/compat.py".format(PACKAGE_NAME),
     "{}/ops.py".format(PACKAGE_NAME),
+    "{}/panels.py".format(PACKAGE_NAME),
     "{}/theme.py".format(PACKAGE_NAME),
     "{}/ui.py".format(PACKAGE_NAME),
 }

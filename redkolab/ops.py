@@ -13,7 +13,7 @@
 
 import bpy
 
-from . import compat, theme, ui
+from . import compat, panels, theme, ui
 
 # --------------------------------------------------------------------- 小工具
 
@@ -542,4 +542,166 @@ class HHZ_OT_theme_save_preferences(bpy.types.Operator):
             self.report({'ERROR'}, "保存失败：{}".format(error))
             return {'CANCELLED'}
         self.report({'INFO'}, "主题颜色已保存到偏好设置")
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------- 面板顺序算符
+
+
+class _DragReorderBase(bpy.types.Operator):
+    """按住手柄上下拖动的公共实现（不注册，只给子类用）。
+
+    目标槽位用「鼠标相对按下位置的位移 ÷ 行高」换算：面板里拿不到每一行的
+    屏幕坐标，但鼠标位移是有的，这样不用依赖任何像素级布局，也不会因为
+    主题行高不同而失效。
+
+    Blender 点击面板按钮时 invoke 可能拿到按下、也可能拿到松开，两种都兼容：
+    按下进入就是「拖到位置松手确认」，松开进入就是「移动后点一下确认」。
+    """
+
+    bl_options = {'INTERNAL'}
+
+    index: bpy.props.IntProperty(name="序号", default=0)
+
+    #: 子类指定：拖动状态键、"section" / "tab"
+    kind = "section"
+    #: 换一位需要拖多少像素
+    row_height = 20.0
+
+    def invoke(self, context, event):
+        self._items = list(self.gather(context))
+        if not 0 <= self.index < len(self._items):
+            self.report({'WARNING'}, "没有可拖动的内容")
+            return {'CANCELLED'}
+
+        self._original = list(self._items)
+        self._start_y = event.mouse_region_y
+        self._start_index = self.index
+        self._current = self.index
+        self._confirm_on_release = (event.value == 'PRESS')
+        panels.DRAG_STATE[self.kind] = {"index": self.index, "target": self.index}
+
+        try:
+            context.window_manager.modal_handler_add(self)
+        except Exception as error:
+            self.report({'ERROR'}, "无法进入拖动模式：{}".format(error))
+            return {'CANCELLED'}
+
+        if self._confirm_on_release:
+            self._set_status(context, "拖动中：上下移动鼠标换位 · 松开确认 · Esc 取消")
+        else:
+            self._set_status(context, "拖动中：上下移动鼠标换位 · 再点一下确认 · Esc 取消")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+            target = panels.target_from_drag(
+                len(self._items), self._start_index,
+                event.mouse_region_y - self._start_y, self.row_height)
+            if target != self._current:
+                self._current = target
+                self._items = panels.move_item(self._original, self._start_index, target)
+                panels.DRAG_STATE[self.kind] = {"index": self._start_index, "target": target}
+                self.commit(context, self._items)
+                compat.tag_redraw(context)
+            return {'RUNNING_MODAL'}
+
+        if event.type == 'ESC' and event.value == 'PRESS':
+            self.commit(context, self._original)
+            self._finish(context)
+            return {'CANCELLED'}
+
+        if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
+            self.commit(context, self._original)
+            self._finish(context)
+            return {'CANCELLED'}
+
+        if event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER', 'SPACE'}:
+            if self._confirm_on_release and event.value == 'PRESS':
+                return {'RUNNING_MODAL'}
+            self._finish(context)
+            return {'FINISHED'}
+
+        return {'RUNNING_MODAL'}
+
+    # -- 内部 ------------------------------------------------------------
+
+    def _finish(self, context):
+        panels.DRAG_STATE.pop(self.kind, None)
+        self._set_status(context, None)
+        compat.tag_redraw(context)
+
+    def _set_status(self, context, text):
+        try:
+            context.workspace.status_text_set(text)
+        except Exception:
+            pass
+
+    # -- 子类实现 --------------------------------------------------------
+
+    def gather(self, context):
+        return []
+
+    def commit(self, context, items):
+        pass
+
+
+class HHZ_OT_section_drag(_DragReorderBase):
+    bl_idname = "hhz.section_drag"
+    bl_label = "拖动调整分块顺序"
+    bl_description = "按住手柄上下拖动，实时调整本插件各分块在 N 面板里的顺序"
+
+    kind = "section"
+
+    def gather(self, context):
+        return panels.read_section_order(compat.get_preferences(context))
+
+    def commit(self, context, items):
+        preferences = compat.get_preferences(context)
+        if preferences is not None:
+            preferences.panel_order = ",".join(items)
+        panels.apply_section_order(items, {"HHZ_PT_order": panels.ORDER_PANEL_ORDER})
+
+
+class HHZ_OT_tab_drag(_DragReorderBase):
+    bl_idname = "hhz.tab_drag"
+    bl_label = "拖动调整标签页顺序"
+    bl_description = "按住手柄上下拖动，调整侧栏里各插件标签页的顺序（会写入其它插件的面板 bl_order）"
+
+    kind = "tab"
+    row_height = 19.0
+
+    def gather(self, context):
+        return panels.display_tab_order(compat.get_preferences(context))
+
+    def commit(self, context, items):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            return
+        preferences.tab_order = ",".join(items)
+        _, backup = panels.apply_tab_order(items, panels.load_backup(preferences.tab_backup))
+        preferences.tab_backup = panels.dump_backup(backup)
+
+
+class HHZ_OT_tab_restore(bpy.types.Operator):
+    bl_idname = "hhz.tab_restore"
+    bl_label = "恢复默认标签页顺序"
+    bl_description = "把拖动时改过的其它插件面板 bl_order 还原成原值"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到插件偏好设置")
+            return {'CANCELLED'}
+
+        backup = panels.load_backup(preferences.tab_backup)
+        if not backup:
+            self.report({'WARNING'}, "没有记录过原始顺序，不需要恢复")
+            return {'CANCELLED'}
+
+        restored = panels.restore_tab_order(backup)
+        preferences.tab_backup = ""
+        preferences.tab_order = ""
+        self.report({'INFO'}, "已还原 {} 个面板的原始顺序".format(restored))
+        compat.tag_redraw(context)
         return {'FINISHED'}

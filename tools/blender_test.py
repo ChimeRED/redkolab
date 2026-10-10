@@ -377,6 +377,15 @@ def test_registration(module_name, module):
         check(panel.bl_space_type == 'VIEW_3D' and panel.bl_region_type == 'UI',
               "N 面板挂在 3D 视图侧栏")
 
+    for idname in ("HHZ_PT_theme", "HHZ_PT_hotkey", "HHZ_PT_settings", "HHZ_PT_order"):
+        sub = getattr(bpy.types, idname, None)
+        check(sub is not None, "子面板 {} 已注册".format(idname))
+        if sub is not None:
+            check(getattr(sub, "bl_parent_id", "") == "HHZ_PT_main",
+                  "{} 挂在主面板下".format(idname), getattr(sub, "bl_parent_id", ""))
+            check(getattr(sub, "bl_category", "") == "红红子lab",
+                  "{} 属于同一个 N 面板标签页".format(idname), getattr(sub, "bl_category", ""))
+
 
 def test_icons(module):
     section("图标名合法性（避免界面报错）")
@@ -814,9 +823,13 @@ def test_theme(module):
 
 
 def pie_operator_idnames(source):
-    """静态解析饼菜单类里出现的算符 idname。"""
+    """静态解析某个 Panel/Menu 类里出现的算符 idname。"""
+    return class_operator_idnames(source, "HHZ_MT_pie")
+
+
+def class_operator_idnames(source, class_name):
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ClassDef) and node.name == "HHZ_MT_pie":
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
             found = set()
             for inner in ast.walk(node):
                 if (isinstance(inner, ast.Call)
@@ -826,21 +839,128 @@ def pie_operator_idnames(source):
                         and isinstance(inner.args[0], ast.Constant)):
                     found.add(inner.args[0].value)
             return found
-    return None
+    return set()
 
 
 def test_pie_unchanged(module):
-    section("饼菜单内容（需求：主题功能不进饼菜单）")
+    section("饼菜单内容（需求：设置入口挪到 N 面板，主题功能不进饼菜单）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
-        found = pie_operator_idnames(handle.read())
+        source = handle.read()
+
+    found = pie_operator_idnames(source)
     expected = {
         "hhz.remove_all_materials",
         "hhz.apply_all_modifiers",
         "hhz.remove_all_modifiers",
-        "hhz.open_preferences",
     }
-    check(found == expected, "饼菜单仍然只有原来四项", sorted(found) if found else found)
+    check(found == expected, "饼菜单只剩三个功能入口（设置已移出）",
+          sorted(found) if found else found)
+
+    in_settings_panel = class_operator_idnames(source, "HHZ_PT_settings")
+    check("hhz.open_preferences" in in_settings_panel,
+          "设置入口出现在 N 面板的「插件设置」子面板里", sorted(in_settings_panel))
+    check("hhz.open_preferences" not in found, "设置入口确实不在饼菜单里")
+
+
+def test_panel_order(module):
+    section("功能：N 面板顺序（拖动排序）")
+    panels = module.panels
+    ui = module.ui
+    context = bpy.context
+
+    # ---- 列表模型（纯逻辑，可精确断言）----
+    check(len(panels.SECTIONS) >= 3, "可排序分块至少 3 个", len(panels.SECTIONS))
+    check(panels.parse_order("") == list(panels.DEFAULT_SECTION_ORDER),
+          "空配置回落到默认顺序", panels.parse_order(""))
+    check(panels.parse_order("settings,theme") ==
+          ["settings", "theme", "hotkey"], "解析顺序并补齐缺失分块",
+          panels.parse_order("settings,theme"))
+    check(panels.parse_order("nope,theme,theme,settings") ==
+          ["theme", "settings", "hotkey"], "未知项丢弃、重复项去重",
+          panels.parse_order("nope,theme,theme,settings"))
+    check(panels.move_item(["a", "b", "c"], 0, 2) == ["b", "c", "a"], "向下移动元素")
+    check(panels.move_item(["a", "b", "c"], 2, 0) == ["c", "a", "b"], "向上移动元素")
+    check(panels.move_item(["a", "b"], 1, 1) == ["a", "b"], "原地不动时不变")
+
+    # ---- 拖动位移 -> 目标槽位 ----
+    check(panels.target_from_drag(3, 0, 0) == 0, "没有位移就不换位")
+    check(panels.target_from_drag(3, 0, 20, 20.0) == 1, "向下拖一行换到下一位")
+    check(panels.target_from_drag(3, 2, -40, 20.0) == 0, "向上拖两行换到最上")
+    check(panels.target_from_drag(3, 0, 999, 20.0) == 2, "超界被夹到末尾")
+    check(panels.target_from_drag(3, 2, -999, 20.0) == 0, "超界被夹到开头")
+
+    # ---- 顺序真的写进了面板类的 bl_order ----
+    preferences = module.compat.get_preferences()
+    check(preferences is not None, "偏好设置可访问")
+    preferences.panel_order = "settings,theme,hotkey"
+    check(getattr(bpy.types, "HHZ_PT_settings", None).bl_order == 0,
+          "第 1 位分块的 bl_order = 0", getattr(bpy.types.HHZ_PT_settings, "bl_order", None))
+    check(bpy.types.HHZ_PT_theme.bl_order == 1, "第 2 位分块的 bl_order = 1",
+          bpy.types.HHZ_PT_theme.bl_order)
+    check(bpy.types.HHZ_PT_hotkey.bl_order == 2, "第 3 位分块的 bl_order = 2",
+          bpy.types.HHZ_PT_hotkey.bl_order)
+    check(bpy.types.HHZ_PT_order.bl_order == panels.ORDER_PANEL_ORDER,
+          "顺序编辑器被固定在最后", bpy.types.HHZ_PT_order.bl_order)
+
+    order = ui.apply_panel_order(context)
+    check(order == ["settings", "theme", "hotkey"], "注册时的应用函数返回当前顺序", order)
+
+    preferences.panel_order = ",".join(panels.DEFAULT_SECTION_ORDER)
+    ui.apply_panel_order(context)
+
+    # ---- 侧栏标签页 ----
+    names = panels.tab_names()
+    check(module.compat.ADDON_NAME in names, "标签页列表里有本插件的标签页", names)
+    print("  当前侧栏标签页：{}".format(names))
+    tabs = dict(panels.collect_tabs())
+    own = tabs.get(module.compat.ADDON_NAME, [])
+    check(any(panel.__name__ == "HHZ_PT_main" for panel in own),
+          "本插件的主面板被识别为该标签页的顶层面板", [p.__name__ for p in own])
+    check(all(not getattr(panel, "bl_parent_id", "") for _, group in panels.collect_tabs() for panel in group),
+          "子面板没有被当成独立标签页")
+
+    display = panels.display_tab_order(preferences)
+    check(sorted(display) == sorted(names), "显示顺序包含全部标签页", display)
+
+    # 写顺序 -> 记录备份 -> 还原，全链路走一遍
+    if len(names) >= 2:
+        reversed_names = list(reversed(names))
+        changed, backup = panels.apply_tab_order(reversed_names, {})
+        check(changed >= len(reversed_names), "标签页顺序写入覆盖了所有标签页", changed)
+        check(bool(backup), "记录下了各面板的原 bl_order", len(backup))
+        check(panels.load_backup(panels.dump_backup(backup)) == backup,
+              "备份序列化/反序列化一致")
+
+        first = dict(panels.collect_tabs())[reversed_names[0]]
+        check(all(panel.bl_order // panels.TAB_ORDER_STEP == 0 for panel in first),
+              "拖到第 1 位的标签页被放进第 0 组",
+              [panel.bl_order for panel in first])
+        last = dict(panels.collect_tabs())[reversed_names[-1]]
+        check(all(panel.bl_order // panels.TAB_ORDER_STEP == len(reversed_names) - 1
+                  for panel in last),
+              "拖到最后的标签页被放进最后一组",
+              [panel.bl_order for panel in last])
+
+        restored = panels.restore_tab_order(backup)
+        check(restored >= len(backup) - 1, "还原覆盖了备份里的面板", restored)
+        mismatches = []
+        for class_name, value in backup.items():
+            panel = getattr(bpy.types, class_name, None)
+            if panel is None:
+                mismatches.append("{}：注册名找不到".format(class_name))
+            elif int(panel.bl_order) != int(value):
+                mismatches.append("{}：{} != {}".format(class_name, panel.bl_order, value))
+        check(not mismatches, "还原后的 bl_order 与备份一致", mismatches[:5])
+    else:
+        skip("侧栏里只有一个标签页，跳过标签页排序测试")
+
+    # ---- 算符存在 ----
+    category = getattr(bpy.ops, "hhz", None)
+    for idname in ("section_drag", "tab_drag", "tab_restore"):
+        check(category is not None and hasattr(category, idname),
+              "算符 hhz.{} 存在".format(idname))
+    check(not panels.DRAG_STATE, "拖动状态没有残留", panels.DRAG_STATE)
 
 
 def test_unregister(module_name, module):
@@ -888,6 +1008,7 @@ def main():
     run("一键删除所有修改器", test_remove_modifiers)
     run("主题颜色（N 面板）", test_theme, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
+    run("N 面板顺序（拖动排序）", test_panel_order, module)
     run("算符 poll", test_poll)
     run("卸载清理", test_unregister, module_name, module)
 

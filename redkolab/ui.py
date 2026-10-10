@@ -14,7 +14,7 @@
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
 
-from . import compat, theme
+from . import compat, panels, theme
 
 #: 饼菜单的 bl_idname（必须以 _MT_ 命名，Menu 才能注册成功）
 PIE_IDNAME = "OBJECT_MT_hhz_pie"
@@ -147,6 +147,40 @@ def _on_theme_color_update(self, context):
     theme.write_from_preferences(context, self)
 
 
+def _on_panel_order_update(self, context):
+    """分块顺序变了就重新写 bl_order。"""
+    apply_panel_order(context)
+
+
+def _on_tab_order_update(self, context):
+    """标签页顺序变了就重新写各面板的 bl_order（并继续记录原值）。"""
+    if not self.tab_order:
+        return
+    names = panels.parse_order(self.tab_order, valid_ids=panels.tab_names())
+    _, backup = panels.apply_tab_order(names, panels.load_backup(self.tab_backup))
+    self.tab_backup = panels.dump_backup(backup)
+
+
+def apply_panel_order(context=None):
+    """把偏好设置里的顺序写进各面板的 bl_order。
+
+    注册时调用一次（bl_order 是运行时写进类里的，重启后会丢，必须重新应用），
+    拖动排序时也会调用。
+    """
+    preferences = compat.get_preferences(context)
+    order = panels.read_section_order(preferences)
+    panels.apply_section_order(order, {"HHZ_PT_order": panels.ORDER_PANEL_ORDER})
+
+    if preferences is not None:
+        stored_tabs = getattr(preferences, "tab_order", "")
+        if stored_tabs:
+            names = panels.parse_order(stored_tabs, valid_ids=panels.tab_names())
+            _, backup = panels.apply_tab_order(
+                names, panels.load_backup(getattr(preferences, "tab_backup", "")))
+            preferences.tab_backup = panels.dump_backup(backup)
+    return order
+
+
 def _on_preferences_update(self, context):
     refresh_keymap()
 
@@ -162,11 +196,10 @@ class HHZ_MT_pie(bpy.types.Menu):
         layout = self.layout
         pie = layout.menu_pie()
 
-        # 饼菜单的四个方向：左 / 右 / 下 / 上
+        # 三个方向：左 / 右 / 下 —— 插件设置已按需求挪到 N 面板，不再占饼菜单
         pie.operator("hhz.remove_all_materials", icon='MATERIAL')
         pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')
         pie.operator("hhz.remove_all_modifiers", icon='TRASH')
-        pie.operator("hhz.open_preferences", icon='SETTINGS')
 
 
 # ------------------------------------------------------------------- N 面板
@@ -188,21 +221,6 @@ class HHZ_PT_main(bpy.types.Panel):
         column.operator("hhz.remove_all_modifiers", icon='TRASH')
 
         layout.separator()
-        box = layout.box()
-
-        key_type, ctrl, shift, alt, oskey, enabled = _hotkey_settings(context)
-        row = box.row(align=True)
-        row.label(text="饼菜单：")
-        if enabled:
-            row.label(text=compat.key_label(key_type, ctrl, shift, alt, oskey))
-        else:
-            row.label(text="已禁用")
-        row.operator("hhz.capture_hotkey", text="", icon='FILE_REFRESH')
-
-        call = box.operator("wm.call_menu_pie", text="呼出饼菜单", icon='COLLAPSEMENU')
-        call.name = PIE_IDNAME
-
-        layout.separator()
         if context.mode != 'OBJECT':
             layout.label(text="请先切回物体模式", icon='ERROR')
             return
@@ -222,6 +240,109 @@ class HHZ_PT_main(bpy.types.Panel):
                 len(targets), slot_count, modifier_count),
             icon='INFO',
         )
+
+
+class HHZ_PT_hotkey(bpy.types.Panel):
+    """饼菜单与快捷键（属于可拖动排序的分块）。"""
+
+    bl_idname = "HHZ_PT_hotkey"
+    bl_label = "饼菜单与快捷键"
+    bl_parent_id = "HHZ_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = compat.ADDON_NAME
+
+    def draw(self, context):
+        layout = self.layout
+
+        key_type, ctrl, shift, alt, oskey, enabled = _hotkey_settings(context)
+        row = layout.row(align=True)
+        row.label(text="饼菜单：")
+        if enabled:
+            row.label(text=compat.key_label(key_type, ctrl, shift, alt, oskey))
+        else:
+            row.label(text="已禁用")
+        row.operator("hhz.capture_hotkey", text="", icon='FILE_REFRESH')
+
+        call = layout.operator("wm.call_menu_pie", text="呼出饼菜单", icon='COLLAPSEMENU')
+        call.name = PIE_IDNAME
+
+        layout.label(text="饼菜单里只有上面三个功能", icon='INFO')
+
+
+class HHZ_PT_settings(bpy.types.Panel):
+    """插件设置（属于可拖动排序的分块）。
+
+    这个入口原来放在饼菜单里，按需求挪到 N 面板。
+    """
+
+    bl_idname = "HHZ_PT_settings"
+    bl_label = "插件设置"
+    bl_parent_id = "HHZ_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = compat.ADDON_NAME
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.operator("hhz.open_preferences", icon='SETTINGS')
+
+        column = layout.column(align=True)
+        column.label(text="{} · {}".format(compat.ADDON_NAME, compat.ADDON_NAME_EN))
+        column.label(text="支持 Blender {}+ · 当前 {}".format(
+            ".".join(str(part) for part in compat.MIN_BLENDER_VERSION),
+            compat.VERSION_STRING,
+        ))
+
+
+class HHZ_PT_order(bpy.types.Panel):
+    """面板顺序：拖动调整本插件分块与侧栏标签页的顺序（固定排在最后）。"""
+
+    bl_idname = "HHZ_PT_order"
+    bl_label = "面板顺序"
+    bl_parent_id = "HHZ_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = compat.ADDON_NAME
+
+    def draw(self, context):
+        layout = self.layout
+
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            layout.label(text="读不到插件偏好设置", icon='ERROR')
+            return
+
+        # ---- 本插件的分块 ----
+        box = layout.box()
+        box.label(text="本插件的分块")
+        section_state = panels.DRAG_STATE.get("section") or {}
+        for index, section_id in enumerate(panels.read_section_order(preferences)):
+            row = box.row(align=True)
+            handle = row.operator("hhz.section_drag", text="", icon='GRIP')
+            handle.index = index
+            row.label(text=panels.section_label(section_id))
+            if section_state.get("target") == index:
+                row.alert = True
+        box.label(text="按住手柄上下拖动，松开确认", icon='INFO')
+
+        # ---- 侧栏标签页 ----
+        box = layout.box()
+        box.label(text="侧栏标签页")
+        tab_state = panels.DRAG_STATE.get("tab") or {}
+        tab_names = panels.display_tab_order(preferences)
+        if len(tab_names) < 2:
+            box.label(text="侧栏里还没有其它标签页", icon='INFO')
+        for index, name in enumerate(tab_names):
+            row = box.row(align=True)
+            handle = row.operator("hhz.tab_drag", text="", icon='GRIP')
+            handle.index = index
+            row.label(text=name)
+            if tab_state.get("target") == index:
+                row.alert = True
+        box.operator("hhz.tab_restore", icon='LOOP_BACK')
+        box.label(text="会改写其它插件的面板 bl_order，可一键还原", icon='ERROR')
 
 
 class HHZ_PT_theme(bpy.types.Panel):
@@ -329,6 +450,23 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         max=1.0,
         default=(0.33, 0.33, 0.33, 1.0),
         update=_on_theme_color_update,
+    )
+    panel_order: StringProperty(
+        name="分块顺序",
+        description="本插件各分块在 N 面板里的先后顺序（逗号分隔，拖动排序时自动维护）",
+        default=",".join(panels.DEFAULT_SECTION_ORDER),
+        update=_on_panel_order_update,
+    )
+    tab_order: StringProperty(
+        name="标签页顺序",
+        description="侧栏标签页的期望顺序（逗号分隔，拖动排序时自动维护）",
+        default="",
+        update=_on_tab_order_update,
+    )
+    tab_backup: StringProperty(
+        name="标签页原顺序备份",
+        description="拖动排序前记录的各插件面板 bl_order 原值，用于一键还原",
+        default="",
     )
 
     def hotkey_label(self):
