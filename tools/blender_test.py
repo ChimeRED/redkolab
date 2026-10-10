@@ -1047,6 +1047,44 @@ def test_theme(module):
         check(not low_contrast, "预设「{}」每个家族的文字/底色对比都够".format(preset),
               low_contrast[:6])
 
+        # 「选项类」三个家族的标签不在选中块上（只有小方块 / 小圆点用 inner_sel 上色），
+        # 所以它们的 text_sel 必须与**每一个可能落到的底色**都有足够亮度差，
+        # 否则就是"弹出面板里的选项是黑字落深底，看不见"。
+        option_problems = []
+        for option_prefix in theme.OPTION_BLOCK_FAMILIES:
+            option_text = colors.get(theme.family_path(option_prefix, "text_sel"))
+            if option_text is None:
+                option_problems.append("{}：没给选中文字色".format(option_prefix))
+                continue
+            for back_path, back_color in theme.option_label_backdrops(colors, option_prefix):
+                if abs(theme.luminance(back_color) - theme.luminance(option_text)) < 0.3:
+                    option_problems.append("{}：标签落 {} 上亮度差不足".format(
+                        option_prefix, back_path))
+        check(not option_problems,
+              "预设「{}」选项类家族的标签文字在各底色上都读得清".format(preset),
+              option_problems[:6])
+
+    # 3D 视图里当"参照物"的辅助元素不许被预设压暗 —— 压暗就没法和默认一样明显。
+    # 修法不是"换成另一个猜的颜色"，而是根本上不在预设里覆盖它：
+    # 这样套用预设之后，基面网格线与法线保持出厂值（= 与默认一样明显），
+    # 想调仍可在面板的「视口 / 3D 编辑模式」分组里单独改（两项仍在清单里）。
+    dimmed_helpers = []
+    for preset in theme.preset_names():
+        preset_colors = theme.preset_colors(preset) or {}
+        for helper_path in theme.VIEWPORT_HELPERS:
+            if helper_path in preset_colors:
+                dimmed_helpers.append("{} 覆盖了 {}".format(preset, helper_path))
+    check(not dimmed_helpers, "四套预设都不覆盖视口辅助元素（它们必须和默认一样明显）",
+          dimmed_helpers)
+    check("view_3d.grid" in theme.default_paths()
+          and color_close(theme.default_of("view_3d.grid"),
+                          theme.DEFAULT_COLORS["view_3d.grid"]),
+          "基面网格线仍记录着出厂默认值（恢复默认能还原它）")
+    check(theme.VIEWPORT_HELPERS and
+          all(helper in theme.default_paths() for helper in theme.VIEWPORT_HELPERS),
+          "被列为「不许压暗」的辅助元素都有出厂默认值记录（不猜颜色）",
+          theme.VIEWPORT_HELPERS)
+
     # 真套一次，直接查实际主题里的对比度
     theme.apply_colors(current, theme.preset_colors(theme.preset_names()[0]) or {})
     for family_prefix, _label in theme.WIDGET_FAMILIES[:6]:
@@ -1325,21 +1363,34 @@ def test_theme(module):
           "批量里的灰色项仍是灰的", batch_low["c"])
     check(theme.desaturate_colors(None, 0.4) == {}, "批量降饱和对空输入返回空字典")
 
-    # 每个预设：高饱和的颜色在 0.4 倍之后都要明显更灰；原本够亮的底色不能变暗到看不清
+    # 每个预设：高饱和的颜色在 0.4 倍之后都要明显更灰；降饱和之后
+    # 底色与它**实际配的那支文字色**仍要够对比（不能只盯着"浅底配深字"这一种组合：
+    # 四套预设的选中态是"深底配浅字"，旧写法会把它们误判成问题）。
     not_greyer = []
-    light_thin = []
+    thin_after_desaturate = []
     for name in theme.preset_names():
-        for path, color in (theme.preset_colors(name) or {}).items():
+        preset_colors = theme.preset_colors(name) or {}
+        for path, color in preset_colors.items():
             full = theme.desaturate_color(color, 1.0)
             low = theme.desaturate_color(color, 0.4)
             if (theme.saturation_of(full) > 0.2
                     and theme.saturation_of(low) >= theme.saturation_of(full) * 0.6):
                 not_greyer.append("{}:{}".format(name, path))
-            if (theme.luminance(full) >= 0.45
-                    and theme.readable_text_color(low) != theme.TEXT_ON_LIGHT):
-                light_thin.append("{}:{}".format(name, path))
+        for family_prefix, _label in theme.WIDGET_FAMILIES:
+            for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+                background = preset_colors.get(theme.family_path(family_prefix, background_key))
+                text_color = preset_colors.get(theme.family_path(family_prefix, text_key))
+                if background is None or text_color is None:
+                    continue
+                pale_background = theme.desaturate_color(background, 0.4)
+                pale_text = theme.desaturate_color(text_color, 0.4)
+                if abs(theme.luminance(pale_background)
+                       - theme.luminance(pale_text)) < 0.3:
+                    thin_after_desaturate.append("{}.{}".format(family_prefix, background_key))
     check(not not_greyer, "每个预设里高饱和的颜色在 0.4 倍后都明显更灰", not_greyer[:6])
-    check(not light_thin, "降饱和没有把浅色底压暗到看不清深色字", light_thin[:6])
+    check(not thin_after_desaturate,
+          "降饱和到 40% 之后，预设自己的文字/底色对比仍然够（浅底深字与深底浅字都不糊）",
+          thin_after_desaturate[:6])
 
     # 真滑杆：40% 的选中色必须比 100% 更灰，而且反复套用不累积
     original_saturation = float(preferences.preset_saturation)

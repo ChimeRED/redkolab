@@ -919,6 +919,101 @@ def family_contrast_report(theme, prefix):
     return problems
 
 
+#: 视口里当"参照物"的辅助元素：基面网格线（grid）与法线（normal）。
+#: 这两项原本被预设覆盖成"半透明暗色 / 低饱和冷色"，比出厂值更暗 ——
+#: 结果就是"网格线被减淡、法线看不清"。四套预设一律**不覆盖**它们，
+#: 套用后保持出厂默认值（= 与默认一样明显）；它们仍在颜色清单里，
+#: 用户想单独调可以自己调，只是"预设"不该替用户把它们调暗。
+#: 对应出厂默认值见 ``DEFAULT_COLORS["view_3d.grid"]``（真机 dump，不是猜的）。
+#:
+#: 不在这一组里的：``view_3d.wire_edit`` / ``view_3d.vertex_active`` 之类被预设
+#: 改的是**提亮**（出厂是纯黑，预设给浅灰或纯白），不是压暗，所以不适用本约束。
+VIEWPORT_HELPERS = (
+    "view_3d.grid",
+    "view_3d.normal",
+)
+
+#: 「标签与选中块分离」的控件家族：Blender 里这三类按钮的**标签文字不在选中块上**，
+#: 只有那个小方块 / 小圆点 / 开关体用 ``inner_sel`` 填色，标签仍然读 ``text_sel``（源码依据：
+#: ``interface_widgets.cc`` 的 ``widget_state()`` 把 ``inner``/``text`` 换成 ``inner_sel``/
+#: ``text_sel``，随后 ``widget_optionbut()`` 把绘制矩形收成左边那个小方块、
+#: ``widget_radiobut()`` 只画圆点 —— 文字都落在矩形之外）。
+OPTION_BLOCK_FAMILIES = ("wcol_option", "wcol_radio", "wcol_toggle")
+
+#: 选项块（小方块 / 圆点 / 开关体）相对强调色的亮度倍数。
+#: 0.6 是实算出来的：四套预设的强调色按 0.6 调暗后亮度都在 0.45 上下，
+#: 既让**选中块自身仍是醒目色**（与深色面板有对比，看得出选没选），
+#: 又让上面的浅色标签文字满足「文字 / 底色亮度差 >= 0.3」（预设必须成对给色的那条不变量）。
+OPTION_BLOCK_FACTOR = 0.6
+
+#: 选项类家族的标签文字色（选中态）：用设计 Token 里的主文字色，浅灰白。
+#: 不再用 ``TEXT_ON_ACCENT``（近黑）—— 那会把标签画成黑字落深色面板。
+OPTION_LABEL_COLOR = TOKENS["TEXT_PRIMARY"]
+
+
+def _option_block_override(block_color, label_color):
+    """修正「选项类」三个家族的选中态配色，返回 ``{路径: 颜色}``。
+
+    问题：预设给**每个**家族都配了 ``text_sel = TEXT_ON_ACCENT``（近黑），
+    但复选 / 单选圈 / 开关的标签文字也是用 ``text_sel`` 画的 ——
+    于是黑字落在深色面板上，等于看不见（视口操控器弹出面板里就是这样）。
+
+    修法：标签统一用浅色（``TEXT_PRIMARY`` 这类浅灰白）保证在深色面板上可读；
+    选中块用同一强调色调暗后的颜色，保持"选中块仍然是强调色"的语义，
+    同时让「选中块上的小对勾」在深浅两个方向都还看得见。
+
+    注意**浅色标签要用在四套预设上**，包括浅色底那套：标签落的是菜单 / 饼菜单 /
+    提示框的底色，这几处四套预设都是深色（``wcol_menu_back.inner`` 等），
+    只有浅色字才读得清；浅灰卡自己的卡片底色只用在别的控件上。
+    """
+    colors = {}
+    for prefix in OPTION_BLOCK_FAMILIES:
+        colors[family_path(prefix, "inner_sel")] = block_color
+        colors[family_path(prefix, "text_sel")] = label_color
+    return colors
+
+
+def option_label_backdrops(colors, prefix):
+    """选项类家族的**标签**可能落在哪些底色上（按顺序返回 ``(路径, 颜色)``）。
+
+    复选 / 单选圈 / 开关的标签不在选中块上，而是落在工具提示、菜单、饼菜单或
+    普通面板底上（源码依据见 :data:`OPTION_BLOCK_FAMILIES`）。这些底色互不相同，
+    所以一组预设必须让标签文字在**每一个**底色上都读得清：只要有一个底色与文字的
+    亮度差低于 0.3，就会出现"弹出面板里那行字看不见"。选中块自身的底色也算一份 ——
+    万一某个控件把文字画在块上，同样不能糊。
+
+    不收 ``wcol_menu.inner``：那一个是 ``UI_WTYPE_MENU_RADIO`` 系的菜单行底色，
+    走的是各自的 ``wcol_menu.text_sel``，不是本家族的标签（``interface_widgets.cc``
+    第 4616 行起）。
+    """
+    result = []
+    for path in (family_path(prefix, "inner_sel"),
+                 "user_interface.wcol_menu_back.inner",
+                 "user_interface.wcol_pie_menu.inner",
+                 "user_interface.panel_back"):
+        color = colors.get(path)
+        if color is not None:
+            result.append((path, color))
+    return result
+
+
+def option_label_contrast_problems(colors, prefix, threshold=0.3):
+    """选项类家族标签文字的可读性检查，返回问题描述列表。
+
+    对每个可能的标签底色算一次亮度差，取**最差**的那个与阈值比 ——
+    这就是 `"字看不清"` 的机械化判据，和 :func:`family_contrast_report` 同一个阈值。
+    """
+    text_color = colors.get(family_path(prefix, "text_sel"))
+    if text_color is None:
+        return ["{}：预设没给选中文字色".format(prefix)]
+    problems = []
+    for path, background in option_label_backdrops(colors, prefix):
+        difference = abs(luminance(background) - luminance(text_color))
+        if difference < threshold:
+            problems.append("{}：标签与 {} 亮度差只有 {:.2f}".format(prefix, path, difference))
+    return problems
+
+
 def _marathon_preset(style):
     """按游戏实拍图生成三套配色。
 
@@ -978,6 +1073,19 @@ def _marathon_preset(style):
     })
 
     colors.update(global_highlight_colors(hex_color(accent)))
+    if style == "card":
+        # 浅灰卡这套里，菜单底 / 选中行底仍是深色（``panel`` / ``ink``），
+        # 而菜单里的复选、单选圈走的是 ``wcol_menu_back.text`` 与 ``.text_sel``
+        # （``interface_widgets.cc`` 的 ``widget_state_option_menu()`` 会用它覆盖家族色），
+        # 所以这两个必须换成浅色，否则就是"弹出菜单里的选项是黑字落深底"。
+        # 顺带把**菜单选中行**底色压深：它上面配的就是这个浅色（差 0.75/0.79），
+        # 而原来的浅色选中行 + 浅色文字只有 0.13，改完两头都读得清。
+        colors["user_interface.wcol_menu_back.text"] = hex_color(MARATHON["text"])
+        colors["user_interface.wcol_menu_back.text_sel"] = hex_color(MARATHON["text"])
+        colors["user_interface.wcol_menu_back.inner_sel"] = hex_color(MARATHON["ink"])
+    # 选项类家族的标签文字：四套预设统一用浅色（理由见 _option_block_override）
+    colors.update(_option_block_override(scale_color(hex_color(accent), OPTION_BLOCK_FACTOR),
+                                         hex_color(OPTION_LABEL_COLOR)))
     colors.update(_marathon_frame_colors(hex_color(accent)))
     return {path: color for path, color in colors.items() if color is not None}
 
@@ -1056,8 +1164,10 @@ def _marathon_preset_work():
         "view_3d.edge_crease": hex_color(TOKENS["ACCENT_TERTIARY_CALM"]),
         "view_3d.edge_bevel": hex_color(TOKENS["STATE_WARNING"]),
         "view_3d.wire_edit": hex_color(TOKENS["TEXT_SECONDARY"]),
-        "view_3d.grid": hex_color(TOKENS["BORDER_SUBTLE"], 0.5),
-        "view_3d.normal": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
+        # 基面网格线（view_3d.grid）与法线（view_3d.normal）**故意不覆盖**：
+        # 预设原来把它们写成"半透明暗色 / 低饱和冷色"，比出厂值暗，
+        # 用户反馈"基面线被减淡"。辅助元素保持出厂值 = 与默认一样明显；
+        # 想调仍可在面板的「视口 / 3D 编辑模式」分组里单独改（本项仍在清单里）。
         # 状态色语义
         "user_interface.wcol_state.inner_changed": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
         "user_interface.wcol_state.inner_changed_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
@@ -1071,6 +1181,10 @@ def _marathon_preset_work():
         "user_interface.wcol_state.inner_overridden_sel": hex_color(TOKENS["STATE_ERROR"]),
     })
     colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
+    # 选项类家族的标签文字：四套预设统一用浅色（理由见 _option_block_override）
+    colors.update(_option_block_override(
+        scale_color(hex_color(TOKENS["ACCENT_PRIMARY_CALM"]), OPTION_BLOCK_FACTOR),
+        hex_color(OPTION_LABEL_COLOR)))
     colors.update(_marathon_frame_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
     return {path: color for path, color in colors.items() if color is not None}
 
