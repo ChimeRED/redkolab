@@ -1012,21 +1012,24 @@ def test_panel_order(module):
     preferences = module.compat.get_preferences()
     check(preferences is not None, "偏好设置可访问")
     preferences.panel_order = "settings,theme,hotkey"
+    check(bpy.types.HHZ_PT_pages.bl_order == panels.PAGES_PANEL_ORDER,
+          "分页标签条固定在 bl_order={}".format(panels.PAGES_PANEL_ORDER),
+          bpy.types.HHZ_PT_pages.bl_order)
     check(bpy.types.HHZ_PT_main.bl_order == panels.MAIN_PANEL_ORDER,
-          "主面板固定在最前（bl_order={}）".format(panels.MAIN_PANEL_ORDER),
+          "主面板紧随其后（bl_order={}）".format(panels.MAIN_PANEL_ORDER),
           bpy.types.HHZ_PT_main.bl_order)
-    check(getattr(bpy.types, "HHZ_PT_settings", None).bl_order == 1,
-          "第 1 位面板的 bl_order = 1", getattr(bpy.types.HHZ_PT_settings, "bl_order", None))
-    check(bpy.types.HHZ_PT_theme.bl_order == 2, "第 2 位面板的 bl_order = 2",
+    check(getattr(bpy.types, "HHZ_PT_settings", None).bl_order == 2,
+          "第 1 位面板的 bl_order = 2", getattr(bpy.types.HHZ_PT_settings, "bl_order", None))
+    check(bpy.types.HHZ_PT_theme.bl_order == 3, "第 2 位面板的 bl_order = 3",
           bpy.types.HHZ_PT_theme.bl_order)
-    check(bpy.types.HHZ_PT_hotkey.bl_order == 3, "第 3 位面板的 bl_order = 3",
+    check(bpy.types.HHZ_PT_hotkey.bl_order == 4, "第 3 位面板的 bl_order = 4",
           bpy.types.HHZ_PT_hotkey.bl_order)
     check(bpy.types.HHZ_PT_order.bl_order == panels.ORDER_PANEL_ORDER,
           "顺序编辑器被固定在最后", bpy.types.HHZ_PT_order.bl_order)
 
-    values = [bpy.types.HHZ_PT_main.bl_order, bpy.types.HHZ_PT_settings.bl_order,
-              bpy.types.HHZ_PT_theme.bl_order, bpy.types.HHZ_PT_hotkey.bl_order,
-              bpy.types.HHZ_PT_order.bl_order]
+    values = [bpy.types.HHZ_PT_pages.bl_order, bpy.types.HHZ_PT_main.bl_order,
+              bpy.types.HHZ_PT_settings.bl_order, bpy.types.HHZ_PT_theme.bl_order,
+              bpy.types.HHZ_PT_hotkey.bl_order, bpy.types.HHZ_PT_order.bl_order]
     check(len(set(values)) == len(values), "各面板 bl_order 互不相同（顺序无歧义）", values)
 
     order = ui.apply_panel_order(context)
@@ -1050,16 +1053,17 @@ def test_panel_order(module):
 
     # ---- 注册顺序那一层（3D 视图侧栏真正认的）----
     keys = panels.our_panel_keys(["theme", "settings", "hotkey"])
-    check(keys[:1] == ["HHZ_PT_main"], "主面板排在最前", keys)
+    check(keys[:2] == ["HHZ_PT_pages", "HHZ_PT_main"],
+          "分页标签条与主面板排在最前", keys)
     check(keys[-1] == "HHZ_PT_order", "顺序编辑器排在最后", keys)
-    check(keys[1:4] == ["HHZ_PT_theme", "HHZ_PT_settings", "HHZ_PT_hotkey"],
+    check(keys[2:5] == ["HHZ_PT_theme", "HHZ_PT_settings", "HHZ_PT_hotkey"],
           "可排序面板按给定顺序展开", keys)
 
     registered, failures = panels.reregister_our_panels(["theme", "settings", "hotkey"])
-    check(registered == 5 and not failures, "重新注册本插件 5 个面板成功",
+    check(registered == 6 and not failures, "重新注册本插件 6 个面板成功",
           "{} 个 / {}".format(registered, failures))
     check(all(getattr(bpy.types, key, None) is not None
-              for key in ("HHZ_PT_main", "HHZ_PT_theme", "HHZ_PT_hotkey",
+              for key in ("HHZ_PT_pages", "HHZ_PT_main", "HHZ_PT_theme", "HHZ_PT_hotkey",
                           "HHZ_PT_settings", "HHZ_PT_order")),
           "重新注册后所有面板类都还在")
     check(sorted(panels.panel_groups().keys()) == sorted(groups.keys()),
@@ -1081,6 +1085,74 @@ def test_panel_order(module):
         check(operator_class(module, idname) is not None,
               "算符 hhz.{} 已注册".format(idname))
     check(not panels.DRAG_STATE, "拖动状态没有残留", panels.DRAG_STATE)
+
+
+def test_pages(module):
+    section("功能：分页（建模 / 工具 / 主题）")
+    pages = module.pages
+    context = bpy.context
+
+    check(len(pages.PAGE_ITEMS) == 3, "一共三页", len(pages.PAGE_ITEMS))
+    labels = [item[1] for item in pages.PAGE_ITEMS]
+    check(labels == ["建模", "工具", "主题"], "三页名字是 建模 / 工具 / 主题", labels)
+
+    manager = context.window_manager
+    check(hasattr(manager, pages.PROP_NAME), "WindowManager 上有「当前页」属性",
+          getattr(manager, pages.PROP_NAME, None))
+    prop = bpy.types.WindowManager.bl_rna.properties.get(pages.PROP_NAME)
+    check(prop is not None, "「当前页」属性已注册到 RNA")
+    if prop is not None:
+        ids = [item.identifier for item in prop.enum_items]
+        check(ids == ["MODELING", "TOOLS", "THEME"], "枚举项三个且顺序正确", ids)
+
+    # 切换页面 -> 各功能面板的 poll 跟着变
+    owners = {
+        "HHZ_PT_main": pages.PAGE_MODELING,
+        "HHZ_PT_hotkey": pages.PAGE_TOOLS,
+        "HHZ_PT_settings": pages.PAGE_TOOLS,
+        "HHZ_PT_order": pages.PAGE_TOOLS,
+        "HHZ_PT_theme": pages.PAGE_THEME,
+    }
+    for page in ("MODELING", "TOOLS", "THEME"):
+        setattr(manager, pages.PROP_NAME, page)
+        check(pages.current(context) == page, "切到「{}」页".format(pages.PAGE_LABELS[page]))
+        for idname, owner in owners.items():
+            panel = getattr(bpy.types, idname, None)
+            if panel is None:
+                continue
+            expected = (page == owner)
+            try:
+                visible = bool(panel.poll(context))
+            except Exception as error:
+                visible = "poll 异常：{}".format(error)
+            check(visible is expected,
+                  "{} 在「{}」页{}".format(
+                      idname, pages.PAGE_LABELS[page], "显示" if expected else "隐藏"),
+                  visible)
+
+    # 标签条本身：无标题、固定最前、和功能面板同一个侧栏标签页
+    bar = getattr(bpy.types, "HHZ_PT_pages", None)
+    check(bar is not None, "分页标签条面板已注册")
+    if bar is not None:
+        check("HIDE_HEADER" in set(bar.bl_options), "标签条没有标题栏（只有一行按钮）",
+              list(bar.bl_options))
+        check(bar.bl_order == module.panels.PAGES_PANEL_ORDER,
+              "标签条固定在 bl_order={}".format(module.panels.PAGES_PANEL_ORDER), bar.bl_order)
+        check(bar.bl_category == module.compat.ADDON_NAME,
+              "标签条与功能面板在同一个侧栏标签页", bar.bl_category)
+        check(not getattr(bar, "bl_parent_id", ""), "标签条是顶层面板")
+        check(bar.bl_space_type == 'VIEW_3D' and bar.bl_region_type == 'UI',
+              "标签条在 3D 视图侧栏")
+
+    # 画法（静态检查）：整行按钮 + 加高，和 ZML_LAB 的样式一致
+    path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "pages.py")
+    with open(path, encoding="utf-8") as handle:
+        source = handle.read()
+    check("expand=True" in source, "标签条是整行等宽按钮（expand=True）")
+    check("scale_y" in source, "标签条按钮加高了（scale_y）")
+    check(module.pages.PROP_NAME in source, "标签条绑的是 WindowManager 上的当前页属性")
+
+    setattr(manager, pages.PROP_NAME, pages.PAGE_MODELING)
 
 
 def test_unregister(module_name, module):
@@ -1128,6 +1200,7 @@ def main():
     run("一键删除所有修改器", test_remove_modifiers)
     run("主题颜色（N 面板）", test_theme, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
+    run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)
     run("算符 poll", test_poll)
     run("卸载清理", test_unregister, module_name, module)

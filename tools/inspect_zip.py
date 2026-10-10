@@ -29,6 +29,7 @@ EXPECTED_ENTRIES = {
     "{}/blender_manifest.toml".format(PACKAGE_NAME),
     "{}/compat.py".format(PACKAGE_NAME),
     "{}/ops.py".format(PACKAGE_NAME),
+    "{}/pages.py".format(PACKAGE_NAME),
     "{}/panels.py".format(PACKAGE_NAME),
     "{}/theme.py".format(PACKAGE_NAME),
     "{}/ui.py".format(PACKAGE_NAME),
@@ -38,7 +39,11 @@ def find_assign_style_properties(source):
     """找出赋值式 bpy.props 属性（4.0+ 上根本不生成 RNA 属性）。
 
     用 AST 判断而不是正则：文档字符串里提到这种写法不该被误判。
-    注解式是 ast.AnnAssign，赋值式是 ast.Assign —— 后者一律不合格。
+    注解式是 ast.AnnAssign，赋值式是 ast.Assign。
+
+    例外：``bpy.types.WindowManager.foo = bpy.props.EnumProperty(...)`` 这种
+    **挂在 bpy.types 上**的写法是官方支持的（不需要也不能用注解），
+    所以只看目标是普通名字的赋值（也就是类体里那一批）。
     """
     try:
         tree = ast.parse(source)
@@ -50,7 +55,11 @@ def find_assign_style_properties(source):
             continue
         func = node.value.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name and name.endswith("Property"):
+        if not (name and name.endswith("Property")):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Attribute):
+                continue
             offenders.append("行 {} 的 {}".format(node.lineno, name))
     return offenders
 

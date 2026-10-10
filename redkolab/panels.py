@@ -35,12 +35,14 @@ DEFAULT_SECTION_ORDER = tuple(section_id for section_id, _, _ in SECTIONS)
 #: 顺序编辑器自己的 bl_order（固定在最后）
 ORDER_PANEL_ORDER = 100
 
-#: 主面板固定在最前
-MAIN_PANEL_ORDER = 0
+#: 分页标签条固定在最前，主面板第二
+PAGES_PANEL_ORDER = 0
+MAIN_PANEL_ORDER = 1
 
-#: 主面板 / 顺序编辑器的注册名
+#: 主面板 / 顺序编辑器 / 分页标签条的注册名
 MAIN_PANEL_IDNAME = "HHZ_PT_main"
 ORDER_PANEL_IDNAME = "HHZ_PT_order"
+PAGES_PANEL_IDNAME = "HHZ_PT_pages"
 
 #: 拖动中的临时状态，供面板绘制时高亮：{"section": {"index": i, "target": j}}
 DRAG_STATE = {}
@@ -125,10 +127,14 @@ def apply_section_order(order, extra_orders=None):
     """
     applied = 0
 
-    main_panel = getattr(bpy.types, "HHZ_PT_main", None)
-    if main_panel is not None:
+    # 分页标签条永远第一，主面板第二（都不可拖动排序）
+    for key, value in ((PAGES_PANEL_IDNAME, PAGES_PANEL_ORDER),
+                       (MAIN_PANEL_IDNAME, MAIN_PANEL_ORDER)):
+        panel = getattr(bpy.types, key, None)
+        if panel is None:
+            continue
         try:
-            main_panel.bl_order = MAIN_PANEL_ORDER
+            panel.bl_order = value
         except Exception:
             pass
 
@@ -137,7 +143,7 @@ def apply_section_order(order, extra_orders=None):
         if panel is None:
             continue
         try:
-            panel.bl_order = index + 1
+            panel.bl_order = index + 2
             applied += 1
         except Exception:
             pass
@@ -286,9 +292,9 @@ def panel_groups():
 
 
 def our_panel_keys(section_order=None):
-    """本插件面板的注册名，按目标顺序：主面板 → 可排序面板 → 顺序编辑器。"""
+    """本插件面板的注册名，按目标顺序：分页标签条 → 主面板 → 可排序面板 → 顺序编辑器。"""
     order = list(section_order) if section_order else list(DEFAULT_SECTION_ORDER)
-    keys = [MAIN_PANEL_IDNAME]
+    keys = [PAGES_PANEL_IDNAME, MAIN_PANEL_IDNAME]
     keys += [section_panel_idname(section_id) for section_id in order]
     keys.append(ORDER_PANEL_IDNAME)
     return [key for key in keys if key and key in dir(bpy.types)]

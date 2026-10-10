@@ -14,7 +14,7 @@
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
 
-from . import compat, panels, theme
+from . import compat, pages, panels, theme
 
 #: 饼菜单的 bl_idname（必须以 _MT_ 命名，Menu 才能注册成功）
 PIE_IDNAME = "OBJECT_MT_hhz_pie"
@@ -205,6 +205,10 @@ class HHZ_PT_main(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
 
+    @classmethod
+    def poll(cls, context):
+        return pages.is_active(context, pages.PAGE_MODELING)
+
     def draw(self, context):
         layout = self.layout
 
@@ -248,6 +252,10 @@ class HHZ_PT_hotkey(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
 
+    @classmethod
+    def poll(cls, context):
+        return pages.is_active(context, pages.PAGE_TOOLS)
+
     def draw(self, context):
         layout = self.layout
 
@@ -278,6 +286,10 @@ class HHZ_PT_settings(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
 
+    @classmethod
+    def poll(cls, context):
+        return pages.is_active(context, pages.PAGE_TOOLS)
+
     def draw(self, context):
         layout = self.layout
 
@@ -299,6 +311,10 @@ class HHZ_PT_order(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
+
+    @classmethod
+    def poll(cls, context):
+        return pages.is_active(context, pages.PAGE_TOOLS)
 
     def draw(self, context):
         layout = self.layout
@@ -341,6 +357,10 @@ class HHZ_PT_theme(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = compat.ADDON_NAME
+
+    @classmethod
+    def poll(cls, context):
+        return pages.is_active(context, pages.PAGE_THEME)
 
     def draw(self, context):
         layout = self.layout

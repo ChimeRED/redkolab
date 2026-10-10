@@ -5,18 +5,24 @@
     1. 一键删除选中物体的所有材质
     2. 一键应用选中物体的所有修改器
     3. 一键删除选中物体的所有修改器
-    4. 在 N 面板里修改 Blender 界面主题颜色（不进饼菜单）
-    5. 拖动调整 N 面板顺序：本插件各分块，以及整个侧栏的标签页
+    4. 在 N 面板里修改界面**控件**颜色（灰按钮 / 选中蓝 / 状态色），带 Marathon 酸性预设
+    5. 拖动调整本插件面板在 N 面板里的先后顺序
+
+分页（样式参考插件库里 ZML_LAB 的做法）：
+    N 面板里最上面一排「建模 | 工具 | 主题」三个按钮，点了只显示该页的面板：
+        建模 —— 上面 1~3 三个一键功能
+        工具 —— 饼菜单与快捷键 / 插件设置 / 面板顺序
+        主题 —— 主题颜色（控件配色 + 酸性预设）
 
 呼出方式：
     * 饼菜单（默认快捷键 Ctrl+E，可在偏好设置里改）—— 只有上面 1~3
-    * 3D 视图 ▸ 侧栏（N）▸ 红红子lab —— 1~3 + 主题颜色 / 饼菜单与快捷键 /
-      插件设置 / 面板顺序 四个可排序子面板
+    * 3D 视图 ▸ 侧栏（N）▸ 红红子lab
 
 结构：
     compat.py   跨版本兼容层（上下文覆盖、偏好设置、键位工具）
-    theme.py    主题颜色（目标列表、读写、预设、版本容错）
-    panels.py   N 面板顺序（分块顺序、侧栏标签页顺序、bl_order 读写与备份）
+    pages.py    分页（WindowManager 上的当前页 + 顶部标签条面板）
+    theme.py    主题颜色（控件颜色目标列表、读写、Marathon 酸性预设）
+    panels.py   N 面板顺序（面板顺序读写、按注册顺序重排自己的面板）
     ops.py      功能算符
     ui.py       饼菜单、N 面板、偏好设置
 """
@@ -24,10 +30,10 @@
 bl_info = {
     "name": "红红子lab (REDKO_LAB)",
     "author": "Red04",
-    "version": (1, 7, 0),
+    "version": (1, 8, 0),
     "blender": (4, 0, 0),
-    "location": "3D 视图 ▸ 侧栏(N) ▸ 红红子lab；饼菜单默认快捷键 Ctrl+E",
-    "description": "一键删除物体所有材质、应用/删除物体所有修改器；N 面板改界面主题颜色、拖动调整面板顺序（REDKO_LAB）",
+    "location": "3D 视图 ▸ 侧栏(N) ▸ 红红子lab（建模 / 工具 / 主题 三页）；饼菜单默认快捷键 Ctrl+E",
+    "description": "一键删除物体所有材质、应用/删除物体所有修改器；N 面板改界面控件配色、拖动调整面板顺序（REDKO_LAB）",
     "warning": "",
     "doc_url": "",
     "category": "Object",
@@ -35,9 +41,9 @@ bl_info = {
 
 import bpy
 
-from . import compat, ops, panels, theme, ui
+from . import compat, ops, pages, panels, theme, ui
 
-#: 注册顺序：偏好设置 → 算符 → 界面（子面板必须排在父面板之后）
+#: 注册顺序：偏好设置 → 算符 → 界面（分页标签条排在最前）
 _classes = (
     ui.HHZ_AddonPreferences,
     ops.HHZ_OT_remove_all_materials,
@@ -52,6 +58,7 @@ _classes = (
     ops.HHZ_OT_theme_save_preferences,
     ops.HHZ_OT_section_drag,
     ui.HHZ_MT_pie,
+    pages.HHZ_PT_pages,
     ui.HHZ_PT_main,
     ui.HHZ_PT_theme,
     ui.HHZ_PT_hotkey,
@@ -61,6 +68,7 @@ _classes = (
 
 
 def register():
+    pages.register_properties()
     for cls in _classes:
         bpy.utils.register_class(cls)
     # bl_order 是运行时写进面板类的，重启后会丢，所以每次都按偏好设置重新应用
@@ -75,6 +83,7 @@ def unregister():
             bpy.utils.unregister_class(cls)
         except Exception:
             pass
+    pages.unregister_properties()
 
 
 if __name__ == "__main__":
