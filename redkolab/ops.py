@@ -1309,6 +1309,218 @@ def layout_library_path():
     return os.path.join(config, LAYOUT_LIBRARY_NAME)
 
 
+# --------------------------------------------------- 工作区重名收尾（启动布局用）
+#
+# 中文界面下**出厂启动文件里也有**「布局 / 建模 / 着色 / UV 编辑」这同名的 11 个工作区，
+# 于是 ``bpy.data.libraries.load()`` 把用户的工作区追加进来时撞名，Blender 给**追加
+# 进来的那份**加 ``.001`` 后缀 —— 用户看到的现象是"新建场景不是我的布局"。
+#
+# 收尾的目标：让用户的每个工作区都拿回**原来的名字**，且不再有 ``X`` / ``X.<数字>``
+# 这种重名对。
+
+#: 重名收尾时给出厂那份工作区加的前缀（脚本删不掉它，就改名让位）。
+FACTORY_WORKSPACE_PREFIX = "出厂 "
+
+#: 工作区名字上限（Blender 的 ``MAX_ID_NAME - 2``）。
+WORKSPACE_NAME_LIMIT = 63
+
+
+def _workspace_collision_pairs():
+    """当前文件里「``X`` 与 ``X.<数字>`` 同时存在」的工作区对。
+
+    返回 ``[(X 那件, X.<数字> 那件), ...]``。**只有成对的才算** ——
+    名字带 ``.数字`` 却没有同名兄弟的（用户自己就这么命名的）一律不碰。
+    """
+    by_name = {}
+    for workspace in bpy.data.workspaces:
+        by_name[workspace.name] = workspace
+    pairs = []
+    for name in sorted(by_name):
+        base, dot, suffix = name.partition(".")
+        if not dot or not suffix.isdigit():
+            continue
+        plain = by_name.get(base)
+        if plain is None or plain is by_name[name]:
+            continue
+        pairs.append((plain, by_name[name]))
+    return pairs
+
+
+def _active_workspace_of_windows():
+    """每个窗口当前的工作区（读不到就是 None）。"""
+    result = []
+    for window_manager in bpy.data.window_managers:
+        for window in window_manager.windows:
+            try:
+                result.append(window.workspace)
+            except Exception:
+                result.append(None)
+    return result
+
+
+def _workspace_is_current(workspace):
+    """``workspace`` 是不是**每个**窗口当前的工作区。
+
+    删除算符删的是"当前工作区"，所以只有这个条件成立才敢调用它 —— 否则它可能删掉
+    别的工作区（甚至用户自己那份）。
+    """
+    active = _active_workspace_of_windows()
+    return bool(active) and all(item is workspace for item in active)
+
+
+def _make_workspace_current(workspace):
+    """尽力把某个工作区设为当前，并**核实**是否真的成了（返回布尔）。"""
+    for window_manager in bpy.data.window_managers:
+        for window in window_manager.windows:
+            try:
+                window.workspace = workspace
+            except Exception:
+                pass
+    return _workspace_is_current(workspace)
+
+
+def _unique_workspace_name(base):
+    """给 ``base`` 找一个当前没被占用的工作区名（超长自动截断）。"""
+    taken = set(workspace.name for workspace in bpy.data.workspaces)
+    candidate = base[:WORKSPACE_NAME_LIMIT]
+    index = 2
+    while candidate in taken:
+        suffix = " ({})".format(index)
+        candidate = base[:WORKSPACE_NAME_LIMIT - len(suffix)] + suffix
+        index += 1
+    return candidate
+
+
+def _rename_factory_workspace(workspace):
+    """把出厂那份重名工作区改成带前缀的名字，把原名让出来。
+
+    返回新名字；改名失败返回空串（调用方据此中止，不写启动文件）。
+    """
+    try:
+        workspace.name = _unique_workspace_name(
+            FACTORY_WORKSPACE_PREFIX + workspace.name)
+    except Exception:
+        return ""
+    return workspace.name
+
+
+def _delete_workspace(workspace):
+    """试着用工作区删除算符删掉 ``workspace``，返回**是否真的删掉了**。
+
+    两道联锁 + 结果核对：
+
+    1. 只有确认目标就是当前工作区才调用删除算符（它删的是"当前工作区"，
+       不能让它删到别的工作区上去）；
+    2. 检查返回值，**且**核对实际效果 —— 工作区对象真的没了、数量真的少了。
+
+    为什么要核对效果而不只看返回值：本机实测它**返回值不可信**。4.0.2 上
+    ``--background`` 与真实界面里，``bpy.ops.workspace.delete()`` 都出现过
+    "返回 ``{'FINISHED}`` 却一个都没删"；另一种实测（用户真实环境）是
+    它抛 ``SystemError: GPU API is not available in background mode``、
+    算子不抛异常、静默返回 ``CANCELLED``。所以判据只能是"东西真的没了"。
+
+    另外两条实测（都不能当替代方案）：
+    * ``bpy.data.workspaces.remove`` / ``.new`` 根本不存在；
+    * ``bpy.data.batch_remove`` 能删，但删的若是窗口当前那个，
+      ``window.workspace`` 变成 None，Blender **退出时段错误**
+      （实测 exit=11，栈顶 ``ED_screen_exit``）—— 所以绝不能用它。
+    """
+    before = len(bpy.data.workspaces)
+    if not _make_workspace_current(workspace):
+        return False
+    try:
+        result = bpy.ops.workspace.delete()
+    except Exception:
+        # 无头（--background）下实测会抛 SystemError: GPU API is not available，
+        # 也可能静默返回 CANCELLED —— 两种情况都当"没删掉"处理。
+        return False
+    if result != {'FINISHED'}:
+        return False
+    for item in bpy.data.workspaces:
+        if item is workspace:
+            return False
+    return len(bpy.data.workspaces) < before
+
+
+def _dedupe_report_parts(collisions, removed, renamed, collisions_left, problems):
+    """重名收尾的报告文案（单独成函数，真机测试可以直接断言文案如实）。
+
+    必须说清三件事：收尾做了什么、**没能做什么**（脚本删不掉工作区）、
+    以及可执行的替代路径（界面里右键删除）。
+    """
+    parts = []
+    if not collisions:
+        return parts
+    parts.append("重名收尾：{} 对同名工作区 —— 删掉 {} 个出厂重名、"
+                 "给出厂重名加「出厂」前缀改名 {} 个、"
+                 "你的 {} 个工作区拿回了原来的名字".format(
+                     collisions, removed, renamed, renamed))
+    if not removed:
+        # 如实说明限制：删除算符在本机实测里删不掉工作区
+        # （一种环境返回 FINISHED 却什么都没删，另一种抛 GPU 不可用后静默返回
+        #  CANCELLED），所以出厂那批只能改名让位。
+        parts.append("限制：本版 Blender 的脚本接口删不掉工作区，"
+                     "所以启动文件里仍保留了 {} 个出厂工作区"
+                     "（名字前面加了「出厂」）；"
+                     "要清掉它们：在工作区标签上点右键 ▸ 删除工作区".format(renamed))
+    if collisions_left:
+        parts.append("注意：还有 {} 对同名工作区没能收尾（{}）".format(
+            len(collisions_left),
+            "；".join(problems) if problems else "原因不明"))
+    elif problems:
+        parts.append("注意：{}".format("；".join(problems)))
+    return parts
+
+
+def _dedupe_appended_workspaces():
+    """重名收尾，返回 ``(删除数, 改名数, 剩余重名对, 问题说明清单)``。
+
+    对每一对 ``X`` / ``X.<数字>``：
+
+    1. 先把出厂那份 ``X`` 设为当前工作区，能设成、且删除算符**真的删掉了**才算删掉；
+    2. 删不掉（本机实测就是删不掉，见 :func:`_delete_workspace`）就**改名兜底**：
+       给出厂那份加 :data:`FACTORY_WORKSPACE_PREFIX` 前缀，把干净的原名让出来；
+    3. 再把用户那份 ``X.<数字>`` 改名回 ``X``；这一步若没成，就把第 2 步**回滚**，
+       避免留下"两边都不是原名"的中间态。
+
+    不成对的名字一律不碰。某一对出问题**只跳过这一对**、继续处理其它对，
+    问题说明逐条返回给调用方（由调用方写进报告）—— 不因为一对失败就让整个
+    功能停摆（用户最反感的是"按钮点了没反应"）。
+    """
+    pairs = _workspace_collision_pairs()
+    removed = 0
+    renamed = 0
+    problems = []
+    for plain, suffixed in pairs:
+        target_name = plain.name
+        factory_name = ""
+        if _delete_workspace(plain):
+            removed += 1
+        else:
+            factory_name = _rename_factory_workspace(plain)
+            if not factory_name:
+                problems.append("出厂工作区「{}」改名失败，这一对跳过".format(target_name))
+                continue
+        outcome = ""
+        try:
+            suffixed.name = target_name
+        except Exception as error:
+            outcome = "改名回「{}」失败：{}".format(target_name, error)
+        else:
+            if suffixed.name != target_name:
+                outcome = "改名回「{}」没有生效".format(target_name)
+        if outcome:
+            if factory_name:
+                try:
+                    plain.name = target_name
+                except Exception:
+                    pass
+            problems.append("{}（这一对跳过）".format(outcome))
+            continue
+        renamed += 1
+    return removed, renamed, _workspace_collision_pairs(), problems
+
+
 class HHZ_OT_layout_save_startup(bpy.types.Operator):
     bl_idname = "hhz.layout_save_startup"
     bl_label = "把当前窗口布局设为启动布局"
@@ -1413,17 +1625,36 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
                 "追加工作区不完整（缺 {}），已中止、没有写启动文件".format(
                     "、".join(missing_workspaces) or "全部"))
 
-        # 让窗口停在**你自己**的那个工作区上（Blender 不允许删除工作区，
-        # 出厂自带的那批还在文件里，所以这一步决定新开 Blender 时先看到哪套布局）
+        # ---- 重名收尾：让用户的工作区拿回原来的名字 ----
+        # 中文界面下出厂启动文件里也有同名工作区（布局 / 建模 / ...），所以上面那一步
+        # 追加进来的多半带着 ``.001`` 后缀。这里按用户确认的方案收尾。
+        #
+        # 校验态度（与"追加不完整"不同）：**丢了工作区**是数据损失，必须中止；
+        # 而"出厂重名项没能清理干净"只是多几个标签 —— 照常写启动文件、如实报告，
+        # 绝不让整个按钮变成"点了没反应"（用户明确表态过这一点）。
+        collisions_before = len(_workspace_collision_pairs())
+        workspace_total = len(bpy.data.workspaces)
+        removed_duplicates, renamed_workspaces, collisions_left, dedupe_problems = (
+            _dedupe_appended_workspaces())
+        still_alive = [workspace for workspace in added
+                       if any(item is workspace for item in bpy.data.workspaces)]
+        if len(still_alive) != len(added):
+            return restore_original("工作区重名收尾时丢了工作区，已中止、没有写启动文件")
+        # 改名不改变数量、删除会让数量减少，所以对得上才算收尾正常
+        if len(bpy.data.workspaces) != workspace_total - removed_duplicates:
+            return restore_original(
+                "工作区数量在收尾前后对不上（{} -> {}，删掉 {}），"
+                "已中止、没有写启动文件".format(
+                    workspace_total, len(bpy.data.workspaces), removed_duplicates))
+
+        # 让窗口停在**你自己**的那个工作区上。
+        # 实测（4.0.2，界面与无头都测过）：脚本**改不动**当前工作区
+        # （``window.workspace = ...`` 赋值不生效），所以这一步只能尽力而为，
+        # 结果**核实**之后如实写进报告 —— 不假装切过去了。
         target_workspace = (appended.get(active_name)
                             or appended.get(workspace_names[0])
                             or added[0])
-        for window_manager in bpy.data.window_managers:
-            for window in window_manager.windows:
-                try:
-                    window.workspace = target_workspace
-                except Exception:
-                    pass
+        switched = _make_workspace_current(target_workspace)
 
         try:
             bpy.ops.wm.save_homefile()
@@ -1442,6 +1673,14 @@ class HHZ_OT_layout_save_startup(bpy.types.Operator):
         parts = ["启动布局已重建",
                  "写入了 {} 个工作区".format(len(added)),
                  "启动文件现在是空场景 + 你的工作区布局（不含当前场景）"]
+        parts.extend(_dedupe_report_parts(collisions_before, removed_duplicates,
+                                         renamed_workspaces, collisions_left,
+                                         dedupe_problems))
+        if not switched:
+            parts.append("注意：当前环境下脚本改不动窗口的活动工作区"
+                         "（window.workspace 赋值实测不生效），"
+                         "新开 Blender 时先显示哪一个工作区仍由 Blender 自己决定；"
+                         "你的工作区都在，切一下即可")
         if original_path:
             parts.append("原来的文件已重新打开：{}".format(os.path.basename(original_path)))
         else:

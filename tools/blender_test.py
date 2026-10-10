@@ -963,6 +963,19 @@ def class_source(source, class_name):
     return ""
 
 
+def function_source(source, name):
+    """按函数边界取出某个模块级函数的源码段（静态检查用）。
+
+    和 ``class_source`` 同一套做法：解析 AST、按名字找节点，不靠注释当锚点。
+    """
+    lines = source.splitlines()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            end = getattr(node, "end_lineno", node.lineno)
+            return "\n".join(lines[node.lineno - 1:end])
+    return ""
+
+
 def _classify_missing(module, name):
     """``_missing_file_blocks()`` 把某个数据块归到了哪一类：unused / in_use / absent。"""
     try:
@@ -1279,9 +1292,19 @@ def test_theme(module):
     original_grey = theme.get_color(current, grey_path)
     original_blue = theme.get_color(current, blue_path)
 
-    # 预设：Marathon 酸性配色，改的是按钮 / 状态色
+    # 预设：Marathon 酸性配色 + 死亡搁浅，改的是按钮 / 状态色
     names = theme.preset_names()
-    check(any("马拉松" in name for name in names), "预设里有马拉松配色", names)
+    check(len(names) == 3, "预设一共 3 套（删掉旧的两套马拉松、新增「死亡搁浅」）", names)
+    check(names == ["马拉松 建模 低干扰", "马拉松 浅灰卡", "死亡搁浅"],
+          "预设清单就是这三套（N 面板按钮按 preset_names() 自动生成，ui.py 不用改）", names)
+    check(any("马拉松" in name for name in names), "预设里仍有马拉松配色", names)
+    check("死亡搁浅" in names, "预设里有新增的「死亡搁浅」", names)
+    theme_source = source_of(module, "theme.py")
+    check("洋红警戒" not in theme_source and "暗色 HUD" not in theme_source,
+          "主题源码里彻底删掉了旧的两套马拉松预设（连名字都不留）")
+    check("FACTORY_LOCKED_FAMILIES" not in theme_source,
+          "整族写回出厂默认值的旧机制已移除（改用 DEEP_ACCENT_FAMILIES）")
+    check("DEEP_ACCENT_FAMILIES" in theme_source, "主题源码里有「深档强调」家族清单")
     preset_name = names[0]
     colors = theme.preset_colors(preset_name)
     check(blue_path in colors and grey_path in colors,
@@ -1479,13 +1502,15 @@ def test_theme(module):
               "预设「{}」标签独立型家族（含 wcol_menu_back）的标签在各实际底色上都读得清".format(preset),
               label_problems[:6])
 
-    # 视口辅助元素 / 滑块 / 工具按钮类：预设必须把它们**写回出厂默认值**（自愈），
-    # 而不是"不覆盖"—— 旧版写进主题里的暗值 / 强调色不会自己变回来，
+    # 视口辅助元素（基面网格线 / 法线）：预设必须把它们**写回出厂默认值**（自愈），
+    # 而不是"不覆盖"—— 旧版写进主题里的暗值不会自己变回来，
     # 用户看到的就是"套了预设完全没更新"。
+    # （滑块 / 工具按钮这三个家族**不再**走这条路：它们改成"深档强调色 + 浅色文字"，
+    #  见 test_preset_deep_accent_families。）
     not_default = []
     for preset in theme.preset_names():
         preset_colors = theme.preset_colors(preset) or {}
-        for helper_path in theme.factory_locked_paths():
+        for helper_path in theme.viewport_helper_paths():
             default = theme.default_of(helper_path)
             if default is None:
                 continue
@@ -1493,7 +1518,7 @@ def test_theme(module):
                 not_default.append("{} 漏了 {}".format(preset, helper_path))
             elif not color_close(preset_colors[helper_path], default):
                 not_default.append("{} 的 {} 不是出厂默认值".format(preset, helper_path))
-    check(not not_default, "四套预设都把视口辅助元素 / 滑块 / 工具按钮写回记录的出厂默认值",
+    check(not not_default, "三套预设都把视口辅助元素写回记录的出厂默认值",
           not_default[:6])
     check("view_3d.grid" in theme.default_paths()
           and color_close(theme.default_of("view_3d.grid"),
@@ -1784,7 +1809,7 @@ def test_theme(module):
 
     # 每个预设：高饱和的颜色在 0.4 倍之后都要明显更灰；降饱和之后
     # 底色与它**实际配的那支文字色**仍要够对比（不能只盯着"浅底配深字"这一种组合：
-    # 四套预设的选中态是"深底配浅字"，旧写法会把它们误判成问题）。
+    # 三套预设的选中态是"深底配浅字"，旧写法会把它们误判成问题）。
     not_greyer = []
     thin_after_desaturate = []
     for name in theme.preset_names():
@@ -1913,31 +1938,156 @@ def test_preset_label_families(module):
                   (theme.color_to_hex(background), theme.color_to_hex(text_color)))
 
 
-def test_preset_factory_locked(module):
-    section("预设：必须保持出厂默认值的项（数值滑块 / 工具按钮 / 视口辅助元素）")
+def test_preset_death_stranding(module):
+    section("预设：死亡搁浅（蓝为主强调 / 橙只做点缀 / 面板三级层次）")
     theme = module.theme
     current = theme.current_theme(bpy.context)
     check(current is not None, "能取到当前主题")
     if current is None:
         return
 
-    check("wcol_numslider" in theme.FACTORY_LOCKED_FAMILIES,
-          "数值滑块在「必须保持出厂默认」清单里（颜色选择器的 H/S/V/Alpha 与 RGB 滑条）",
-          theme.FACTORY_LOCKED_FAMILIES)
-    check("wcol_tool" in theme.FACTORY_LOCKED_FAMILIES
-          and "wcol_toolbar_item" in theme.FACTORY_LOCKED_FAMILIES,
-          "工具按钮类两个家族都在清单里（左侧工具栏选中项的图标）",
-          theme.FACTORY_LOCKED_FAMILIES)
+    # ---- 色表：逐项等于用户确认过的调色板（不许臆造别的色值）----
+    expected_palette = {
+        "bg": "#14171A", "panel": "#1C2024", "elevated": "#262B30",
+        "line": "#3A4046", "text": "#D6DADE", "text_dim": "#8A9299",
+        "blue": "#4B7FA8", "blue_dim": "#2E4E68", "orange": "#D08A2E",
+        "orange_dim": "#8A5A1E", "steel": "#6E7B85", "red": "#B4453C",
+        "warn": "#C9A227", "disabled": "#5A626B",
+    }
+    check(theme.STRANDING == expected_palette,
+          "「死亡搁浅」色表是集中管理的一份字典，且逐项等于确认过的调色板",
+          (theme.STRANDING, expected_palette))
+
+    name = "死亡搁浅"
+    check(name in theme.preset_names(), "预设清单里有「死亡搁浅」", theme.preset_names())
+    colors = theme.preset_colors(name) or {}
+    check(bool(colors), "「死亡搁浅」预设能取到颜色（{} 项）".format(len(colors)))
+
+    blue = theme.stranding_color("blue")
+    blue_dim = theme.stranding_color("blue_dim")
+
+    # ---- 蓝是主选中色：没有一族把选中态染成暖色，多数家族就是 DS_BLUE ----
+    accent_families = []
+    exact_blue = []
+    warm_families = []
+    for prefix, _label in theme.WIDGET_FAMILIES:
+        color = colors.get(theme.family_path(prefix, "inner_sel"))
+        if color is None:
+            continue
+        if theme.color_close(color, blue) or theme.color_close(color, blue_dim):
+            accent_families.append(prefix)
+        if theme.color_close(color, blue):
+            exact_blue.append(prefix)
+        if theme.warm_accent(color):
+            warm_families.append(prefix)
+    check(not warm_families,
+          "没有任何控件家族的选中态是暖色（用户明确禁止把所有选中态染橙）",
+          warm_families)
+    check(len(accent_families) >= 15,
+          "多数家族的选中态填充是 DS_BLUE / 其深档（{}/{} 个家族）".format(
+              len(accent_families), len(theme.WIDGET_FAMILIES)),
+          accent_families)
+    check(len(exact_blue) >= 12,
+          "其中多数就是 DS_BLUE 本身（{} 个家族）".format(len(exact_blue)), exact_blue)
+
+    # ---- 橙（以及全部暖色）只出现在明确列出的少量路径上 ----
+    warm_paths = sorted(path for path, color in colors.items() if theme.warm_accent(color))
+    check(set(warm_paths) == set(theme.STRANDING_WARM_PATHS),
+          "整套预设里的暖色路径**就是**白名单那 {} 条（清单外出现一条就失败）".format(
+              len(theme.STRANDING_WARM_PATHS)),
+          (warm_paths, sorted(theme.STRANDING_WARM_PATHS)))
+    check(len(theme.STRANDING_WARM_PATHS) <= 8,
+          "点缀暖色路径有数量上限（<= 8，防止以后被铺开）",
+          len(theme.STRANDING_WARM_PATHS))
+    orange_paths = [path for path, color in colors.items()
+                    if theme.color_close(color, theme.stranding_color("orange"))
+                    or theme.color_close(color, theme.stranding_color("orange_dim"))]
+    check(sorted(orange_paths) == ["user_interface.panel_active",
+                                   "user_interface.wcol_state.inner_changed",
+                                   "user_interface.wcol_state.inner_changed_sel"],
+          "DS_BLUE 之外，调色板里的橙只落在「活动面板标题 + 已修改状态」这三处",
+          sorted(orange_paths))
+
+    # ---- 文字：灰白，不用纯白铺陈 ----
+    whites = [path for path, color in colors.items() if min(color[:3]) >= 0.99]
+    check(not whites, "预设里没有一处是纯白（文字用灰白 DS_TEXT）", whites)
+    family_texts = set()
+    for prefix, _label in theme.WIDGET_FAMILIES:
+        color = colors.get(theme.family_path(prefix, "text"))
+        if color is not None:
+            family_texts.add(theme.color_to_hex(color))
+    check(family_texts <= {theme.STRANDING["text"], theme.STRANDING["text_dim"]},
+          "家族常态文字只用 DS_TEXT / 次级文字 DS_TEXT_DIM",
+          sorted(family_texts))
+
+    # ---- 面板三级层次 ----
+    levels = [theme.luminance(theme.stranding_color(key))
+              for key in ("bg", "panel", "elevated")]
+    check(levels[0] < levels[1] < levels[2],
+          "面板层次 bg < panel < elevated（亮度递增，层级做得出来）",
+          ["{:.4f}".format(value) for value in levels])
+    check(theme.color_close(colors.get("view_3d.back"), theme.stranding_color("bg"))
+          and theme.color_close(colors.get("node_editor.back"), theme.stranding_color("bg")),
+          "3D 视口与节点编辑器背景用冷炭黑 DS_BG")
+
+    # ---- 标签独立型家族（含 option / radio / toggle）的标签可读 ----
+    label_problems = []
+    for prefix in theme.LABEL_INDEPENDENT_FAMILIES:
+        label_problems.extend(theme.label_contrast_problems(colors, prefix))
+    check(not label_problems,
+          "「死亡搁浅」标签独立型家族（wcol_menu_back / option / radio / toggle）标签可读",
+          label_problems[:6])
+
+    # ---- 视口辅助元素仍然写回出厂默认值（网格和默认一样明显）----
+    helper_problems = []
+    for path in theme.viewport_helper_paths():
+        default = theme.default_of(path)
+        if default is None:
+            continue
+        if path not in colors or not color_close(colors[path], default):
+            helper_problems.append(path)
+    check(not helper_problems, "「死亡搁浅」把视口辅助元素写回出厂默认值", helper_problems)
+
+    # ---- 真套一次：实际主题里也要满足可读性（读回值校验，8 位量化）----
+    theme.apply_colors(current, colors)
+    live_problems = []
+    for prefix, _label in theme.WIDGET_FAMILIES:
+        live_problems.extend(theme.family_contrast_report(current, prefix))
+    check(not live_problems,
+          "「死亡搁浅」真的套到主题上之后，逐家族都没有看不清的字",
+          live_problems[:6])
+    # 套完之后网格线仍应是出厂值（预设能自愈旧版留下的暗值）
+    grid_ok = color_close(theme.get_color(current, "view_3d.grid"),
+                          theme.default_of("view_3d.grid"))
+    check(grid_ok, "套用「死亡搁浅」之后基面网格线仍是出厂默认值",
+          (theme.color_to_hex(theme.get_color(current, "view_3d.grid")),
+           theme.color_to_hex(theme.default_of("view_3d.grid"))))
+
+
+def test_preset_viewport_helpers(module):
+    section("预设：视口辅助元素写回出厂默认值（网格线 / 法线）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    check("view_3d.grid" in theme.VIEWPORT_HELPERS
+          and "view_3d.normal" in theme.VIEWPORT_HELPERS,
+          "视口辅助元素清单就是网格线 + 法线", theme.VIEWPORT_HELPERS)
+    check(set(theme.VIEWPORT_HELPERS) <= set(theme.viewport_helper_paths()),
+          "「写回出厂默认值」的清单包含这两个辅助元素",
+          theme.viewport_helper_paths()[:4])
     check(theme.resolve(current, "user_interface.wcol_slider.inner") is None,
           "候选里的 wcol_slider 在当前 Blender 上不存在（真机 bl_rna 查不到）")
-    check(set(theme.VIEWPORT_HELPERS) <= set(theme.factory_locked_paths()),
-          "视口辅助元素也在「写回出厂默认值」的清单里",
-          theme.factory_locked_paths()[:4])
+    check(not (set(theme.DEEP_ACCENT_FAMILIES) & set(theme.viewport_helper_paths())),
+          "「深档强调」的三个家族**不**在写回出厂默认值的清单里（机制已分家）",
+          theme.DEEP_ACCENT_FAMILIES)
 
     for preset in theme.preset_names():
         colors = theme.preset_colors(preset) or {}
         wrong = []
-        for path in theme.factory_locked_paths():
+        for path in theme.viewport_helper_paths():
             default = theme.default_of(path)
             if default is None:
                 continue
@@ -1947,50 +2097,133 @@ def test_preset_factory_locked(module):
                 wrong.append("{} = {}（应为 {}）".format(
                     path, theme.color_to_hex(colors[path]), theme.color_to_hex(default)))
         check(not wrong,
-              "预设「{}」把滑块 / 工具按钮 / 视口辅助元素写成记录的出厂默认值".format(preset),
+              "预设「{}」把视口辅助元素写成记录的出厂默认值".format(preset),
               wrong[:6])
-
-        # 数值滑块：轨道 / 拖动轨道 / 填充块必须看得出区别，值文字要读得清
-        slider = "wcol_numslider"
-        inner = colors.get(theme.family_path(slider, "inner"))
-        inner_sel = colors.get(theme.family_path(slider, "inner_sel"))
-        item = colors.get(theme.family_path(slider, "item"))
-        text = colors.get(theme.family_path(slider, "text"))
-        check(inner is not None and inner_sel is not None and item is not None and text is not None,
-              "预设「{}」数值滑块的轨道 / 拖动轨道 / 填充块 / 文字都有值".format(preset))
-        if None not in (inner, inner_sel, item, text):
-            check(not color_close(inner, inner_sel, 0.02)
-                  and not color_close(inner, item, 0.02)
-                  and not color_close(inner_sel, item, 0.02),
-                  "预设「{}」数值滑块三色互不相同（不是整条一个色，拖得出色块）".format(preset),
-                  (theme.color_to_hex(inner), theme.color_to_hex(inner_sel),
-                   theme.color_to_hex(item)))
-            check(abs(theme.luminance(text) - theme.luminance(inner)) >= 0.3,
-                  "预设「{}」数值滑块的值文字与轨道亮度差 >= 0.3".format(preset),
-                  (theme.color_to_hex(text), theme.color_to_hex(inner)))
-
-        # 工具按钮类：选中态图标色 vs 选中态底色（图标色走 wcol->text，选中时是 text_sel）
-        for prefix in ("wcol_tool", "wcol_toolbar_item"):
-            background = colors.get(theme.family_path(prefix, "inner_sel"))
-            icon_color = colors.get(theme.family_path(prefix, "text_sel"))
-            check(background is not None and icon_color is not None
-                  and abs(theme.luminance(background) - theme.luminance(icon_color)) >= 0.3,
-                  "预设「{}」{} 选中态图标色 vs 选中态底色亮度差 >= 0.3".format(preset, prefix),
-                  (theme.color_to_hex(icon_color), theme.color_to_hex(background)))
+        check(theme.VIEWPORT_HELPERS and
+              all(helper in theme.default_paths() for helper in theme.VIEWPORT_HELPERS),
+              "预设「{}」的辅助元素都有出厂默认值记录（不猜颜色）".format(preset),
+              theme.VIEWPORT_HELPERS)
 
     # 自愈：先把主题写成"旧版预设留下的坏值"，再套一次预设，必须回到出厂默认值
-    for path in theme.factory_locked_paths():
+    for path in theme.viewport_helper_paths():
         if theme.default_of(path) is None:
             continue
         count = theme.component_count(current, path)
         theme.set_color(current, path, (0.02, 0.03, 0.02, 0.2) if count == 4 else (0.02, 0.03, 0.02))
     theme.apply_colors(current, theme.preset_colors(theme.preset_names()[0]) or {})
-    healed = [path for path in theme.factory_locked_paths()
+    healed = [path for path in theme.viewport_helper_paths()
               if theme.default_of(path) is not None
               and not color_close(theme.get_color(current, path), theme.default_of(path))]
     check(not healed,
-          "主题里被旧版写坏的滑块 / 工具按钮 / 网格线，再套一次预设就自愈到出厂默认值",
+          "主题里被旧版写坏的网格线 / 法线，再套一次预设就自愈到出厂默认值",
           healed[:6])
+
+
+def test_preset_deep_accent_families(module):
+    section("预设：滑块 / 工具按钮 / 顶部工具项（深档强调 + 浅色文字，不再回出厂默认）")
+    theme = module.theme
+    current = theme.current_theme(bpy.context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    check("wcol_numslider" in theme.DEEP_ACCENT_FAMILIES,
+          "数值滑块在「深档强调」清单里（颜色选择器的 H/S/V/Alpha 与 RGB 滑条）",
+          theme.DEEP_ACCENT_FAMILIES)
+    check("wcol_tool" in theme.DEEP_ACCENT_FAMILIES
+          and "wcol_toolbar_item" in theme.DEEP_ACCENT_FAMILIES,
+          "工具按钮类两个家族都在清单里（左侧工具栏 / 顶部工具项）",
+          theme.DEEP_ACCENT_FAMILIES)
+    check(not hasattr(theme, "FACTORY_LOCKED_FAMILIES"),
+          "整族写回出厂默认值的旧机制已经不存在")
+    check(0.45 <= theme.DEEP_ACCENT_FACTOR <= 0.6,
+          "深档压暗倍数在用户给的 45%~60% 区间里", theme.DEEP_ACCENT_FACTOR)
+
+    # 三套预设 × 三个家族：风格色 + 可读 + 拖动块可分辨 + 不再等于出厂默认值
+    for preset in theme.preset_names():
+        colors = theme.preset_colors(preset) or {}
+        for prefix in theme.DEEP_ACCENT_FAMILIES:
+            inner = colors.get(theme.family_path(prefix, "inner"))
+            inner_sel = colors.get(theme.family_path(prefix, "inner_sel"))
+            item = colors.get(theme.family_path(prefix, "item"))
+            text = colors.get(theme.family_path(prefix, "text"))
+            text_sel = colors.get(theme.family_path(prefix, "text_sel"))
+            check(None not in (inner, inner_sel, item, text, text_sel),
+                  "预设「{}」{} 轨道 / 填充 / 色块 / 文字都有值".format(preset, prefix))
+            if None in (inner, inner_sel, item, text, text_sel):
+                continue
+
+            # 深档：填充比强调色（item 就是强调色本身）暗，不是又把强调色铺满
+            check(theme.luminance(inner_sel) < theme.luminance(item),
+                  "预设「{}」{} 的填充是**深档**强调色（比 item 暗）".format(preset, prefix),
+                  (theme.color_to_hex(inner_sel), theme.color_to_hex(item)))
+            # 拖动块可分辨：轨道与填充的亮度差够大
+            gap = abs(theme.luminance(inner) - theme.luminance(inner_sel))
+            check(gap >= 0.15,
+                  "预设「{}」{} 轨道与填充亮度差 >= 0.15（拖动色块分得开）".format(
+                      preset, prefix),
+                  "{:.4f} {}".format(gap, (theme.color_to_hex(inner),
+                                           theme.color_to_hex(inner_sel))))
+            # 三层互不相同（不是整条一个色）
+            check(not color_close(inner, inner_sel, 0.02)
+                  and not color_close(inner, item, 0.02)
+                  and not color_close(inner_sel, item, 0.02),
+                  "预设「{}」{} 三色互不相同（拖得出色块）".format(preset, prefix),
+                  (theme.color_to_hex(inner), theme.color_to_hex(inner_sel),
+                   theme.color_to_hex(item)))
+            # 可读：浅色文字在轨道与填充上都够对比
+            check(abs(theme.luminance(text) - theme.luminance(inner)) >= 0.3,
+                  "预设「{}」{} 值文字 vs 轨道亮度差 >= 0.3".format(preset, prefix),
+                  (theme.color_to_hex(text), theme.color_to_hex(inner)))
+            check(abs(theme.luminance(text_sel) - theme.luminance(inner_sel)) >= 0.3,
+                  "预设「{}」{} 选中文字 vs 填充亮度差 >= 0.3".format(preset, prefix),
+                  (theme.color_to_hex(text_sel), theme.color_to_hex(inner_sel)))
+            # 不再等于出厂默认值（这就是用户报的"滑块变蓝、工具栏变默认"）
+            still_default = []
+            for member, value in (("inner", inner), ("inner_sel", inner_sel),
+                                  ("text", text), ("text_sel", text_sel)):
+                path = theme.family_path(prefix, member)
+                default = theme.default_of(path)
+                if default is None:
+                    continue
+                if color_close(value, default):
+                    still_default.append("{}={}".format(member, theme.color_to_hex(value)))
+            check(not still_default,
+                  "预设「{}」{} 不再等于出厂默认值".format(preset, prefix),
+                  still_default)
+
+    # 派生方式写清楚：马拉松两套的深档 == scale_color(强调色, DEEP_ACCENT_FACTOR)
+    for preset in ("马拉松 建模 低干扰", "马拉松 浅灰卡"):
+        colors = theme.preset_colors(preset) or {}
+        for prefix in theme.DEEP_ACCENT_FAMILIES:
+            accent = colors.get(theme.family_path(prefix, "item"))
+            inner_sel = colors.get(theme.family_path(prefix, "inner_sel"))
+            derived = theme.scale_color(accent, theme.DEEP_ACCENT_FACTOR)
+            check(theme.color_close(inner_sel, derived),
+                  "预设「{}」{} 的深档 == scale_color(强调色, {})（派生值不是凭空取的）".format(
+                      preset, prefix, theme.DEEP_ACCENT_FACTOR),
+                  (theme.color_to_hex(inner_sel), theme.color_to_hex(derived)))
+
+    # 死亡搁浅那一套用的是调色板里备好的蓝深档（不是现算的）
+    colors = theme.preset_colors("死亡搁浅") or {}
+    for prefix in theme.DEEP_ACCENT_FAMILIES:
+        check(color_close(colors.get(theme.family_path(prefix, "inner_sel")),
+                          theme.stranding_color("blue_dim")),
+              "「死亡搁浅」{} 的填充就是调色板里的 DS_BLUE_DIM".format(prefix),
+              theme.color_to_hex(colors.get(theme.family_path(prefix, "inner_sel"))))
+
+    # 真套一次：轨道 / 填充 / 文字在真实主题里也分得开（8 位量化 + 读回校验）
+    theme.apply_colors(current, theme.preset_colors(theme.preset_names()[0]) or {})
+    for prefix in theme.DEEP_ACCENT_FAMILIES:
+        live = theme.read_family(current, prefix)
+        if not {"inner", "inner_sel", "text", "text_sel"} <= set(live):
+            continue
+        check(abs(theme.luminance(live["inner"]) - theme.luminance(live["inner_sel"])) >= 0.15,
+              "套用预设后「{}」实际主题里轨道与填充仍分得开".format(prefix),
+              (theme.color_to_hex(live["inner"]), theme.color_to_hex(live["inner_sel"])))
+        check(not theme.family_contrast_report(current, prefix),
+              "套用预设后「{}」实际主题里没有看不清的字".format(prefix),
+              theme.family_contrast_report(current, prefix))
 
 
 def test_save_preferences(module):
@@ -2083,6 +2316,57 @@ def test_startup_layout(module):
     check("LAYOUT_LIBRARY_NAME" in source and "user_resource('CONFIG')" in source,
           "布局库放在 Blender 用户配置目录下的固定名字里（不写进用户工程目录）")
 
+    # ---- 重名收尾（中文界面下出厂启动文件里也有同名工作区）----
+    dedupe = function_source(source, "_dedupe_appended_workspaces")
+    delete_helper = function_source(source, "_delete_workspace")
+    collision_helper = function_source(source, "_workspace_collision_pairs")
+    report_helper = function_source(source, "_dedupe_report_parts")
+    check("_dedupe_appended_workspaces" in static,
+          "启动布局流程里调用了重名收尾函数")
+    check("_workspace_collision_pairs" in collision_helper
+          and "isdigit()" in collision_helper,
+          "只认「X 与 X.<数字> 同时存在」的成对重名（不成对的一律不碰）",
+          collision_helper[:200])
+    check(bool(_api_calls(delete_helper, "bpy.ops.workspace.delete")),
+          "删除出厂重名走的是工作区删除算符 bpy.ops.workspace.delete()")
+    check("result != {'FINISHED'}" in delete_helper
+          or 'result != {"FINISHED"}' in delete_helper,
+          "**检查删除算符的返回值**（只有 FINISHED 才继续，不然后面全是假的）",
+          delete_helper[:400])
+    check("except Exception" in delete_helper,
+          "删除算符抛异常也算没删掉（无头下实测会抛 GPU API 不可用）")
+    check("for item in bpy.data.workspaces" in delete_helper
+          and "len(bpy.data.workspaces) < before" in delete_helper,
+          "不止看返回值：还要核对**实际效果**（对象真的没了 + 数量真的少了）")
+    check(not _api_calls(source, "bpy.data.batch_remove"),
+          "绝不用 bpy.data.batch_remove 删工作区（删到窗口当前那个会让 Blender "
+          "退出时段错误，实测 exit=11）",
+          _api_calls(source, "bpy.data.batch_remove"))
+    check("break" not in dedupe,
+          "某一对收尾失败**只跳过这一对**、继续处理其它对（不 break 掉整个循环）")
+    check("_rename_factory_workspace" in dedupe and "FACTORY_WORKSPACE_PREFIX" in source,
+          "删不掉时给出厂那份改名让位（把原名让给用户的工作区）")
+    check("plain.name = target_name" in dedupe,
+          "改名回原名失败时把出厂那份改回去（不留'两边都不是原名'的中间态）")
+    check("_make_workspace_current" in source and "window.workspace" in source,
+          "先把出厂那份设为当前工作区，并**核实**是否真的成了（删除算符删的是当前工作区）")
+    check("GPU" in delete_helper or "background" in delete_helper,
+          "把「无头下删除算符不可用」这条实测写进了实现注释（免得以后有人又踩）")
+    # 文案必须如实 + 给出可执行的替代路径；而且真机测试直接调用它断言
+    report_text = "；".join(module.ops._dedupe_report_parts(11, 0, 11, [], []))
+    check("删掉 0 个出厂重名" in report_text,
+          "收尾报告如实说出删掉了几个出厂重名", report_text)
+    check("删不掉工作区" in report_text,
+          "删不掉时如实写明「本版 Blender 的脚本接口删不掉工作区」", report_text)
+    check("右键" in report_text and "删除工作区" in report_text,
+          "报告给出可执行的替代路径（工作区标签上右键 ▸ 删除工作区）", report_text)
+    leftover_text = "；".join(module.ops._dedupe_report_parts(
+        11, 0, 11, [(None, None)], ["改名失败"]))
+    check("还有 1 对同名工作区没能收尾" in leftover_text and "改名失败" in leftover_text,
+          "还有残留重名时如实报出条数与原因", leftover_text)
+    clean_text = "；".join(module.ops._dedupe_report_parts(0, 0, 0, [], []))
+    check(clean_text == "", "没有重名时不多说一句废话（报告保持干净）", clean_text)
+
     config = _isolated_config_dir()
     if config is None:
         skip("配置目录不是隔离沙箱，跳过真实写启动文件（避免改到用户真实配置）")
@@ -2170,7 +2454,7 @@ def test_startup_layout(module):
         check(os.path.exists(os.path.join(config, module.ops.LAYOUT_LIBRARY_NAME)),
               "布局库写在配置目录里的固定名字上", module.ops.LAYOUT_LIBRARY_NAME)
 
-        # 启动文件里应该：有那批工作区、没有场景物体
+        # 启动文件里应该：有那批工作区（原名）、没有场景物体、没有重名对
         startup_path = os.path.join(config, "startup.blend")
         try:
             with bpy.data.libraries.load(startup_path) as (src, _dst):
@@ -2180,13 +2464,87 @@ def test_startup_layout(module):
                              if not any(item == name or item.startswith(name + ".")
                                         for item in startup_workspaces)]
             check(not missing_names,
-                  "启动文件里覆盖了记录下来的每个工作区（同名冲突允许 .001 后缀）",
+                  "启动文件里覆盖了记录下来的每个工作区",
                   (missing_names, startup_workspaces[:4]))
+            # 重名收尾之后：每个工作区都该拿回**原来的名字**，不再是 .001
+            exact_missing = [name for name in recorded_workspaces
+                             if name not in startup_workspaces]
+            check(not exact_missing,
+                  "记录下来的工作区在启动文件里都是**原名**（不再带 .001 后缀）",
+                  (exact_missing, startup_workspaces[:8]))
+            startup_pairs = [name for name in startup_workspaces
+                             if name.rpartition(".")[2].isdigit()
+                             and name.rpartition(".")[0] in startup_workspaces]
+            check(not startup_pairs,
+                  "启动文件里没有「X」与「X.<数字>」并存的重名对",
+                  startup_pairs[:6])
+            leftover = [name for name in startup_workspaces
+                        if name.startswith(module.ops.FACTORY_WORKSPACE_PREFIX)]
+            check(len(startup_workspaces) >= len(recorded_workspaces),
+                  "启动文件里的工作区数量不少于你记录下来的数量",
+                  (len(startup_workspaces), len(recorded_workspaces)))
+            if leftover:
+                # 本环境删不掉出厂重名 → 它们被改名让位，数量对得上
+                check(len(startup_workspaces) == len(recorded_workspaces) + len(leftover),
+                      "没能删掉的出厂重名项都在（{} 个，带「出厂」前缀），数量对得上".format(
+                          len(leftover)),
+                      (len(startup_workspaces), len(recorded_workspaces), len(leftover)))
             check(not startup_objects,
                   "启动文件是空场景（没有任何物体，场景没被带进去）",
                   startup_objects[:4])
         except Exception as error:
             check(False, "能读回启动文件检查内容", "{}".format(error))
+
+        # ---- 重名收尾：在沙箱会话里直接对助手函数做一次端到端验证 ----
+        ops = module.ops
+        current_names = [workspace.name for workspace in bpy.data.workspaces]
+        check(not ops._workspace_collision_pairs(),
+              "收尾之后当前会话里没有残留的重名对",
+              [item[0].name for item in ops._workspace_collision_pairs()][:4])
+
+        # 无头下删除算符不可用：助手必须**如实**返回"没删掉"，不能假装成功
+        victim = bpy.data.workspaces[0]
+        count_before = len(bpy.data.workspaces)
+        removed_live = ops._delete_workspace(victim)
+        check(removed_live is False,
+              "无头下 _delete_workspace 如实返回 False（本版 Blender 脚本删不掉工作区）",
+              removed_live)
+        check(victim in list(bpy.data.workspaces)
+              and len(bpy.data.workspaces) == count_before,
+              "调用之后那个工作区仍在、数量没变（没有偷偷删掉别的工作区）",
+              (victim.name, len(bpy.data.workspaces)))
+
+        # 造一对重名，跑一遍收尾：用户那份拿回原名、原有工作区一个不少
+        try:
+            duplicated = bpy.ops.workspace.duplicate()
+        except Exception as error:
+            duplicated = "抛出异常：{}".format(error)
+        if duplicated != {'FINISHED'}:
+            skip("当前会话调不了工作区复制算符（{}），跳过重名收尾的动态验证".format(
+                duplicated))
+        else:
+            pairs = ops._workspace_collision_pairs()
+            check(len(pairs) >= 1,
+                  "造出 .001 重名之后 _workspace_collision_pairs() 能认出来（{} 对）".format(
+                      len(pairs)),
+                  [item[0].name for item in pairs][:4])
+            before_objects = [workspace for workspace in bpy.data.workspaces]
+            removed_dynamic, renamed_dynamic, left, problems = (
+                ops._dedupe_appended_workspaces())
+            live = list(bpy.data.workspaces)
+            check(not left, "收尾之后不再有 X / X.<数字> 重名对",
+                  [item[0].name for item in left][:4])
+            check(renamed_dynamic >= 1, "至少有一个工作区改名回了原名", renamed_dynamic)
+            # 按**对象**核对（不能按名字：收尾本来就要把 .001 改成原名）
+            vanished = [workspace.name for workspace in before_objects
+                        if not any(item is workspace for item in live)]
+            check(not vanished,
+                  "原有的工作区一个都没丢（按对象核对，改名不算丢）", vanished[:4])
+            check(len(live) == len(before_objects) - removed_dynamic,
+                  "收尾只做改名 / 删除，数量账对得上",
+                  (len(before_objects), len(live), removed_dynamic))
+            check(not problems or removed_dynamic or renamed_dynamic,
+                  "收尾要么成功要么如实报问题（不静默）", problems[:3])
     finally:
         _purge_test_samples(module)
         try:
@@ -2776,7 +3134,9 @@ def main():
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
     run("主题颜色（N 面板）", test_theme, module)
     run("预设：标签独立型家族", test_preset_label_families, module)
-    run("预设：必须保持出厂默认值的项", test_preset_factory_locked, module)
+    run("预设：死亡搁浅", test_preset_death_stranding, module)
+    run("预设：视口辅助元素", test_preset_viewport_helpers, module)
+    run("预设：深档强调的三个家族", test_preset_deep_accent_families, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)

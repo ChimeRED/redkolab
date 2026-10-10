@@ -18,8 +18,9 @@
   所以不要指望写入值能原样读回，比较颜色时要留约 1/255 的容差。
 * 主题里存的**就是显示值**（0-255 归一化），所以 :func:`hex_color` 直接
   用 ``/255`` 换算，不做线性变换。
-* 预设是一套「失落星船：马拉松」风格的**酸性配色**（``ACID`` 里是 hex 色值，
-  方便微调），只改按钮与状态色，不动视口。
+* 预设一共三套：两套「失落星船：马拉松」风格的**酸性配色**（``MARATHON`` 里是
+  hex 色值）、一套「死亡搁浅」风格的**冷炭黑 + 蓝主强调**配色（``STRANDING``），
+  都只改按钮与状态色；视口只写回两个辅助元素（网格线 / 法线）。
 * 「恢复默认」只对**实测跨版本一致**的颜色提供默认值（见 ``DEFAULT_COLORS``，
   含按钮 / 状态色与视口）；没有记录的颜色项不会假装有默认值，
   避免把 5.x 的默认值套到 4.0 上。
@@ -675,8 +676,6 @@ MARATHON = {
     "border": TOKENS["BORDER_SUBTLE"],
     "warning": TOKENS["STATE_WARNING"],
     "lime_calm": TOKENS["ACCENT_PRIMARY_CALM"],
-    "cyan_calm": TOKENS["ACCENT_SECONDARY_CALM"],
-    "magenta_calm": TOKENS["ACCENT_TERTIARY_CALM"],
 }
 
 #: 旧名字保留（早期版本叫 ACID）
@@ -686,6 +685,65 @@ ACID = MARATHON
 def marathon_color(key, alpha=1.0):
     """取调色板里的颜色（hex 转 0-1 浮点）。"""
     return hex_color(MARATHON.get(key, "#FFFFFF"), alpha)
+
+
+# ------------------------------------------------------- 死亡搁浅 冷炭黑配色
+#
+# 「死亡搁浅」（DEATH STRANDING）观感：冷炭黑底 + **蓝为主强调** + **橙只做点缀**。
+# 与 :data:`MARATHON` 同级的一份**集中管理**色表 —— 改这一块就能整体换风格，
+# 预设函数（:func:`_stranding_preset`）里不再散落 hex。
+
+#: 「死亡搁浅」色表：键 -> hex（注释里的用途就是用户逐项确认过的调色板注解）。
+#: rgb 是 hex 的直接换算（主题色存的是显示值，不做线性变换）。
+STRANDING = {
+    "bg": "#14171A",          # 3D 视口 / 节点编辑器背景（冷炭黑）
+    "panel": "#1C2024",       # 面板底、常态控件底
+    "elevated": "#262B30",    # 弹出面板、活动标签
+    "line": "#3A4046",        # 低对比边框 / 分隔
+    "text": "#D6DADE",        # 主文字（灰白，不用纯白）
+    "text_dim": "#8A9299",    # 次级文字、非活动标签
+    "blue": "#4B7FA8",        # 主强调：选中行 / 选中态填充（多数家族 inner_sel）
+    "blue_dim": "#2E4E68",    # 蓝的深档：要在它上面配浅色文字的场合
+    "orange": "#D08A2E",      # 点缀强调：极少量关键项
+    "orange_dim": "#8A5A1E",  # 橙的深档
+    "steel": "#6E7B85",       # 技术性元素、线框
+    "red": "#B4453C",         # 危险 / 被覆盖（克制）
+    "warn": "#C9A227",        # 警告
+    "disabled": "#5A626B",    # 禁用态（降亮但可辨）
+}
+
+#: 暖色（红 / 橙 / 琥珀）判定的色相窗口与下限，供 :func:`warm_accent` 用。
+#: 0 ~ 0.16 覆盖红（#B4453C 约 4 度）到琥珀（#C9A227 约 46 度）；
+#: 冷色（蓝 #4B7FA8 约 206 度、钢灰约 0.57）与炭黑（饱和度 < 0.3 的中性灰）
+#: 都落在窗口之外，所以这个判据只会抓到"点缀暖色"。
+WARM_HUE_MAX = 0.16
+WARM_HUE_MIN_WRAP = 0.95
+WARM_MIN_SATURATION = 0.3
+WARM_MIN_VALUE = 0.2
+
+
+def warm_accent(color):
+    """这个颜色算不算「暖色点缀」（红 / 橙 / 琥珀）——是就返回 True。
+
+    用户明确要求"蓝是主强调、橙只做点缀，绝不把所有选中态统一染橙"，
+    :func:`warm_accent` 就是这条要求的机械化判据：一套预设里出现的暖色路径
+    必须全部写在白名单上（死亡搁浅预设见 :data:`STRANDING_WARM_PATHS`）。
+    """
+    if color is None:
+        return False
+    values = list(color)[:3]
+    while len(values) < 3:
+        values.append(0.0)
+    red, green, blue = (max(0.0, min(1.0, float(value))) for value in values)
+    hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+    if saturation < WARM_MIN_SATURATION or value < WARM_MIN_VALUE:
+        return False
+    return hue <= WARM_HUE_MAX or hue >= WARM_HUE_MIN_WRAP
+
+
+def stranding_color(key, alpha=1.0):
+    """取「死亡搁浅」色表里的颜色（hex 转 0-1 浮点）。"""
+    return hex_color(STRANDING.get(key, "#FFFFFF"), alpha)
 
 
 
@@ -924,8 +982,8 @@ def family_contrast_report(theme, prefix):
 #: 结果就是"网格线被减淡、法线看不清"。
 #:
 #: 修法**不是**"预设里不覆盖它们"：主题里已经被旧版写进去的暗值不会自己变回来，
-#: 用户看到的就是"完全没更新"。所以四套预设一律把它们**显式写回出厂默认值**
-#: （见 :func:`factory_locked_colors`）—— 再套一次预设就自愈。
+#: 用户看到的就是"完全没更新"。所以三套预设一律把它们**显式写回出厂默认值**
+#: （见 :func:`viewport_helper_colors`）—— 再套一次预设就自愈。
 #: 两项仍在颜色清单里，用户想单独调可以自己调。
 #:
 #: 不在这一组里的：``view_3d.wire_edit`` / ``view_3d.vertex_active`` 之类被预设
@@ -943,7 +1001,7 @@ VIEWPORT_HELPERS = (
 OPTION_BLOCK_FAMILIES = ("wcol_option", "wcol_radio", "wcol_toggle")
 
 #: 选项块（小方块 / 圆点 / 开关体）相对强调色的亮度倍数。
-#: 0.6 是实算出来的：四套预设的强调色按 0.6 调暗后亮度都在 0.45 上下，
+#: 0.6 是实算出来的：三套预设的强调色按 0.6 调暗后亮度都在 0.45 上下，
 #: 既让**选中块自身仍是醒目色**（与深色面板有对比，看得出选没选），
 #: 又让上面的浅色标签文字满足「文字 / 底色亮度差 >= 0.3」（预设必须成对给色的那条不变量）。
 OPTION_BLOCK_FACTOR = 0.6
@@ -976,38 +1034,80 @@ OPTION_LABEL_COLOR = TOKENS["TEXT_PRIMARY"]
 LABEL_INDEPENDENT_FAMILIES = ("wcol_menu_back",) + OPTION_BLOCK_FAMILIES
 
 #: 标签独立型家族的标签文字色（hex 写法，与 :data:`OPTION_LABEL_COLOR` 同源）：
-#: 浅灰白 —— 落在四套预设的深色菜单 / 弹出面板底上都读得清。
+#: 浅灰白 —— 落在三套预设的深色菜单 / 弹出面板底上都读得清。
 LABEL_TEXT_COLOR = OPTION_LABEL_COLOR
 
-#: **必须保持 Blender 出厂默认值**的控件家族：预设一律不套强调色，改回默认值。
-#: 这些控件要么是"用户靠它做精确拖动、必须看得见把手"的滑块，要么是
-#: "选中态底 + 图标"的工具栏按钮（图标色取 ``wcol->text``，一旦底色被强调色占掉
-#: 而图标仍按另一支颜色画，就会出现"图标压在强调色上看不清"）。
+#: **「深档强调色 + 浅色文字」的三个控件家族**：数值滑块 / 工具按钮 / 顶部工具项。
+#:
+#: 这三个家族曾经被整族**写回出厂默认值**（旧版有一份「必须保持出厂默认」的清单）。
+#: 那样确实保住了可读性，代价是用户看到的"滑块变回系统蓝、工具栏变回默认灰" ——
+#: 与整套预设的风格断裂（用户实测反馈）。现在改成"深一档的强调色"：
+#:
+#: * ``inner`` = 该主题的**深面板底色** —— 深色轨道正是这三个控件的原版手感；
+#: * ``inner_sel`` = 强调色的**深档**（按 :data:`DEEP_ACCENT_FACTOR` 用
+#:   :func:`scale_color` 派生的值，或调色板里已经备好的深档，如
+#:   :data:`STRANDING` 的 ``blue_dim``）—— 深档才压得住**浅色文字**，
+#:   同时与轨道拉开亮度差，拖动色块仍然分辨得出；
+#: * ``text`` / ``text_sel`` = **浅色**（该预设的主文字色），值文字在两处都读得清。
+#:
+#: 为什么这三个家族必须单独成对配（逐条来自 Blender 源码，三版一致）：
 #:
 #: * ``wcol_numslider``（数值滑块）：颜色选择器的色相 / 饱和度 / 明度 / Alpha 与
 #:   RGB 滑条都是 ``UI_BTYPE_NUM_SLIDER``（源码依据：4.0.2 ``interface_region_color_picker.cc``
 #:   里这些行都是 ``UI_BTYPE_NUM_SLIDER``；5.2.2 同名模板同构），而
 #:   ``widget_type(UI_WTYPE_SLIDER)`` / ``WidgetStyle::Slider`` 取的就是 ``wcol_numslider``
-#:   （4.0.2 / 4.2.23 / 5.2.2 一致）。旧预设把它整族套上强调色后，
-#:   拖动时 ``widget_state()`` 会把 ``inner`` 换成 ``inner_sel``（整条轨道变强调色）、
-#:   并把 ``text`` 换成近黑 ``text_sel`` —— "整条饱和度都变成荧光绿、值文字变黑"，
-#:   原版那种"深色轨道 + 可拖动的色块"随之消失。
+#:   （4.0.2 / 4.2.23 / 5.2.2 一致）。拖动时 ``widget_state()`` 把 ``inner`` 换成
+#:   ``inner_sel``、``text`` 换成 ``text_sel`` —— 这三支颜色必须成对配好，
+#:   否则就是"整条轨道变亮、值文字看不清"。
 #: * ``wcol_tool``（工具按钮 / 图标按钮）：``WidgetStyle::Exec``（``ButtonType::But`` /
 #:   ``Decorator`` 这类只有图标的按钮）用它，左侧 T 型工具栏的工具按钮就走这里；
-#:   图标颜色取 ``wcol->text``（``widget_draw_text_icon()``：``icon_color = wcol->text``）。
+#:   图标颜色取 ``wcol->text``（``widget_draw_text_icon()``：``icon_color = wcol->text``），
+#:   选中时 ``widget_state()`` 换成 ``text_sel``。
 #: * ``wcol_toolbar_item``（顶部工具项）：``WidgetStyle::ToolbarItem`` 用它，
 #:   同样走 ``widget_roundbut_exec`` + ``widget_state`` 的图标按钮绘制。
-#:   实测这两个家族在 4.0.2 / 4.2.23 / 5.2.2 上都有出厂默认值记录（真机 dump）。
+#:   实测这三个家族在 4.0.2 / 4.2.23 / 5.2.2 上都有出厂默认值记录（真机 dump）。
 #:
 #: 不在这一组里的：``wcol_scroll``（滚动条，把手是 ``item``，与拖动色块无关）、
 #: ``wcol_num``（数字输入框，不是滑块，没有可拖的填充条）、
 #: ``wcol_progress``（进度条，只读）。``wcol_slider`` 这个家族**在三个版本上都不存在**
 #: （真机 ``bl_rna`` 查不到），所以它不是候选。
-FACTORY_LOCKED_FAMILIES = (
+DEEP_ACCENT_FAMILIES = (
     "wcol_numslider",
     "wcol_tool",
     "wcol_toolbar_item",
 )
+
+#: 深档强调的压暗倍数（马拉松那两套预设用 ``scale_color(accent, 0.6)`` 派生深档）。
+#: 0.6 落在用户给的范围（45%~60%）的上沿，也是实算出来的：
+#:
+#: * 强调色 ``ACCENT_PRIMARY_CALM`` #B9CE4E 压到 0.6 得 #6F7C2F，相对亮度 0.4525；
+#: * 与深面板 #141821（亮度 0.0933）差 **0.359** —— 轨道与拖动块分得开；
+#: * 与浅色文字 #DDE3E8（亮度 0.8866）差 **0.434** —— 值文字压在填充上仍读得清；
+#: * 再往下压到 0.45：文字更清楚，但轨道与填充的差只剩 0.246，拖动块会变糊。
+DEEP_ACCENT_FACTOR = 0.6
+
+
+def deep_accent_family_colors(accent, track, text, inner_sel=None):
+    """「深档强调色 + 浅色文字」的三个家族配色，返回 ``{路径: 颜色}``。
+
+    * ``accent`` —— 该预设的强调色（用来派生深档，除非显式给了 ``inner_sel``）；
+    * ``track`` —— 轨道底色（该主题的深面板色）；
+    * ``text`` —— 浅色文字；
+    * ``inner_sel`` —— 深档强调色；给 ``None`` 时按 :data:`DEEP_ACCENT_FACTOR`
+      用 :func:`scale_color` 从 ``accent`` 派生（派生方式写在这里，不散落 hex）。
+
+    ``item``（高亮条 / 拖动色块）**不在这里覆盖**：它保持预设的强调色本身，
+    于是"深色轨道 + 深档填充 + 强调色色块"三层仍然分得开。
+    """
+    if inner_sel is None:
+        inner_sel = scale_color(accent, DEEP_ACCENT_FACTOR)
+    colors = {}
+    for prefix in DEEP_ACCENT_FAMILIES:
+        colors[family_path(prefix, "inner")] = track
+        colors[family_path(prefix, "inner_sel")] = inner_sel
+        colors[family_path(prefix, "text")] = text
+        colors[family_path(prefix, "text_sel")] = text
+    return colors
 
 
 def _option_block_override(block_color, label_color):
@@ -1021,8 +1121,8 @@ def _option_block_override(block_color, label_color):
     选中块用同一强调色调暗后的颜色，保持"选中块仍然是强调色"的语义，
     同时让「选中块上的小对勾」在深浅两个方向都还看得见。
 
-    注意**浅色标签要用在四套预设上**，包括浅色底那套：标签落的是菜单 / 饼菜单 /
-    提示框的底色，这几处四套预设都是深色（``wcol_menu_back.inner`` 等），
+    注意**浅色标签要用在三套预设上**，包括浅色底那套：标签落的是菜单 / 饼菜单 /
+    提示框的底色，这几处三套预设都是深色（``wcol_menu_back.inner`` 等），
     只有浅色字才读得清；浅灰卡自己的卡片底色只用在别的控件上。
     """
     colors = {}
@@ -1044,7 +1144,7 @@ def _label_family_override(block_color, label_color):
       底色是面板自己的 ``inner``。旧版只在"浅灰卡"那一套顺手改过它，另外三套漏了，
       于是"打勾后标签变黑、落在深色弹出面板上看不见"。
 
-    **不碰** ``inner_sel``：那是"菜单选中行"的语义位，四套预设各自的强调色底 + 近黑字
+    **不碰** ``inner_sel``：那是"菜单选中行"的语义位，三套预设各自的强调色底 + 近黑字
     是用户要的效果（真正的高亮行 ``wcol_menu_item`` 也一样，见
     :data:`LABEL_INDEPENDENT_FAMILIES` 的说明）。
     """
@@ -1157,22 +1257,16 @@ def label_contrast_problems(colors, prefix, threshold=0.3):
     return problems
 
 
-def _marathon_preset(style):
-    """按游戏实拍图生成三套配色。
+def _marathon_card_preset():
+    """马拉松「浅灰任务卡」这一套（照着游戏实拍图里的任务卡纸面）。
 
-    * ``card``  —— 浅灰任务卡：浅灰底 + 黑字 + 酸性黄绿选中
-    * ``hud``   —— 暗色 HUD：近黑底 + 浅灰字 + 青蓝选中
-    * ``alert`` —— 洋红警戒：深面板 + 浅灰字 + 洋红选中
+    浅灰底 + 近黑字 + 酸性黄绿选中。旧版这个工厂函数还负责另外两套马拉松配色
+    （一个偏青蓝、一个偏洋红），它们已按用户选择**彻底删除**（不保留存档），
+    所以这里不再需要 ``style`` 参数，也不再需要只有那两套用到的
+    ``cyan_calm`` / ``magenta_calm`` 两个色名。
     """
-    if style == "card":
-        base, text, edge = MARATHON["card"], MARATHON["ink"], MARATHON["card_edge"]
-        accent, accent_text = MARATHON["lime_calm"], MARATHON["ink"]
-    elif style == "alert":
-        base, text, edge = MARATHON["panel"], MARATHON["text"], MARATHON["magenta_dim"]
-        accent, accent_text = MARATHON["magenta_calm"], MARATHON["ink"]
-    else:
-        base, text, edge = MARATHON["ink"], MARATHON["text"], MARATHON["cyan_dim"]
-        accent, accent_text = MARATHON["cyan_calm"], MARATHON["ink"]
+    base, text, edge = MARATHON["card"], MARATHON["ink"], MARATHON["card_edge"]
+    accent, accent_text = MARATHON["lime_calm"], MARATHON["ink"]
 
     colors = {}
     for prefix, _label in WIDGET_FAMILIES:
@@ -1216,23 +1310,28 @@ def _marathon_preset(style):
     })
 
     colors.update(global_highlight_colors(hex_color(accent)))
-    if style == "card":
-        # 浅灰卡这套里，菜单底 / 选中行底仍是深色（``panel`` / ``ink``），
-        # 而菜单里的复选、单选圈走的是 ``wcol_menu_back.text`` 与 ``.text_sel``
-        # （``interface_widgets.cc`` 的 ``widget_state_option_menu()`` 会用它覆盖家族色），
-        # 所以标签文字必须是浅色 —— 这一条现在由 ``_label_family_override()`` 对
-        # **四套预设**统一处理（不再只有浅灰卡这一套）。
-        # 这里只保留"菜单选中行底色压深"：它上面配的就是那个浅色（差 0.75/0.79），
-        # 而原来的浅色选中行 + 浅色文字只有 0.13，改完两头都读得清。
-        colors["user_interface.wcol_menu_back.inner_sel"] = hex_color(MARATHON["ink"])
-    # 标签独立型家族的标签文字：四套预设统一用浅色（理由见 _label_family_override）
+    # 浅灰卡这套里，菜单底 / 选中行底仍是深色（``panel`` / ``ink``），
+    # 而菜单里的复选、单选圈走的是 ``wcol_menu_back.text`` 与 ``.text_sel``
+    # （``interface_widgets.cc`` 的 ``widget_state_option_menu()`` 会用它覆盖家族色），
+    # 所以标签文字必须是浅色 —— 这一条现在由 ``_label_family_override()`` 对
+    # **三套预设**统一处理（不再只有浅灰卡这一套）。
+    # 这里只保留"菜单选中行底色压深"：它上面配的就是那个浅色（差 0.75/0.79），
+    # 而原来的浅色选中行 + 浅色文字只有 0.13，改完两头都读得清。
+    colors["user_interface.wcol_menu_back.inner_sel"] = hex_color(MARATHON["ink"])
+    # 标签独立型家族的标签文字：三套预设统一用浅色（理由见 _label_family_override）
     colors.update(_label_family_override(scale_color(hex_color(accent), OPTION_BLOCK_FACTOR),
                                           hex_color(LABEL_TEXT_COLOR)))
-    colors.update(_marathon_frame_colors(hex_color(accent)))
+    # 滑块 / 工具按钮 / 顶部工具项：深面板轨道 + 深档强调 + 浅色文字。
+    # 这一套的卡片纸面是浅灰，浅色文字落在浅灰上只有 0.11 的亮度差（不达标），
+    # 所以这三族统一用 MARATHON["panel"] 这个**深面板色**当轨道 —— 见
+    # DEEP_ACCENT_FAMILIES 的说明，这也是"深色轨道 + 可拖动色块"的原版手感。
+    colors.update(deep_accent_family_colors(
+        hex_color(accent), hex_color(MARATHON["panel"]), hex_color(TOKENS["TEXT_PRIMARY"])))
+    colors.update(_frame_current_colors(hex_color(accent)))
     return {path: color for path, color in colors.items() if color is not None}
 
 
-def _marathon_frame_colors(accent):
+def _frame_current_colors(accent):
     """时间线 / 当前帧跟着强调色走（4.x 才有这些项，5.x 上写入会自然失败）。"""
     return {
         "dopesheet_editor.frame_current": accent,
@@ -1243,6 +1342,148 @@ def _marathon_frame_colors(accent):
         "image_editor.frame_current": accent,
         "view_3d.frame_current": accent,
     }
+
+
+#: 「死亡搁浅」预设里**允许**出现暖色（红 / 橙 / 琥珀）的路径白名单。
+#:
+#: 用户明确要求「蓝是主强调、橙只做点缀」——所以暖色路径是有清单、有上限的：
+#: 真机断言会拿 :func:`warm_accent` 扫一遍整套预设，出现清单外的暖色就失败
+#: （``tools/blender_test.py`` 的 ``test_preset_death_stranding``）。
+#:
+#: 清单分三类语义，每类只落一处，加起来 8 条：
+#: * 活动面板标题 + 已修改状态 —— 调色板里 ``orange`` / ``orange_dim`` 的指定用途；
+#: * 关键帧选中 / 倒角权重 —— ``warn``（警告）；
+#: * 被覆盖 / 边缝合线 —— ``red``（危险，克制）。
+STRANDING_WARM_PATHS = (
+    "user_interface.panel_active",
+    "user_interface.wcol_state.inner_changed",
+    "user_interface.wcol_state.inner_changed_sel",
+    "user_interface.wcol_state.inner_key_sel",
+    "user_interface.wcol_state.inner_overridden",
+    "user_interface.wcol_state.inner_overridden_sel",
+    "view_3d.edge_seam",
+    "view_3d.edge_bevel",
+)
+
+
+def _stranding_preset():
+    """「死亡搁浅」：冷炭黑 + **蓝为主强调** + **橙只做点缀**。
+
+    用户逐项确认的设计约束（同时是真机断言的判据）：
+
+    * **蓝是唯一的主选中色**：控件家族的 ``inner_sel`` 只会是 ``blue`` 或
+      ``blue_dim``（``wcol_tab`` 的 ``inner_sel`` 是面板层级色 ``elevated``）；
+      **绝不**把所有选中态统一染成橙 —— 这条由 :func:`warm_accent` +
+      :data:`STRANDING_WARM_PATHS` 机械守住；
+    * **橙只落在白名单路径上**（活动面板标题、已修改状态），是点缀不是主色；
+    * 常态文字用灰白 ``text`` / ``text_dim``，不用纯白大面积铺陈；
+      压在亮蓝填充上的**选中态**文字用最暗的 ``bg``（推导见下面的 ``on_blue``）；
+    * 面板三级层次 ``bg`` < ``panel`` < ``elevated``（亮度递增），边框用低对比 ``line``；
+    * 视口辅助元素（``view_3d.grid`` / ``view_3d.normal``）**不在这里**给值 ——
+      由 :func:`viewport_helper_colors` 统一写回出厂默认值（网格和默认一样明显）。
+
+    色值全部来自 :data:`STRANDING`（与 :data:`MARATHON` 同级的一份集中色表），
+    这里一个 hex 都不写。
+    """
+    base = stranding_color("panel")
+    text = stranding_color("text")
+    blue = stranding_color("blue")
+    # 压在 DS_BLUE 填充上的**选中态文字**：调色板里最暗的冷炭黑 DS_BG。
+    #: 为什么不用浅灰白的 DS_TEXT：把整套预设降饱和到 40% 之后，DS_BLUE 会从
+    #: 亮度 0.4663 升到约 0.586（饱和蓝降饱和后三通道靠近，B 只占亮度权重的 0.07），
+    #: 浅色文字的差只剩约 0.27，不满足项目既有的「降饱和后文字/底色差 >= 0.3」；
+    #: 配深色则全程够（满饱和 0.399、降饱和后 0.519），而且这正是项目既有的
+    #: "菜单高亮行 = 强调色底 + 近黑字"设计（见 LABEL_INDEPENDENT_FAMILIES 的说明）。
+    on_blue = stranding_color("bg")
+    colors = {}
+    for prefix, _label in WIDGET_FAMILIES:
+        colors[family_path(prefix, "inner")] = base
+        colors[family_path(prefix, "text")] = text
+        colors[family_path(prefix, "outline")] = stranding_color("line")
+        colors[family_path(prefix, "inner_sel")] = blue
+        colors[family_path(prefix, "text_sel")] = on_blue
+        colors[family_path(prefix, "outline_sel")] = blue
+        colors[family_path(prefix, "item")] = blue
+    colors.update({
+        "user_interface.wcol_list_item.inner": stranding_color("panel", 0.0),
+        "user_interface.wcol_scroll.inner": stranding_color("panel", 0.0),
+        "user_interface.wcol_menu_back.inner": stranding_color("elevated"),
+        "user_interface.wcol_menu_back.text": text,
+        "user_interface.wcol_pie_menu.inner": stranding_color("elevated"),
+        "user_interface.wcol_pie_menu.text": text,
+        # 非活动标签用次级文字色，活动标签的底用浮起面板色（层级，不是强调色）
+        "user_interface.wcol_tab.inner": stranding_color("bg"),
+        "user_interface.wcol_tab.text": stranding_color("text_dim"),
+        "user_interface.wcol_tab.inner_sel": stranding_color("elevated"),
+        "user_interface.wcol_tab.text_sel": text,
+        "user_interface.wcol_text.inner": stranding_color("bg"),
+        "user_interface.wcol_text.text": text,
+        "user_interface.wcol_text.inner_sel": stranding_color("blue_dim"),
+        "user_interface.wcol_text.text_sel": text,
+        "user_interface.wcol_box.inner": stranding_color("panel", 0.5),
+        "user_interface.wcol_box.inner_sel": blue,
+        "user_interface.wcol_list_item.inner_sel": blue,
+        # 面板三级层次：bg -> panel -> elevated
+        "view_3d.back": stranding_color("bg"),
+        "outliner.back": base,
+        "properties.back": base,
+        "node_editor.back": stranding_color("bg"),
+        "outliner.header": stranding_color("elevated"),
+        "properties.header": stranding_color("elevated"),
+        "outliner.tab_back": base,
+        "outliner.tab_active": stranding_color("elevated"),
+        "outliner.tab_inactive": stranding_color("bg"),
+        "properties.tab_back": base,
+        "properties.tab_active": stranding_color("elevated"),
+        "properties.tab_inactive": stranding_color("bg"),
+        # 5.x 的面板配色项（4.x 上写入会自然失败，不报错）
+        "user_interface.panel_back": base,
+        "user_interface.panel_header": stranding_color("elevated"),
+        "user_interface.panel_text": text,
+        "user_interface.panel_title": text,
+        "user_interface.panel_outline": stranding_color("line"),
+        # ---- 点缀暖色 1/2：活动面板标题 ----
+        "user_interface.panel_active": stranding_color("orange"),
+        # ---- 点缀暖色 2/2：已修改状态（调色板里 orange 的指定用途）----
+        "user_interface.wcol_state.inner_changed": stranding_color("orange"),
+        "user_interface.wcol_state.inner_changed_sel": stranding_color("orange_dim"),
+        # 其余状态色：蓝 / 钢灰 / 克制的红，都不铺开
+        "user_interface.wcol_state.inner_anim": blue,
+        "user_interface.wcol_state.inner_anim_sel": stranding_color("blue_dim"),
+        "user_interface.wcol_state.inner_key": text,
+        "user_interface.wcol_state.inner_key_sel": stranding_color("warn"),
+        "user_interface.wcol_state.inner_driven": stranding_color("steel"),
+        "user_interface.wcol_state.inner_driven_sel": stranding_color("steel"),
+        "user_interface.wcol_state.inner_overridden": stranding_color("red"),
+        "user_interface.wcol_state.inner_overridden_sel": stranding_color("red"),
+        # 3D 编辑模式：选中一律蓝，线框 / 技术元素用钢灰
+        "view_3d.editmesh_active": blue,
+        "view_3d.vertex_select": blue,
+        "view_3d.vertex_active": text,
+        "view_3d.edge_select": blue,
+        "view_3d.face_select": stranding_color("blue", 0.5),
+        "view_3d.edge_seam": stranding_color("red"),
+        "view_3d.edge_sharp": stranding_color("steel"),
+        "view_3d.edge_crease": stranding_color("steel"),
+        "view_3d.edge_bevel": stranding_color("warn"),
+        "view_3d.wire_edit": stranding_color("steel"),
+        # 节点编辑器（背景冷炭黑，网格 / 连线低对比）
+        "node_editor.grid": stranding_color("line"),
+        "node_editor.wire": stranding_color("line"),
+        "node_editor.node_backdrop": base,
+        "node_editor.node_selected": blue,
+        "node_editor.node_active": text,
+        # 基面网格线（view_3d.grid）与法线（view_3d.normal）不在这里出现：
+        # 它们由 preset_colors() 统一写回出厂默认值（见 viewport_helper_colors()）。
+    })
+    colors.update(global_highlight_colors(blue))
+    # 标签独立型家族的标签文字：浅灰白（理由见 _label_family_override）
+    colors.update(_label_family_override(stranding_color("blue_dim"), text))
+    # 滑块 / 工具按钮 / 顶部工具项：面板色轨道 + 调色板里备好的蓝深档 + 浅色文字
+    colors.update(deep_accent_family_colors(
+        blue, base, text, inner_sel=stranding_color("blue_dim")))
+    colors.update(_frame_current_colors(blue))
+    return {path: color for path, color in colors.items() if color is not None}
 
 
 #: 配色预设：照着失落星船 马拉松 的三张实拍图做的
@@ -1308,7 +1549,7 @@ def _marathon_preset_work():
         "view_3d.wire_edit": hex_color(TOKENS["TEXT_SECONDARY"]),
         # 基面网格线（view_3d.grid）与法线（view_3d.normal）不在这里出现：
         # 它们属于「必须写回出厂默认值」的项，由 preset_colors() 统一补上
-        # （见 factory_locked_colors()）—— 旧版留在主题里的暗值靠这一步自愈。
+        # （见 viewport_helper_colors()）—— 旧版留在主题里的暗值靠这一步自愈。
         # 状态色语义
         "user_interface.wcol_state.inner_changed": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
         "user_interface.wcol_state.inner_changed_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
@@ -1322,19 +1563,25 @@ def _marathon_preset_work():
         "user_interface.wcol_state.inner_overridden_sel": hex_color(TOKENS["STATE_ERROR"]),
     })
     colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
-    # 标签独立型家族的标签文字：四套预设统一用浅色（理由见 _label_family_override）
+    # 标签独立型家族的标签文字：三套预设统一用浅色（理由见 _label_family_override）
     colors.update(_label_family_override(
         scale_color(hex_color(TOKENS["ACCENT_PRIMARY_CALM"]), OPTION_BLOCK_FACTOR),
         hex_color(LABEL_TEXT_COLOR)))
-    colors.update(_marathon_frame_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
+    # 滑块 / 工具按钮 / 顶部工具项：深面板轨道 + 深档强调 + 浅色文字
+    # （不再整族写回出厂默认值 —— 那正是"滑块变蓝、工具栏变默认"的成因）
+    colors.update(deep_accent_family_colors(
+        hex_color(TOKENS["ACCENT_PRIMARY_CALM"]), hex_color(MARATHON["panel"]),
+        hex_color(TOKENS["TEXT_PRIMARY"])))
+    colors.update(_frame_current_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
     return {path: color for path, color in colors.items() if color is not None}
 
 
+#: 配色预设：两套「失落星船：马拉松」+ 一套「死亡搁浅」。
+#: 顺序就是 N 面板上按钮的顺序（按钮由 ``preset_names()`` 自动生成，ui.py 不参与）。
 PRESETS = (
     ("马拉松 建模 低干扰", _marathon_preset_work()),
-    ("马拉松 浅灰卡", _marathon_preset("card")),
-    ("马拉松 暗色 HUD", _marathon_preset("hud")),
-    ("马拉松 洋红警戒", _marathon_preset("alert")),
+    ("马拉松 浅灰卡", _marathon_card_preset()),
+    ("死亡搁浅", _stranding_preset()),
 )
 
 
@@ -1468,22 +1715,16 @@ def has_default(path, version=None):
     return path in defaults_table(version)
 
 
-def factory_locked_paths():
-    """**必须写回出厂默认值**的颜色项路径：视口辅助元素 + 必须保持原版手感的家族。
+def viewport_helper_paths():
+    """**必须写回出厂默认值**的颜色项：视口里的基面网格线与法线。
 
-    * :data:`VIEWPORT_HELPERS` —— 基面网格线 / 法线（预设不许压暗它们）；
-    * :data:`FACTORY_LOCKED_FAMILIES` 的全部成员 —— 数值滑块、工具按钮类。
-
-    取成员时用 :data:`WIDGET_MEMBERS`（含 ``item`` / ``outline_sel``），所以整族都会回到原版。
+    只有这两个 —— 三个"深档强调"控件家族（:data:`DEEP_ACCENT_FAMILIES`）曾经也
+    走这条路，现在改为"深档强调色 + 浅色文字"（见那个常量的说明）。
     """
-    paths = list(VIEWPORT_HELPERS)
-    for prefix in FACTORY_LOCKED_FAMILIES:
-        for member, _label, _group in WIDGET_MEMBERS:
-            paths.append(family_path(prefix, member))
-    return paths
+    return list(VIEWPORT_HELPERS)
 
 
-def factory_locked_colors(version=None):
+def viewport_helper_colors(version=None):
     """``{路径: 出厂默认值}``：预设必须把这些项**写回**默认值。
 
     值全部取自真机 dump 的默认值表（``DEFAULT_COLORS*``，经 :func:`default_of` 按版本合并），
@@ -1494,7 +1735,7 @@ def factory_locked_colors(version=None):
     再套一次预设就自愈。
     """
     result = {}
-    for path in factory_locked_paths():
+    for path in viewport_helper_paths():
         color = default_of(path, version)
         if color is not None:
             result[path] = color
@@ -1508,14 +1749,14 @@ def preset_names():
 def preset_colors(name):
     """预设 ``{路径: 颜色}``。
 
-    每次都会把「必须写回出厂默认值」的项（:func:`factory_locked_colors`）合并进来，
-    所以四套预设、以及"按当前饱和度重新套用"这条路径都会自愈，
+    每次都会把「必须写回出厂默认值」的视口辅助元素（:func:`viewport_helper_colors`）
+    合并进来，所以三套预设、以及"按当前饱和度重新套用"这条路径都会自愈，
     也保证以后新增预设不会再漏掉它们。
     """
     for preset_name, colors in PRESETS:
         if preset_name == name:
             merged = dict(colors)
-            merged.update(factory_locked_colors())
+            merged.update(viewport_helper_colors())
             return merged
     return None
 
