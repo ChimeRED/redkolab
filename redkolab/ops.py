@@ -13,7 +13,7 @@
 
 import bpy
 
-from . import compat, panels, theme, ui
+from . import compat, panels, stairs, theme, ui
 
 # --------------------------------------------------------------------- 小工具
 
@@ -313,6 +313,134 @@ class HHZ_OT_remove_all_modifiers(_BaseTargetsOperator):
 
 
 # --------------------------------------------------------------- 设置相关算符
+
+
+class HHZ_OT_stairs(bpy.types.Operator):
+    """一键楼梯（模态）：鼠标换方向、滚轮改节数、左键确认、右键/Esc 撤销。"""
+
+    bl_idname = "hhz.stairs"
+    bl_label = "一键楼梯"
+    bl_description = (
+        "把选中体块整成 0.2 高 × 0.3 宽（长度不变）并做相对偏移阵列；"
+        "移动鼠标换方向、滚轮改节数、左键确认、右键/Esc 取消"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    count: bpy.props.IntProperty(
+        name="节数",
+        description="楼梯节数（阵列数量），滚轮也可以改",
+        default=stairs.DEFAULT_COUNT,
+        min=stairs.MIN_COUNT,
+        max=stairs.MAX_COUNT,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return compat.poll_objects(context)
+
+    # ---------------------------------------------------------------- 交互
+    def invoke(self, context, event):
+        targets = compat.get_target_objects(context)
+        if not targets:
+            self.report({'WARNING'}, "先选中要变成楼梯的体块")
+            return {'CANCELLED'}
+
+        self._objects = []
+        self._direction = "RIGHT"
+        # 从饼菜单/面板点进来时事件坐标是点击位置，所以原点等第一次鼠标移动再定
+        self._origin = None
+
+        for obj in targets:
+            try:
+                original = tuple(obj.dimensions)
+            except Exception:
+                continue
+            stairs.resize_step(obj)
+            stairs.add_array(obj, stairs.factors_for_direction(self._direction), self.count)
+            self._objects.append((obj, original))
+
+        if not self._objects:
+            self.report({'WARNING'}, "选中的物体不支持这个操作")
+            return {'CANCELLED'}
+
+        self._set_status(context, self._hint())
+        context.window_manager.modal_handler_add(self)
+        compat.tag_redraw(context)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            self._revert()
+            self._set_status(context, None)
+            compat.tag_redraw(context)
+            self.report({'INFO'}, "已取消，体块恢复原样")
+            return {'CANCELLED'}
+
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            self._set_status(context, None)
+            compat.tag_redraw(context)
+            self.report({'INFO'}, "楼梯 {} 节 · {}".format(
+                stairs.clamp_count(self.count), self._direction_label()))
+            return {'FINISHED'}
+
+        changed = False
+        if event.type == 'WHEELUPMOUSE':
+            self.count = stairs.clamp_count(self.count + 1)
+            changed = True
+        elif event.type == 'WHEELDOWNMOUSE':
+            self.count = stairs.clamp_count(self.count - 1)
+            changed = True
+        elif event.type == 'MOUSEMOVE':
+            if self._origin is None:
+                self._origin = (event.mouse_x, event.mouse_y)
+                changed = True
+            else:
+                direction = stairs.direction_from_delta(
+                    event.mouse_x - self._origin[0], event.mouse_y - self._origin[1])
+                if direction and direction != self._direction:
+                    self._direction = direction
+                    changed = True
+
+        if changed:
+            self._refresh()
+            self._set_status(context, self._hint())
+        return {'RUNNING_MODAL'}
+
+    # ---------------------------------------------------------------- 内部
+    def _direction_label(self):
+        return {
+            "RIGHT": "+X 向右",
+            "LEFT": "-X 向左",
+            "UP": "+Y 向上",
+            "DOWN": "-Y 向下",
+        }.get(self._direction, self._direction)
+
+    def _hint(self):
+        return "楼梯 {} 节 · {} ｜ 移动鼠标换方向 · 滚轮改节数 · 左键确认 · 右键/Esc 取消".format(
+            stairs.clamp_count(self.count), self._direction_label())
+
+    def _refresh(self):
+        """按当前方向与节数更新所有阵列修改器。"""
+        for obj, _original in self._objects:
+            stairs.add_array(obj, stairs.factors_for_direction(self._direction), self.count)
+
+    def _revert(self):
+        """取消：删掉阵列修改器并把尺寸还原。"""
+        for obj, original in self._objects:
+            stairs.remove_array(obj)
+            try:
+                obj.dimensions = original
+            except Exception:
+                pass
+
+    def _set_status(self, context, text):
+        setter = getattr(getattr(context, "workspace", None), "status_text_set", None)
+        if setter is None:
+            return
+        try:
+            setter(text)
+        except Exception:
+            pass
 
 
 class HHZ_OT_open_preferences(bpy.types.Operator):

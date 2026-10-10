@@ -31,6 +31,7 @@ EXPECTED_ENTRIES = {
     "{}/ops.py".format(PACKAGE_NAME),
     "{}/pages.py".format(PACKAGE_NAME),
     "{}/panels.py".format(PACKAGE_NAME),
+    "{}/stairs.py".format(PACKAGE_NAME),
     "{}/theme.py".format(PACKAGE_NAME),
     "{}/ui.py".format(PACKAGE_NAME),
 }

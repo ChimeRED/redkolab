@@ -971,9 +971,13 @@ def test_pie_unchanged(module):
         "hhz.remove_all_materials",
         "hhz.apply_all_modifiers",
         "hhz.remove_all_modifiers",
+        "hhz.stairs",
     }
-    check(found == expected, "饼菜单只剩三个功能入口（设置已移出）",
+    check(found == expected, "饼菜单就是四个功能入口（设置已移出）",
           sorted(found) if found else found)
+
+    in_modeling = class_operator_idnames(source, "HHZ_PT_main")
+    check("hhz.stairs" in in_modeling, "一键楼梯也出现在建模页的主面板里", sorted(in_modeling))
 
     in_settings_panel = class_operator_idnames(source, "HHZ_PT_settings")
     check("hhz.open_preferences" in in_settings_panel,
@@ -1155,6 +1159,125 @@ def test_pages(module):
     setattr(manager, pages.PROP_NAME, pages.PAGE_MODELING)
 
 
+def test_stairs(module):
+    section("功能：一键楼梯（相对偏移阵列）")
+    stairs = module.stairs
+    context = bpy.context
+
+    # ---- 纯逻辑：尺寸与默认系数 ----
+    check(stairs.STEP_WIDTH == 0.3 and stairs.STEP_HEIGHT == 0.2,
+          "台阶尺寸是 宽 0.3 / 高 0.2", (stairs.STEP_WIDTH, stairs.STEP_HEIGHT))
+    check(stairs.DEFAULT_FACTORS == (1.0, 0.0, -1.0),
+          "默认系数 x=1, y=0, z=-1", stairs.DEFAULT_FACTORS)
+
+    # ---- 鼠标位移 -> 方向 -> 系数 ----
+    cases = (
+        ((60.0, 4.0), "RIGHT", (1.0, 0.0, -1.0)),
+        ((-60.0, 4.0), "LEFT", (-1.0, 0.0, -1.0)),
+        ((4.0, 60.0), "UP", (0.0, 1.0, -1.0)),
+        ((4.0, -60.0), "DOWN", (0.0, -1.0, -1.0)),
+        ((3.0, -3.0), None, (1.0, 0.0, -1.0)),
+    )
+    for (dx, dy), direction, factors in cases:
+        got = stairs.direction_from_delta(dx, dy)
+        check(got == direction, "鼠标位移 {} 判定为 {}".format((int(dx), int(dy)), direction), got)
+        check(stairs.factors_for_direction(got) == factors,
+              "位移 {} 得到系数 {}".format((int(dx), int(dy)), factors),
+              stairs.factors_for_direction(got))
+        check(stairs.factors_for_direction(got)[2] < 0,
+              "位移 {} 的 Z 系数始终为负（楼梯往下）".format((int(dx), int(dy))))
+
+    # ---- 节数范围 ----
+    check(stairs.clamp_count(0) == stairs.MIN_COUNT, "节数下限被夹住", stairs.clamp_count(0))
+    check(stairs.clamp_count(9999) == stairs.MAX_COUNT, "节数上限被夹住", stairs.clamp_count(9999))
+    check(stairs.clamp_count(7) == 7, "正常节数原样返回", stairs.clamp_count(7))
+
+    # ---- 真造一个体块跑一遍（手搓 mesh，避免依赖界面上下文）----
+    mesh = bpy.data.meshes.new("hhz_stairs_test")
+    mesh.from_pydata(
+        [(-0.5, -0.5, -0.5), (0.5, -0.5, -0.5), (0.5, 0.5, -0.5), (-0.5, 0.5, -0.5),
+         (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5)],
+        [],
+        [(0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)],
+    )
+    mesh.update()
+    obj = bpy.data.objects.new("hhz_stairs_test", mesh)
+    context.scene.collection.objects.link(obj)
+    try:
+        obj.dimensions = (1.0, 4.0, 0.5)
+        context.view_layer.update()
+        original = tuple(obj.dimensions)
+
+        check(stairs.resize_step(obj), "体块整型成功")
+        context.view_layer.update()
+        size = tuple(round(value, 4) for value in obj.dimensions)
+        check(abs(size[0] - 0.3) < 0.001, "宽度被设成 0.3 m", size)
+        check(abs(size[2] - 0.2) < 0.001, "高度被设成 0.2 m", size)
+        check(abs(size[1] - original[1]) < 0.001, "长度保持不变", (size[1], original[1]))
+
+        modifier = stairs.add_array(obj, stairs.DEFAULT_FACTORS, 5)
+        check(modifier is not None and modifier.type == 'ARRAY', "加上了阵列修改器")
+        check(modifier.use_relative_offset is True, "用的是相对偏移（系数 × 该轴尺寸）",
+              modifier.use_relative_offset)
+        check(tuple(round(value, 3) for value in modifier.relative_offset_displace)
+              == (1.0, 0.0, -1.0), "默认系数写进了修改器",
+              tuple(modifier.relative_offset_displace))
+        check(modifier.count == 5, "节数写进了修改器", modifier.count)
+        found_modifier = stairs.find_modifier(obj)
+        check(found_modifier is not None and found_modifier == modifier,
+              "能按名字找回这个修改器（同一个，不是新建的）", found_modifier)
+
+        # 换方向 + 换节数：复用同一个修改器，不会越堆越多
+        before = len(obj.modifiers)
+        stairs.add_array(obj, stairs.factors_for_direction("LEFT"), 3)
+        check(len(obj.modifiers) == before, "重复调用不会多出修改器", len(obj.modifiers))
+        check(tuple(round(value, 3) for value in modifier.relative_offset_displace)
+              == (-1.0, 0.0, -1.0), "方向改成 -X 后系数跟着变",
+              tuple(modifier.relative_offset_displace))
+        check(modifier.count == 3, "节数跟到 3", modifier.count)
+
+        # 相对偏移 × 尺寸 = 每级实际位移：宽度 0.3 -> 每级挪 0.3，高度 0.2 -> 每级降 0.2
+        step_x = modifier.relative_offset_displace[0] * obj.dimensions[0]
+        step_z = modifier.relative_offset_displace[2] * obj.dimensions[2]
+        check(abs(abs(step_x) - 0.3) < 0.001, "每级横向位移正是 0.3 m", step_x)
+        check(abs(abs(step_z) - 0.2) < 0.001, "每级下降正是 0.2 m", step_z)
+
+        check(stairs.remove_array(obj), "能删掉阵列修改器")
+        check(stairs.find_modifier(obj) is None, "删掉后找不到了")
+    finally:
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if data is not None and data.users == 0:
+            bpy.data.meshes.remove(data)
+
+    # ---- 算符 ----
+    check(operator_class(module, "stairs") is not None, "算符 hhz.stairs 已注册")
+    operator = module.ops.HHZ_OT_stairs
+    check(operator.bl_label == "一键楼梯", "算符名字是「一键楼梯」", operator.bl_label)
+    check("UNDO" in set(operator.bl_options), "算符可撤销（UNDO）", list(operator.bl_options))
+
+    ops_source = source_of(module, "ops.py")
+    # 注意：Python 定义的算符属性不在 <算子类>.bl_rna 里，要经 bpy.ops.<算子>.get_rna_type() 查
+    count_prop = bpy.ops.hhz.stairs.get_rna_type().properties.get("count")
+    check(count_prop is not None, "算符的 count 属性注册进了 RNA")
+    if count_prop is not None:
+        check(count_prop.type == 'INT', "count 是整数属性", count_prop.type)
+        check(count_prop.default == module.stairs.DEFAULT_COUNT,
+              "节数默认值 = {}".format(module.stairs.DEFAULT_COUNT), count_prop.default)
+    check(module.stairs.DEFAULT_COUNT == 2, "默认节数是 2", module.stairs.DEFAULT_COUNT)
+    check("min=stairs.MIN_COUNT" in ops_source and "max=stairs.MAX_COUNT" in ops_source,
+          "算符的节数范围接的是 stairs 的上下限")
+    for token in ("MOUSEMOVE", "WHEELUPMOUSE", "WHEELDOWNMOUSE", "LEFTMOUSE", "RUNNING_MODAL"):
+        check(token in ops_source, "模态处理里用到了 {}".format(token))
+
+
+def source_of(module, filename):
+    """读插件包里某个源文件的内容（静态检查用）。"""
+    path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), filename)
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 def test_unregister(module_name, module):
     section("卸载清理")
     keyconfig = module.compat.addon_keyconfig()
@@ -1198,6 +1321,7 @@ def main():
     run("一键删除所有材质", test_materials)
     run("一键应用所有修改器", test_apply_modifiers, module)
     run("一键删除所有修改器", test_remove_modifiers)
+    run("一键楼梯（相对偏移阵列）", test_stairs, module)
     run("主题颜色（N 面板）", test_theme, module)
     run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
