@@ -4,17 +4,17 @@
 包含三部分：
 
 * 饼式菜单（默认快捷键 `` 键，可在插件偏好设置里改）
-* 3D 视图 N 面板（侧栏里的「红红子lab」标签页）
-* 插件偏好设置（快捷键捕获、手动改键、启用开关）
+* 3D 视图 N 面板（侧栏里的「红红子lab」标签页），下面挂着「主题颜色」子面板
+* 插件偏好设置（快捷键捕获、手动改键、启用开关、主题颜色项）
 
 键位注册走 ``window_manager.keyconfigs.addon``，这是插件专用键位表
 （4.0 ~ 5.x 都支持），卸载插件时会被自动清掉。
 """
 
 import bpy
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
 
-from . import compat
+from . import compat, theme
 
 #: 饼菜单的 bl_idname（必须以 _MT_ 命名，Menu 才能注册成功）
 PIE_IDNAME = "OBJECT_MT_hhz_pie"
@@ -137,6 +137,16 @@ def apply_hotkey(context, key_type, ctrl=False, shift=False, alt=False, oskey=Fa
     return refresh_keymap()
 
 
+def _on_theme_target_update(self, context):
+    """切换颜色项时，把该项当前的色值读进选择器。"""
+    theme.read_into_preferences(context, self)
+
+
+def _on_theme_color_update(self, context):
+    """选择器一变就写进主题 —— 实时预览的那一步。"""
+    theme.write_from_preferences(context, self)
+
+
 def _on_preferences_update(self, context):
     refresh_keymap()
 
@@ -214,6 +224,61 @@ class HHZ_PT_main(bpy.types.Panel):
         )
 
 
+class HHZ_PT_theme(bpy.types.Panel):
+    """主题颜色子面板。
+
+    按需求只放在 N 面板里，饼菜单不收录这个功能。
+    """
+
+    bl_idname = "HHZ_PT_theme"
+    bl_label = "主题颜色"
+    bl_parent_id = "HHZ_PT_main"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = compat.ADDON_NAME
+
+    def draw(self, context):
+        layout = self.layout
+
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            layout.label(text="读不到插件偏好设置", icon='ERROR')
+            return
+        current = theme.current_theme(context)
+        if current is None:
+            layout.label(text="读不到当前主题", icon='ERROR')
+            return
+
+        path = getattr(preferences, "theme_target", "")
+        if theme.resolve(current, path) is None:
+            layout.label(text="当前 Blender 没有这一项颜色", icon='INFO')
+
+        column = layout.column(align=True)
+        column.prop(preferences, "theme_target", text="")
+        row = column.row(align=True)
+        row.prop(preferences, "theme_color", text="")
+        row.operator("hhz.theme_read", text="", icon='FILE_REFRESH')
+        if theme.component_count(current, path) == 3:
+            column.label(text="该项是 RGB，Alpha 会被忽略", icon='INFO')
+
+        row = layout.row(align=True)
+        operation = row.operator("hhz.theme_restore_default", text="恢复默认")
+        operation.scope = 'CURRENT'
+        operation = row.operator("hhz.theme_restore_default", text="全部视口")
+        operation.scope = 'VIEWPORT'
+
+        box = layout.box()
+        box.label(text="视口配色预设")
+        grid = box.grid_flow(row_major=True, columns=3, align=True)
+        for name in theme.preset_names():
+            operation = grid.operator("hhz.theme_apply_preset", text=name)
+            operation.preset = name
+
+        layout.separator()
+        layout.operator("hhz.theme_save_preferences", icon='FILE_TICK')
+        layout.label(text="改动立即生效；不保存偏好设置则重启后还原", icon='INFO')
+
+
 # --------------------------------------------------------------- 偏好设置
 
 
@@ -248,6 +313,22 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         description="关掉之后就只能从 N 面板呼出饼菜单",
         default=True,
         update=_on_preferences_update,
+    )
+    theme_target: EnumProperty(
+        name="颜色项",
+        description="要修改的主题颜色；只列出当前 Blender 版本真实存在的项",
+        items=theme.target_items,
+        update=_on_theme_target_update,
+    )
+    theme_color: FloatVectorProperty(
+        name="颜色",
+        description="当前颜色项的颜色；一改动就会立刻写进主题（RGB 项的 Alpha 会被忽略）",
+        subtype='COLOR',
+        size=4,
+        min=0.0,
+        max=1.0,
+        default=(0.33, 0.33, 0.33, 1.0),
+        update=_on_theme_color_update,
     )
 
     def hotkey_label(self):

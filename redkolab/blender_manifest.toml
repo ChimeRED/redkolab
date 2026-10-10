@@ -10,9 +10,9 @@
 schema_version = "1.0.0"
 
 id = "redkolab"
-version = "1.1.0"
+version = "1.2.0"
 name = "红红子lab (REDKOlab)"
-tagline = "一键清空材质、应用或删除所有修改器"
+tagline = "一键清空材质、应用或删除所有修改器；N 面板改界面主题颜色"
 maintainer = "Red04"
 type = "add-on"
 

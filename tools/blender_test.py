@@ -18,6 +18,7 @@
 BLENDER_USER_EXTENSIONS 环境变量把配置目录指到临时目录，就不会污染真实配置。
 """
 
+import ast
 import os
 import re
 import sys
@@ -126,6 +127,16 @@ def assigned_materials(obj):
         if slot.material is not None:
             total += 1
     return total
+
+
+def color_close(actual, expected, tolerance=1.5 / 255.0):
+    """颜色比较：主题颜色内部是 8 位量化存储的，必须留容差。
+
+    实测：写入 0.5 会读回 128/255 = 0.50196，写入 0.25 读回 64/255。
+    """
+    if actual is None or expected is None or len(actual) != len(expected):
+        return False
+    return all(abs(a - e) <= tolerance for a, e in zip(actual, expected))
 
 
 # --------------------------------------------------------------- 安装与启用
@@ -711,6 +722,127 @@ def test_bad_hotkey(module):
           len(_pie_shortcut_items(keyconfig)))
 
 
+def test_theme(module):
+    section("功能：主题颜色（N 面板）")
+    theme = module.theme
+    context = bpy.context
+    current = theme.current_theme(context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    # 动态枚举：只列出当前版本真实存在的颜色项
+    paths = theme.available_paths(context)
+    check(len(paths) >= 20, "可用颜色项 >= 20", len(paths))
+    listed = [item[0] for item in theme.target_items(None, context)]
+    check(listed == paths, "枚举列表与可用列表一致")
+    check(all(theme.resolve(current, path) is not None for path in listed),
+          "枚举里每一项都能解析出颜色")
+    absent = [path for path, _, _ in theme.TARGETS if theme.resolve(current, path) is None]
+    print("  当前版本没有的颜色项：{}".format(absent if absent else "无"))
+    check(all(path not in listed for path in absent), "缺失的颜色项没有出现在枚举里")
+
+    # 3 分量（RGB）与 4 分量（RGBA）都要能读写
+    rgb_path = "view_3d.space.gradients.high_gradient"
+    rgba_path = "view_3d.grid"
+    check(theme.component_count(current, rgb_path) == 3,
+          "视口背景是 RGB（3 分量）", theme.component_count(current, rgb_path))
+    check(theme.component_count(current, rgba_path) == 4,
+          "网格线是 RGBA（4 分量）", theme.component_count(current, rgba_path))
+
+    original_rgb = theme.get_color(current, rgb_path)
+    original_rgba = theme.get_color(current, rgba_path)
+
+    check(theme.set_color(current, rgb_path, (0.5, 0.25, 0.75, 0.9)),
+          "写入 3 分量颜色成功")
+    check(color_close(theme.get_color(current, rgb_path), (0.5, 0.25, 0.75, 1.0)),
+          "3 分量写回一致（多余的 alpha 被裁掉）", theme.get_color(current, rgb_path))
+    check(theme.set_color(current, rgba_path, (0.1, 0.2, 0.3, 0.4)),
+          "写入 4 分量颜色成功")
+    check(color_close(theme.get_color(current, rgba_path), (0.1, 0.2, 0.3, 0.4)),
+          "4 分量写回一致（含 alpha）", theme.get_color(current, rgba_path))
+
+    # 通过偏好设置属性走一遍：验证「实时写入主题」的回调
+    preferences = module.compat.get_preferences()
+    preferences.theme_target = rgb_path
+    preferences.theme_color = (0.11, 0.22, 0.33, 1.0)
+    check(color_close(theme.get_color(current, rgb_path), (0.11, 0.22, 0.33, 1.0)),
+          "改偏好设置里的颜色会实时写进主题", theme.get_color(current, rgb_path))
+
+    # 预设
+    preset_name = theme.preset_names()[0]
+    changed = theme.apply_preset(current, preset_name)
+    check(changed >= 3, "预设至少改到 3 个颜色项", changed)
+    expected = theme.preset_colors(preset_name)["view_3d.space.gradients.high_gradient"]
+    check(color_close(theme.get_color(current, rgb_path), expected),
+          "预设把视口背景改成了预期值", theme.get_color(current, rgb_path))
+
+    # 默认值：只对视口那一组有记录（跨版本实测一致），界面色不记录
+    check(theme.has_default(rgb_path), "视口背景记录了默认值")
+    check(not theme.has_default("user_interface.wcol_menu.inner"),
+          "界面色没有记录默认值（避免把 5.x 默认值套到旧版上）")
+    check(theme.restore_default(current, rgb_path), "恢复单项默认值成功")
+    check(color_close(theme.get_color(current, rgb_path), theme.DEFAULT_COLORS[rgb_path]),
+          "恢复后与记录的默认值一致", theme.get_color(current, rgb_path))
+    check(theme.restore_viewport_defaults(current) >= 11, "批量恢复视口默认值成功")
+
+    # 算符存在 + 真跑一遍
+    category = getattr(bpy.ops, "hhz", None)
+    for idname in ("theme_read", "theme_apply_preset", "theme_restore_default",
+                   "theme_save_preferences"):
+        check(category is not None and hasattr(category, idname),
+              "算符 hhz.{} 存在".format(idname))
+
+    result = bpy.ops.hhz.theme_read()
+    check(result == {'FINISHED'}, "「读取当前值」算符可用", result)
+    result = bpy.ops.hhz.theme_apply_preset(preset=preset_name)
+    check(result == {'FINISHED'}, "「应用预设」算符可用", result)
+    result = bpy.ops.hhz.theme_restore_default(scope='VIEWPORT')
+    check(result == {'FINISHED'}, "「全部视口恢复默认」算符可用", result)
+
+    # 面板挂在 N 面板里（需求：只进 N 面板）
+    panel = getattr(bpy.types, "HHZ_PT_theme", None)
+    check(panel is not None, "主题子面板已注册")
+    if panel is not None:
+        check(panel.bl_parent_id == "HHZ_PT_main", "主题面板挂在主面板下", panel.bl_parent_id)
+        check(panel.bl_space_type == 'VIEW_3D' and panel.bl_region_type == 'UI',
+              "主题面板在 3D 视图侧栏（N 面板）")
+
+    # 还原测试前的颜色
+    theme.set_color(current, rgb_path, original_rgb)
+    theme.set_color(current, rgba_path, original_rgba)
+
+
+def pie_operator_idnames(source):
+    """静态解析饼菜单类里出现的算符 idname。"""
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef) and node.name == "HHZ_MT_pie":
+            found = set()
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call)
+                        and isinstance(inner.func, ast.Attribute)
+                        and inner.func.attr == "operator"
+                        and inner.args
+                        and isinstance(inner.args[0], ast.Constant)):
+                    found.add(inner.args[0].value)
+            return found
+    return None
+
+
+def test_pie_unchanged(module):
+    section("饼菜单内容（需求：主题功能不进饼菜单）")
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
+    with open(ui_path, encoding="utf-8") as handle:
+        found = pie_operator_idnames(handle.read())
+    expected = {
+        "hhz.remove_all_materials",
+        "hhz.apply_all_modifiers",
+        "hhz.remove_all_modifiers",
+        "hhz.open_preferences",
+    }
+    check(found == expected, "饼菜单仍然只有原来四项", sorted(found) if found else found)
+
+
 def test_unregister(module_name, module):
     section("卸载清理")
     keyconfig = module.compat.addon_keyconfig()
@@ -754,6 +886,8 @@ def main():
     run("一键删除所有材质", test_materials)
     run("一键应用所有修改器", test_apply_modifiers, module)
     run("一键删除所有修改器", test_remove_modifiers)
+    run("主题颜色（N 面板）", test_theme, module)
+    run("饼菜单内容未被改动", test_pie_unchanged, module)
     run("算符 poll", test_poll)
     run("卸载清理", test_unregister, module_name, module)
 

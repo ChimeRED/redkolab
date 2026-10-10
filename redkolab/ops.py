@@ -7,12 +7,13 @@
 * :class:`HHZ_OT_apply_all_modifiers`   一键应用所有修改器
 * :class:`HHZ_OT_remove_all_modifiers`  一键删除所有修改器
 
-另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键。
+另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键，
+以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
 """
 
 import bpy
 
-from . import compat, ui
+from . import compat, theme, ui
 
 # --------------------------------------------------------------------- 小工具
 
@@ -434,3 +435,111 @@ class HHZ_OT_capture_hotkey(bpy.types.Operator):
             context.workspace.status_text_set(text)
         except Exception:
             pass
+
+
+# --------------------------------------------------------------- 主题颜色算符
+
+
+class HHZ_OT_theme_read(bpy.types.Operator):
+    bl_idname = "hhz.theme_read"
+    bl_label = "读取当前值"
+    bl_description = "把主题里这一项颜色的当前值读回颜色选择器"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到插件偏好设置")
+            return {'CANCELLED'}
+        if not theme.read_into_preferences(context, preferences):
+            self.report({'WARNING'}, "读不到这一项颜色（当前 Blender 版本可能没有它）")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已读取当前颜色")
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_apply_preset(bpy.types.Operator):
+    bl_idname = "hhz.theme_apply_preset"
+    bl_label = "应用视口配色预设"
+    bl_description = "一键套用一套视口配色（背景上/下 + 网格）"
+
+    preset: bpy.props.EnumProperty(
+        name="预设",
+        items=[(name, name, "套用「{}」视口配色".format(name)) for name in theme.preset_names()],
+    )
+
+    def execute(self, context):
+        current = theme.current_theme(context)
+        if current is None:
+            self.report({'ERROR'}, "读不到当前主题")
+            return {'CANCELLED'}
+
+        changed = theme.apply_preset(current, self.preset)
+        if not changed:
+            self.report({'WARNING'}, "这套预设没有可用颜色")
+            return {'CANCELLED'}
+
+        preferences = compat.get_preferences(context)
+        if preferences is not None:
+            theme.read_into_preferences(context, preferences)
+        self.report({'INFO'}, "已套用「{}」配色（{} 项）".format(self.preset, changed))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_restore_default(bpy.types.Operator):
+    bl_idname = "hhz.theme_restore_default"
+    bl_label = "恢复颜色默认值"
+    bl_description = "把当前颜色（或整组视口颜色）恢复为 Blender 出厂默认"
+
+    scope: bpy.props.EnumProperty(
+        name="范围",
+        items=(
+            ('CURRENT', "当前颜色", "只恢复当前选中的这一项"),
+            ('VIEWPORT', "全部视口颜色", "恢复视口那一组的全部颜色"),
+        ),
+        default='CURRENT',
+    )
+
+    def execute(self, context):
+        current = theme.current_theme(context)
+        if current is None:
+            self.report({'ERROR'}, "读不到当前主题")
+            return {'CANCELLED'}
+
+        if self.scope == 'VIEWPORT':
+            changed = theme.restore_viewport_defaults(current)
+            if not changed:
+                self.report({'WARNING'}, "没有可恢复的视口颜色")
+                return {'CANCELLED'}
+            self.report({'INFO'}, "已恢复 {} 项视口颜色".format(changed))
+        else:
+            preferences = compat.get_preferences(context)
+            path = getattr(preferences, "theme_target", "") if preferences else ""
+            if not theme.has_default(path):
+                self.report({'WARNING'}, "这一项没有记录默认值，无法一键恢复")
+                return {'CANCELLED'}
+            if not theme.restore_default(current, path):
+                self.report({'WARNING'}, "恢复失败")
+                return {'CANCELLED'}
+            self.report({'INFO'}, "已恢复该颜色默认值")
+
+        preferences = compat.get_preferences(context)
+        if preferences is not None:
+            theme.read_into_preferences(context, preferences)
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_save_preferences(bpy.types.Operator):
+    bl_idname = "hhz.theme_save_preferences"
+    bl_label = "保存到偏好设置"
+    bl_description = "把主题颜色写进 Blender 偏好设置（不保存的话重启后会还原）"
+
+    def execute(self, context):
+        try:
+            bpy.ops.wm.save_userprefs()
+        except Exception as error:
+            self.report({'ERROR'}, "保存失败：{}".format(error))
+            return {'CANCELLED'}
+        self.report({'INFO'}, "主题颜色已保存到偏好设置")
+        return {'FINISHED'}
