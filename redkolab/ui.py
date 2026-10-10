@@ -139,9 +139,11 @@ def apply_hotkey(context, key_type, ctrl=False, shift=False, alt=False, oskey=Fa
 
 
 def _on_theme_target_update(self, context):
-    """切换颜色项时，把该项当前的色值读进选择器，并记住它属于哪一组。"""
+    """切换颜色项时，把该项当前的色值读进选择器。
+
+    所属分组不再缓存进偏好设置：需要时用 ``theme.group_of(theme_target)`` 推导。
+    """
     theme.read_into_preferences(context, self)
-    self.theme_group = theme.group_of(getattr(self, "theme_target", ""))
 
 
 def custom_items(self, context):
@@ -248,6 +250,16 @@ def _on_hex_update(self, context):
     color = theme.hex_color(getattr(self, "custom_hex", ""))
     if color is not None:
         self.palette_color = color
+
+
+def _on_simple_mode_update(self, context):
+    """切换简洁模式：颜色项与家族选项都变了，重新读一遍当前家族的颜色。
+
+    必须返回 None。以前这里写成返回元组的 lambda，Blender 4.x 每次拖这个开关
+    都会往控制台打一条 "ValueError: the return value must be None"。
+    """
+    load_family_parts(context, self)
+    theme.read_into_preferences(context, self)
 
 
 def layout_items(self, context):
@@ -499,59 +511,46 @@ class HHZ_PT_theme(bpy.types.Panel):
         if theme.resolve(current, path) is None:
             layout.label(text="当前 Blender 没有这一项颜色", icon='INFO')
 
-        column = layout.column(align=True)
-        column.prop(preferences, "theme_target", text="")
-        # 明文写清当前选的是哪一项：即使下拉框本身显示异常，也一眼能看出选了什么
-        layout.label(text="当前项 {}".format(theme.label_of(path)))
-        row = column.row(align=True)
-        row.prop(preferences, "theme_color", text="")
-        row.operator("hhz.theme_read", text="", icon='FILE_REFRESH')
-        if theme.component_count(current, path) == 3:
-            column.label(text="该项是 RGB，Alpha 会被忽略", icon='INFO')
-
-        # 自己画一行明文读数：不再依赖那个很窄的数值框（显示成一团看不清的字符）
-        shown = theme.get_color(current, path)
-        if shown is not None:
-            layout.label(text="当前值 {}   R {:.3f}  G {:.3f}  B {:.3f}".format(
-                theme.color_to_hex(shown), shown[0], shown[1], shown[2]))
-        else:
-            layout.label(text="这一项在当前版本上不存在", icon='INFO')
-
-        # ---- 自定义颜色：调色盘 + 十六进制 ----
+        # ---- 常驻 1：配色预设 + 饱和度 ----
         box = layout.box()
-        box.label(text="自定义颜色")
-        row = box.row(align=True)
-        row.prop(preferences, "palette_color", text="")
-        row.prop(preferences, "custom_hex", text="")
-        box.label(text="调色盘选色 或 填 #RRGGBB，再点下面的「应用颜色」", icon='INFO')
+        box.label(text="配色预设（按钮 / 状态 / 当前帧）")
+        grid = box.grid_flow(row_major=True, columns=2, align=True)
+        for name in theme.preset_names():
+            operation = grid.operator("hhz.theme_apply_preset", text=name)
+            operation.preset = name
+        box.prop(preferences, "preset_saturation", text="饱和度", slider=True)
+        box.operator("hhz.theme_reapply_preset", icon='FILE_REFRESH')
+        box.label(text="调到 60% 左右最耐看：强调色会整体压灰，反复调也不会越调越灰", icon='INFO')
 
-        # ---- 应用 / 恢复：本项 / 本组 / 全部，三个恢复范围语义各不相同 ----
+        # ---- 常驻 2：恢复（一个范围下拉 + 一个按钮 + 一条状态）----
+        # 三个恢复范围的语义各不相同，但都由同一个算符的 scope 属性承担，
+        # 所以这里只画一个下拉去驱动它，不再摆三个按钮。
         group = theme.group_of(path)
         group_paths = [item for item in theme.paths_in_group(group, available)
                        if theme.has_default(item)]
         differing = theme.differing_paths(current, group_paths)
-        row = layout.row(align=True)
-        row.operator("hhz.theme_apply_color", text="应用颜色", icon='CHECKMARK')
-        operation = row.operator("hhz.theme_restore_default", text="恢复本项")
-        operation.scope = 'CURRENT'
-        operation = row.operator("hhz.theme_restore_default", text="恢复本组")
-        operation.scope = 'GROUP'
-        operation = row.operator("hhz.theme_restore_default", text="全部恢复")
-        operation.scope = 'ALL'
-        if not group_paths:
-            layout.label(text="「{}」没有记录出厂默认值，无法一键恢复".format(group), icon='INFO')
-        elif differing:
-            layout.label(text="「{}」{} 项有默认值，已改动 {} 项".format(
-                group, len(group_paths), len(differing)), icon='INFO')
-        else:
-            layout.label(text="「{}」{} 项都还是出厂值".format(group, len(group_paths)),
-                         icon='CHECKMARK')
         missing_defaults = [item for item in available if not theme.has_default(item)]
+        box = layout.box()
+        box.label(text="恢复出厂颜色")
+        row = box.row(align=True)
+        row.prop(preferences, "restore_scope", text="")
+        operation = row.operator("hhz.theme_restore_default", text="恢复", icon='LOOP_BACK')
+        operation.scope = preferences.restore_scope
+        if not group_paths:
+            status = "「{}」没有记录出厂默认值，无法一键恢复".format(group)
+            status_icon = 'INFO'
+        elif differing:
+            status = "「{}」{} 项有默认值，已改动 {} 项".format(
+                group, len(group_paths), len(differing))
+            status_icon = 'INFO'
+        else:
+            status = "「{}」{} 项都还是出厂值".format(group, len(group_paths))
+            status_icon = 'CHECKMARK'
         if missing_defaults:
-            layout.label(text="本版本还有 {} 项没有出厂默认值记录".format(len(missing_defaults)),
-                         icon='INFO')
+            status += "；本版本另有 {} 项没有默认值记录".format(len(missing_defaults))
+        box.label(text=status, icon=status_icon)
 
-        # ---- 控件颜色分开设置：每一项旁边都有自己的小调色盘 ----
+        # ---- 常驻 3：控件颜色分开设置：每一项旁边都有自己的小调色盘 ----
         box = layout.box()
         box.label(text="控件颜色分开设置")
         box.prop(preferences, "simple_mode")
@@ -570,75 +569,94 @@ class HHZ_PT_theme(bpy.types.Panel):
         row = box.row(align=True)
         row.operator("hhz.theme_part_load", text="从当前主题读回", icon='FILE_REFRESH')
         row.operator("hhz.theme_auto_contrast", text="自动配文字色", icon='COLOR')
+        # 对比度清单只在真的有问题时才占位置（没问题就不加一行"一切正常"）
+        for text in theme.family_contrast_report(current, prefix):
+            box.label(text=text + "（字会看不清）", icon='ERROR')
 
-        problems = theme.family_contrast_report(current, prefix)
-        if problems:
-            for text in problems:
-                box.label(text=text + "（字会看不清）", icon='ERROR')
-        elif shown_parts:
-            box.label(text="文字与底色的对比度正常", icon='CHECKMARK')
+        # ---- 进阶：精调项全部收进这个折叠头，默认收起 ----
+        header = layout.row(align=True)
+        header.prop(preferences, "theme_advanced",
+                    icon='TRIA_DOWN' if preferences.theme_advanced else 'TRIA_RIGHT',
+                    emboss=False)
+        if preferences.theme_advanced:
+            # 1) 逐项微调：颜色项下拉 + 明文当前值 + 自定义颜色 + 应用颜色
+            box = layout.box()
+            box.label(text="逐项微调")
+            column = box.column(align=True)
+            column.prop(preferences, "theme_target", text="")
+            # 明文写清当前选的是哪一项：即使下拉框本身显示异常，也一眼能看出选了什么
+            box.label(text="当前项 {}".format(theme.label_of(path)))
+            row = column.row(align=True)
+            row.prop(preferences, "theme_color", text="")
+            row.operator("hhz.theme_read", text="", icon='FILE_REFRESH')
+            if theme.component_count(current, path) == 3:
+                box.label(text="该项是 RGB，Alpha 会被忽略", icon='INFO')
 
-        # ---- 全局按钮配色：一次改掉所有按钮（含预选中项）----
-        box = layout.box()
-        box.label(text="全局按钮配色")
-        row = box.row(align=True)
-        row.label(text="底色")
-        row.prop(preferences, "global_base", text="")
-        row = box.row(align=True)
-        row.label(text="选中色")
-        row.prop(preferences, "global_accent", text="")
-        box.prop(preferences, "global_auto_text")
-        if not getattr(preferences, "global_auto_text", True):
-            row = box.row(align=True)
-            row.label(text="文字色")
-            row.prop(preferences, "global_text", text="")
-        box.operator("hhz.theme_apply_global", text="应用到全部按钮（含预选中项）",
-                     icon='CHECKMARK')
-        box.label(text="会写 {} 个控件家族，外加大纲、文件浏览器、属性、信息、控制台、编辑器图标的选中高亮".format(
-            len(theme.WIDGET_FAMILIES)), icon='INFO')
-
-        # ---- 配色预设 ----
-        box = layout.box()
-        box.label(text="配色预设（按钮 / 状态 / 当前帧）")
-        grid = box.grid_flow(row_major=True, columns=2, align=True)
-        for name in theme.preset_names():
-            operation = grid.operator("hhz.theme_apply_preset", text=name)
-            operation.preset = name
-        box.prop(preferences, "preset_saturation", text="饱和度", slider=True)
-        box.operator("hhz.theme_reapply_preset", icon='FILE_REFRESH')
-        box.label(text="调到 60% 左右最耐看：强调色会整体压灰，反复调也不会越调越灰", icon='INFO')
-
-        # ---- 自定义配色 ----
-        box = layout.box()
-        box.label(text="自定义配色")
-        row = box.row(align=True)
-        row.prop(preferences, "custom_name", text="")
-        row.operator("hhz.theme_custom_save", text="", icon='ADD')
-        if theme.custom_names(getattr(preferences, "theme_custom", "")):
-            box.prop(preferences, "custom_choice", text="")
-            row = box.row(align=True)
-            row.operator("hhz.theme_custom_apply", text="套用", icon='CHECKMARK')
-            row.operator("hhz.theme_custom_delete", text="删除", icon='TRASH')
-            box.label(text="保存与套用都会覆盖全部 {} 项颜色".format(len(available)), icon='INFO')
-        else:
-            box.label(text="起个名字点 + 就能把当前配色存下来", icon='INFO')
-
-        # ---- 字体设置（Blender 偏好设置里的项） ----
-        box = layout.box()
-        box.label(text="字体设置（写进 Blender 偏好设置）")
-        for key, label, _owner_name, _default, _tip in theme.font_items(context):
-            target = theme.font_target(context, key)
-            if target is None:
-                continue
-            owner, attr = target
-            if key in ("font_path_ui", "font_path_ui_mono"):
-                row = box.row(align=True)
-                row.prop(owner, attr, text=label)
-                pick = row.operator("hhz.font_pick", text="", icon='FILEBROWSER')
-                pick.mono = key == "font_path_ui_mono"
+            # 自己画一行明文读数：不再依赖那个很窄的数值框（显示成一团看不清的字符）
+            shown = theme.get_color(current, path)
+            if shown is not None:
+                box.label(text="当前值 {}   R {:.3f}  G {:.3f}  B {:.3f}".format(
+                    theme.color_to_hex(shown), shown[0], shown[1], shown[2]))
             else:
-                box.prop(owner, attr, text=label)
-        box.operator("hhz.font_restore", icon='LOOP_BACK')
+                box.label(text="这一项在当前版本上不存在", icon='INFO')
+
+            box.label(text="自定义颜色")
+            row = box.row(align=True)
+            row.prop(preferences, "palette_color", text="")
+            row.prop(preferences, "custom_hex", text="")
+            box.label(text="调色盘选色 或 填 #RRGGBB，再点下面的「应用颜色」", icon='INFO')
+            box.operator("hhz.theme_apply_color", text="应用颜色", icon='CHECKMARK')
+
+            # 2) 全局按钮配色：一次改掉所有按钮（含预选中项）
+            box = layout.box()
+            box.label(text="全局按钮配色")
+            row = box.row(align=True)
+            row.label(text="底色")
+            row.prop(preferences, "global_base", text="")
+            row = box.row(align=True)
+            row.label(text="选中色")
+            row.prop(preferences, "global_accent", text="")
+            box.prop(preferences, "global_auto_text")
+            if not getattr(preferences, "global_auto_text", True):
+                row = box.row(align=True)
+                row.label(text="文字色")
+                row.prop(preferences, "global_text", text="")
+            box.operator("hhz.theme_apply_global", text="应用到全部按钮（含预选中项）",
+                         icon='CHECKMARK')
+            box.label(text="会写 {} 个控件家族，外加大纲、文件浏览器、属性、信息、控制台、编辑器图标的选中高亮".format(
+                len(theme.WIDGET_FAMILIES)), icon='INFO')
+
+            # 3) 自定义配色
+            box = layout.box()
+            box.label(text="自定义配色")
+            row = box.row(align=True)
+            row.prop(preferences, "custom_name", text="")
+            row.operator("hhz.theme_custom_save", text="", icon='ADD')
+            if theme.custom_names(getattr(preferences, "theme_custom", "")):
+                box.prop(preferences, "custom_choice", text="")
+                row = box.row(align=True)
+                row.operator("hhz.theme_custom_apply", text="套用", icon='CHECKMARK')
+                row.operator("hhz.theme_custom_delete", text="删除", icon='TRASH')
+                box.label(text="保存与套用都会覆盖全部 {} 项颜色".format(len(available)), icon='INFO')
+            else:
+                box.label(text="起个名字点 + 就能把当前配色存下来", icon='INFO')
+
+            # 4) 字体设置（Blender 偏好设置里的项）
+            box = layout.box()
+            box.label(text="字体设置（写进 Blender 偏好设置）")
+            for key, label, _owner_name, _default, _tip in theme.font_items(context):
+                target = theme.font_target(context, key)
+                if target is None:
+                    continue
+                owner, attr = target
+                if key in ("font_path_ui", "font_path_ui_mono"):
+                    row = box.row(align=True)
+                    row.prop(owner, attr, text=label)
+                    pick = row.operator("hhz.font_pick", text="", icon='FILEBROWSER')
+                    pick.mono = key == "font_path_ui_mono"
+                else:
+                    box.prop(owner, attr, text=label)
+            box.operator("hhz.font_restore", icon='LOOP_BACK')
 
         layout.separator()
         layout.operator("hhz.theme_save_preferences", icon='FILE_TICK')
@@ -741,16 +759,26 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         default=(0.33, 0.33, 0.33, 1.0),
         update=_on_theme_color_update,
     )
+    restore_scope: EnumProperty(
+        name="恢复范围",
+        description="「恢复」按钮作用的范围：当前这一项 / 当前分组 / 全部有默认值的项",
+        items=(
+            ('CURRENT', "本项", "只恢复当前选中的这一项颜色"),
+            ('GROUP', "本组", "恢复当前颜色项所在分组的全部颜色"),
+            ('ALL', "全部", "把记录了出厂默认值的颜色全部恢复"),
+        ),
+        default='CURRENT',
+    )
+    theme_advanced: BoolProperty(
+        name="进阶",
+        description="展开逐项微调、全局按钮配色、自定义配色与字体设置（默认收起）",
+        default=False,
+    )
     panel_order: StringProperty(
         name="分块顺序",
         description="本插件各面板在 N 面板里的先后顺序（逗号分隔，拖动排序时自动维护）",
         default=",".join(panels.DEFAULT_SECTION_ORDER),
         update=_on_panel_order_update,
-    )
-    theme_group: StringProperty(
-        name="当前分组",
-        description="当前颜色项所属的分组（跟着颜色项自动更新，用于「恢复当前分组」）",
-        default="",
     )
     custom_name: StringProperty(
         name="自定义配色名",
@@ -767,8 +795,7 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         name="简洁模式",
         description="关掉之后颜色项与控件家族会列出全部选项（适合精调）",
         default=True,
-        update=lambda self, context: (load_family_parts(context, self),
-                                      theme.read_into_preferences(context, self)),
+        update=_on_simple_mode_update,
     )
     part_inner: FloatVectorProperty(
         name="底色", description="按钮本体的颜色",

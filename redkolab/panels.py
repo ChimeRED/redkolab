@@ -217,18 +217,6 @@ def tab_names():
     return [name for name, _ in collect_tabs()]
 
 
-def order_tabs(names, stored_order):
-    """按存储顺序排列标签页名字（当前仅用于展示）。"""
-    result = []
-    for name in parse_order(stored_order, valid_ids=names):
-        if name in names and name not in result:
-            result.append(name)
-    for name in names:
-        if name not in result:
-            result.append(name)
-    return result
-
-
 def panel_key(panel):
     """面板在 ``bpy.types`` 里的注册名。
 
@@ -239,15 +227,6 @@ def panel_key(panel):
         return panel.bl_rna.identifier
     except Exception:
         return getattr(panel, "__name__", "")
-
-
-def apply_tab_order(names, backup=None):
-    """（已停用）按标签页顺序写 bl_order。
-
-    保留为空实现只是为了万一有旧代码调用：3D 视图侧栏不认 bl_order，
-    而重排其它插件的面板会让 Blender 4.0/4.2 崩溃，所以这个功能不做。
-    """
-    return 0, dict(backup or {})
 
 
 # ------------------------------------------------- 真正生效的排序：注册顺序

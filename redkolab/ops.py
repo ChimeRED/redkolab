@@ -700,7 +700,8 @@ class HHZ_OT_theme_restore_default(bpy.types.Operator):
         available = theme.available_paths(context)
 
         if self.scope == 'GROUP':
-            group = theme.group_of(path) or getattr(preferences, "theme_group", "")
+            # 分组直接从当前颜色项推导，不再读偏好设置里缓存的副本
+            group = theme.group_of(path)
             paths = theme.paths_in_group(group, available)
             if not paths:
                 self.report({'WARNING'}, "这一组里没有可恢复的颜色项")

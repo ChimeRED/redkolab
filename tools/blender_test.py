@@ -871,7 +871,7 @@ def test_theme(module):
     colors = theme.preset_colors(preset_name)
     check(blue_path in colors and grey_path in colors,
           "预设同时覆盖灰色按钮与选中按钮", sorted(colors)[:3])
-    changed = theme.apply_preset(current, preset_name)
+    changed = theme.apply_colors(current, theme.preset_colors(preset_name) or {})
     check(changed >= 20, "预设改到 20 个以上颜色项", changed)
     check(color_close(theme.get_color(current, blue_path), colors[blue_path]),
           "预设把「选中按钮」改成了酸性绿", theme.get_color(current, blue_path))
@@ -886,11 +886,17 @@ def test_theme(module):
 
     # 恢复默认：按钮那一组也要能整组还原
     check(theme.restore_default(current, blue_path), "恢复单项默认值成功")
-    check(theme.restore_widget_defaults(current) >= 20, "批量恢复控件默认值成功")
+    # 旧的便捷包装（按前缀挑默认值的两个批量恢复函数）已删除，这里改用通用 API，
+    # 语义与原包装逐项等价（都是按路径前缀筛默认值表）。
+    widget_default_paths = [item for item in theme.default_paths()
+                            if item.startswith("user_interface.")]
+    viewport_default_paths = [item for item in theme.default_paths()
+                              if item.startswith("view_3d.")]
+    check(theme.restore_defaults(current, widget_default_paths) >= 20, "批量恢复控件默认值成功")
     restored_blue = theme.get_color(current, blue_path)
     check(restored_blue[2] > restored_blue[0],
           "恢复默认后选中按钮回到蓝色（默认确实是蓝的）", restored_blue)
-    check(theme.has_default(rgb_path) and theme.restore_viewport_defaults(current) >= 11,
+    check(theme.has_default(rgb_path) and theme.restore_defaults(current, viewport_default_paths) >= 11,
           "视口那一组仍可批量恢复默认")
     theme.set_color(current, grey_path, original_grey)
     theme.set_color(current, blue_path, original_blue)
@@ -1042,7 +1048,7 @@ def test_theme(module):
               low_contrast[:6])
 
     # 真套一次，直接查实际主题里的对比度
-    theme.apply_preset(current, theme.preset_names()[0])
+    theme.apply_colors(current, theme.preset_colors(theme.preset_names()[0]) or {})
     for family_prefix, _label in theme.WIDGET_FAMILIES[:6]:
         check(not theme.family_contrast_report(current, family_prefix),
               "套用预设后「{}」实际主题里没有看不清的字".format(family_prefix),
@@ -1212,6 +1218,77 @@ def test_theme(module):
                   '"part_" + member', "全局按钮配色", "应用到全部按钮", '"global_base"',
                   "当前项 {}"):
         check(token in panel_source, "主题面板里有 {}".format(token))
+
+    # ---- 进阶折叠：默认收起，展开才画精调项；收起不等于删实现 ----
+    check(preferences.theme_advanced is False, "进阶折叠默认是收起的（theme_advanced=False）",
+          preferences.theme_advanced)
+    preferences.theme_advanced = True
+    check(preferences.theme_advanced is True, "进阶折叠能展开（切到 True）")
+    preferences.theme_advanced = False
+    check(preferences.theme_advanced is False, "进阶折叠能再收回去（切回 False）")
+    for token in ("theme_advanced", "TRIA_DOWN", "TRIA_RIGHT", "emboss=False"):
+        check(token in panel_source, "进阶折叠头用到了 {}".format(token))
+    # 面板上收起只是"不画"：被收进去的算符与偏好设置属性一个都不能少
+    advanced_only = ("theme_apply_color", "theme_apply_global", "theme_custom_save",
+                     "theme_custom_apply", "theme_custom_delete", "font_pick",
+                     "font_restore", "theme_read", "theme_part_load", "theme_auto_contrast")
+    adv_missing = [name for name in advanced_only if operator_class(module, name) is None]
+    check(not adv_missing, "收进进阶的算符仍然全部注册着（隐藏不等于删除）", adv_missing)
+    retained_attrs = ("palette_color", "custom_hex", "custom_name", "custom_choice",
+                      "global_base", "global_accent", "global_auto_text", "global_text",
+                      "theme_target", "theme_color", "preset_saturation")
+    attrs_missing = [name for name in retained_attrs if not hasattr(preferences, name)]
+    check(not attrs_missing, "进阶里的偏好设置属性仍然保留（隐藏不等于删除）", attrs_missing)
+    # 简洁模式的 update 回调必须返回 None（返回元组会让 Blender 打 ValueError）
+    check("update=lambda" not in panel_source,
+          "面板属性不再用返回值的 lambda 当 update 回调")
+    check("_on_simple_mode_update" in panel_source, "简洁模式改用具名回调函数")
+
+    # ---- 恢复：一个 scope 下拉驱动同一个算符，三个范围分别真的生效 ----
+    check(preferences.restore_scope == 'CURRENT', "恢复范围默认是「本项」",
+          preferences.restore_scope)
+    scope_items = [item.identifier for item in
+                   type(preferences).bl_rna.properties["restore_scope"].enum_items]
+    check(scope_items == ['CURRENT', 'GROUP', 'ALL'],
+          "恢复范围下拉就是 本项 / 本组 / 全部", scope_items)
+    check(panel_source.count('"hhz.theme_restore_default"') == 1,
+          "主题面板只画一个恢复按钮（下拉驱动 scope，不再摆三个）",
+          panel_source.count('"hhz.theme_restore_default"'))
+    check('"restore_scope"' in panel_source, "恢复按钮的 scope 由面板下拉驱动")
+
+    orig_scope = preferences.restore_scope
+    orig_target = preferences.theme_target
+    # 先在两个不同分组里各造一处改动：视口组 与「按钮 底色」组
+    theme.set_color(current, rgb_path, (0.05, 0.05, 0.05, 1.0))
+    theme.set_color(current, grey_path, (0.05, 0.05, 0.05, 1.0))
+    preferences.theme_target = rgb_path
+    preferences.restore_scope = 'CURRENT'
+    result = bpy.ops.hhz.theme_restore_default(scope=preferences.restore_scope)
+    check(result == {'FINISHED'}, "选「本项」时恢复可用", result)
+    check(theme.color_close(theme.get_color(current, rgb_path), theme.default_of(rgb_path)),
+          "「本项」把当前这一项恢复成出厂值",
+          (theme.get_color(current, rgb_path), theme.default_of(rgb_path)))
+    check(not theme.color_close(theme.get_color(current, grey_path), theme.default_of(grey_path)),
+          "「本项」没有动别的分组（三个范围语义确实不同）")
+    preferences.restore_scope = 'GROUP'
+    result = bpy.ops.hhz.theme_restore_default(scope=preferences.restore_scope)
+    check(result == {'FINISHED'}, "选「本组」时恢复可用", result)
+    rs_group = theme.group_of(rgb_path)
+    rs_members = [item for item in theme.paths_in_group(rs_group, listed)
+                  if theme.has_default(item)]
+    check(rs_members and all(theme.color_close(theme.get_color(current, item),
+                                               theme.default_of(item))
+                             for item in rs_members),
+          "「本组」把当前分组整组恢复（{} 项）".format(len(rs_members)))
+    check(not theme.color_close(theme.get_color(current, grey_path), theme.default_of(grey_path)),
+          "「本组」没有波及其它分组")
+    preferences.restore_scope = 'ALL'
+    result = bpy.ops.hhz.theme_restore_default(scope=preferences.restore_scope)
+    check(result == {'FINISHED'}, "选「全部」时恢复可用", result)
+    check(theme.color_close(theme.get_color(current, grey_path), theme.default_of(grey_path)),
+          "「全部」把别组的改动也恢复了")
+    preferences.theme_target = orig_target
+    preferences.restore_scope = orig_scope
 
     # 还原测试前的颜色
     theme.set_color(current, rgb_path, original_rgb)

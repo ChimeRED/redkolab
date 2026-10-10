@@ -1246,18 +1246,6 @@ def write_from_preferences(context, preferences):
 # --------------------------------------------------------------- 批量操作
 
 
-def apply_preset(theme, name):
-    """套用一套配色预设（按钮常态 / 选中 / 状态色），返回改动的颜色数量。"""
-    colors = preset_colors(name)
-    if not colors:
-        return 0
-    changed = 0
-    for path, color in colors.items():
-        if set_color(theme, path, color):
-            changed += 1
-    return changed
-
-
 def restore_default(theme, path):
     """把某一项恢复为记录的默认值。"""
     color = default_of(path)
@@ -1273,26 +1261,6 @@ def restore_defaults(theme, paths):
         if restore_default(theme, path):
             changed += 1
     return changed
-
-
-def widget_paths():
-    """记录了默认值的按钮 / 状态色路径。"""
-    return [path for path in defaults_table() if path.startswith("user_interface.")]
-
-
-def viewport_paths():
-    """记录了默认值的视口路径。"""
-    return [path for path in defaults_table() if path.startswith("view_3d.")]
-
-
-def restore_widget_defaults(theme):
-    """把按钮 / 状态色（也就是这个功能的主战场）全部恢复默认。"""
-    return restore_defaults(theme, widget_paths())
-
-
-def restore_viewport_defaults(theme):
-    """把视口那一组全部恢复默认。"""
-    return restore_defaults(theme, viewport_paths())
 
 
 # ------------------------------------------------------------ 分组 / 状态
