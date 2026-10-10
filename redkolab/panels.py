@@ -38,33 +38,12 @@ ORDER_PANEL_ORDER = 100
 #: 主面板固定在最前
 MAIN_PANEL_ORDER = 0
 
-#: 标签页分组的基础 bl_order 间隔（同组内保持各自相对顺序）
-TAB_ORDER_STEP = 1000
+#: 主面板 / 顺序编辑器的注册名
+MAIN_PANEL_IDNAME = "HHZ_PT_main"
+ORDER_PANEL_IDNAME = "HHZ_PT_order"
 
-#: 拖动中的临时状态，供面板绘制时高亮：{"section"/"tab": {"index": i, "target": j}}
+#: 拖动中的临时状态，供面板绘制时高亮：{"section": {"index": i, "target": j}}
 DRAG_STATE = {}
-
-
-def dump_backup(backup):
-    """把 ``{类名: 原 bl_order}`` 序列化成一行文本（存进偏好设置用）。"""
-    return ";".join("{}={}".format(name, value) for name, value in sorted(dict(backup or {}).items()))
-
-
-def load_backup(text):
-    """还原 :func:`dump_backup` 的结果。"""
-    result = {}
-    for chunk in (text or "").split(";"):
-        if "=" not in chunk:
-            continue
-        name, _, value = chunk.partition("=")
-        name = name.strip()
-        if not name:
-            continue
-        try:
-            result[name] = int(value)
-        except ValueError:
-            continue
-    return result
 
 
 def section_label(section_id):
@@ -184,13 +163,21 @@ def read_section_order(preferences):
 
 
 def _registered_panel_classes():
-    """所有已注册的面板类（Python 注册的才会出现在 __subclasses__ 里）。"""
+    """所有已注册的面板类（Python 注册的才会出现在 __subclasses__ 里）。
+
+    必须排除 ``bpy.types.Panel`` 基类本身 —— 它不是 Python 注册的类，
+    对它调用 register_class 会报 "already registered as a subclass"。
+    """
     classes = []
     seen = set()
-    for panel in list(bpy.types.Panel.__subclasses__()):
-        if id(panel) in seen:
+    base = bpy.types.Panel
+    for panel in list(base.__subclasses__()):
+        if panel is base:
             continue
-        seen.add(id(panel))
+        key = panel_key(panel)
+        if not key or key in seen:
+            continue
+        seen.add(key)
         classes.append(panel)
     return classes
 
@@ -224,7 +211,7 @@ def tab_names():
 
 
 def order_tabs(names, stored_order):
-    """按存储顺序排列标签页名字，未记录的追加到末尾（保持名字排序）。"""
+    """按存储顺序排列标签页名字（当前仅用于展示）。"""
     result = []
     for name in parse_order(stored_order, valid_ids=names):
         if name in names and name not in result:
@@ -233,12 +220,6 @@ def order_tabs(names, stored_order):
         if name not in result:
             result.append(name)
     return result
-
-
-def display_tab_order(preferences):
-    """当前要显示的标签页顺序：存储顺序优先，新出现的标签页排到后面。"""
-    stored = getattr(preferences, "tab_order", "") if preferences is not None else ""
-    return order_tabs(tab_names(), stored)
 
 
 def panel_key(panel):
@@ -254,43 +235,98 @@ def panel_key(panel):
 
 
 def apply_tab_order(names, backup=None):
-    """按给定的标签页顺序写 ``bl_order``。
+    """（已停用）按标签页顺序写 bl_order。
 
-    返回 ``(改动数量, 备份字典)``：备份是 ``{面板注册名: 原 bl_order}``，
-    调用方应该把它存起来，方便「恢复默认顺序」。
+    保留为空实现只是为了万一有旧代码调用：3D 视图侧栏不认 bl_order，
+    而重排其它插件的面板会让 Blender 4.0/4.2 崩溃，所以这个功能不做。
     """
-    tabs = dict(collect_tabs())
-    backup = dict(backup or {})
-    changed = 0
-
-    for index, name in enumerate(names):
-        for panel in tabs.get(name, []):
-            key = panel_key(panel)
-            if not key:
-                continue
-            try:
-                if key not in backup:
-                    backup[key] = int(getattr(panel, "bl_order", 0))
-                # 用「首次记录的原值」做同组内偏移，反复应用也不会把别人
-                # 同一标签页里的面板顺序抹平
-                base = backup[key] % TAB_ORDER_STEP
-                panel.bl_order = index * TAB_ORDER_STEP + base
-                changed += 1
-            except Exception:
-                continue
-    return changed, backup
+    return 0, dict(backup or {})
 
 
-def restore_tab_order(backup):
-    """把 ``bl_order`` 还原成备份里的原值，返回还原数量。"""
-    restored = 0
-    for class_name, value in dict(backup or {}).items():
-        panel = getattr(bpy.types, class_name, None)
-        if panel is None:
+# ------------------------------------------------- 真正生效的排序：注册顺序
+#
+# 为什么另起一套：实测 Blender 源码里 interface_panel.cc 只按**插入顺序**给面板编号
+# （BKE_panel_new 也不读面板类型的 order），bl_order 只被少数自己排序的编辑器
+# （图像 / 序列 / 节点 / 资产）读取。3D 视图侧栏里面板的先后**由注册顺序决定**，
+# 所以要让拖动排序真的生效，只能注销后按目标顺序重新注册。
+#
+# 但**只重排本插件自己的面板**：实测把 Blender 内置 / 其它插件的面板注销再注册，
+# 会让 Blender 4.0 / 4.2 直接段错误崩掉（5.x 报 already registered）。
+# 所以"排别的插件的标签页"这个需求在安全范围内做不到，README 里有说明。
+
+
+def _is_sidebar_panel(panel):
+    """是否是 3D 视图侧栏里的顶层面板。"""
+    try:
+        if getattr(panel, "bl_space_type", "") != 'VIEW_3D':
+            return False
+        if getattr(panel, "bl_region_type", "") != 'UI':
+            return False
+        if getattr(panel, "bl_parent_id", ""):
+            return False
+        return bool(getattr(panel, "bl_category", ""))
+    except Exception:
+        return False
+
+
+def panel_groups():
+    """``{标签页: [面板注册名, ...]}``（只含侧栏里的顶层面板）。"""
+    groups = {}
+    for panel in _registered_panel_classes():
+        if not _is_sidebar_panel(panel):
             continue
+        key = panel_key(panel)
+        category = getattr(panel, "bl_category", "")
+        if not key or not category:
+            continue
+        group = groups.setdefault(category, [])
+        if key not in group:
+            group.append(key)
+    return groups
+
+
+def our_panel_keys(section_order=None):
+    """本插件面板的注册名，按目标顺序：主面板 → 可排序面板 → 顺序编辑器。"""
+    order = list(section_order) if section_order else list(DEFAULT_SECTION_ORDER)
+    keys = [MAIN_PANEL_IDNAME]
+    keys += [section_panel_idname(section_id) for section_id in order]
+    keys.append(ORDER_PANEL_IDNAME)
+    return [key for key in keys if key and key in dir(bpy.types)]
+
+
+def reregister_our_panels(section_order=None):
+    """只重排本插件自己的面板（不碰别的插件）。"""
+    return apply_global_order(our_panel_keys(section_order))
+
+
+def apply_global_order(keys):
+    """注销后按给定顺序重新注册面板类；返回 ``(成功数, 失败列表)``。
+
+    无论如何都会把注销掉的类注册回去（finally 式保证），不会留下半注销状态。
+    """
+    if not keys:
+        return 0, []
+
+    classes = []
+    for key in keys:
+        panel = getattr(bpy.types, key, None)
+        if panel is not None and panel not in classes:
+            classes.append(panel)
+    if not classes:
+        return 0, []
+
+    for panel in classes:
         try:
-            panel.bl_order = int(value)
-            restored += 1
+            bpy.utils.unregister_class(panel)
         except Exception:
-            continue
-    return restored
+            pass
+
+    registered = 0
+    failures = []
+    for panel in classes:
+        try:
+            bpy.utils.register_class(panel)
+            registered += 1
+        except Exception as error:
+            failures.append("{}: {}".format(panel_key(panel), error))
+    return registered, failures

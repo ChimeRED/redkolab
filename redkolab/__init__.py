@@ -24,7 +24,7 @@
 bl_info = {
     "name": "红红子lab (REDKO_LAB)",
     "author": "Red04",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (4, 0, 0),
     "location": "3D 视图 ▸ 侧栏(N) ▸ 红红子lab；饼菜单默认快捷键 Ctrl+E",
     "description": "一键删除物体所有材质、应用/删除物体所有修改器；N 面板改界面主题颜色、拖动调整面板顺序（REDKO_LAB）",
@@ -51,8 +51,6 @@ _classes = (
     ops.HHZ_OT_theme_restore_default,
     ops.HHZ_OT_theme_save_preferences,
     ops.HHZ_OT_section_drag,
-    ops.HHZ_OT_tab_drag,
-    ops.HHZ_OT_tab_restore,
     ui.HHZ_MT_pie,
     ui.HHZ_PT_main,
     ui.HHZ_PT_theme,

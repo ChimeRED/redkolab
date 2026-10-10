@@ -149,37 +149,29 @@ def _on_theme_color_update(self, context):
 
 
 def _on_panel_order_update(self, context):
-    """分块顺序变了就重新写 bl_order。"""
+    """面板顺序变了就重新落一遍（bl_order + 重新注册本插件的面板）。"""
     apply_panel_order(context)
 
 
-def _on_tab_order_update(self, context):
-    """标签页顺序变了就重新写各面板的 bl_order（并继续记录原值）。"""
-    if not self.tab_order:
-        return
-    names = panels.parse_order(self.tab_order, valid_ids=panels.tab_names())
-    _, backup = panels.apply_tab_order(names, panels.load_backup(self.tab_backup))
-    self.tab_backup = panels.dump_backup(backup)
-
-
 def apply_panel_order(context=None):
-    """把偏好设置里的顺序写进各面板的 bl_order。
+    """把偏好设置里的面板顺序真正落到 N 面板上（注册时与拖动排序时都会调用）。
 
-    注册时调用一次（bl_order 是运行时写进类里的，重启后会丢，必须重新应用），
-    拖动排序时也会调用。
+    做两件事：
+
+    1. 写 ``bl_order`` —— 少数自己排序的编辑器（图像 / 序列 / 节点 / 资产）认它；
+    2. 按目标顺序**重新注册本插件自己的面板** —— 3D 视图侧栏只看注册顺序
+       （实测 Blender 源码：``interface_panel.cc`` 从不读面板类型的 order），
+       这才是拖动排序真正生效的一层。
+
+    只重排本插件自己的 5 个面板。其它插件的面板**绝不能碰**：实测把内置/他人面板
+    注销再注册会让 Blender 4.0 / 4.2 直接崩溃（段错误），所以标签页顺序不做。
     """
     preferences = compat.get_preferences(context)
-    order = panels.read_section_order(preferences)
-    panels.apply_section_order(order, {"HHZ_PT_order": panels.ORDER_PANEL_ORDER})
+    section_order = panels.read_section_order(preferences)
 
-    if preferences is not None:
-        stored_tabs = getattr(preferences, "tab_order", "")
-        if stored_tabs:
-            names = panels.parse_order(stored_tabs, valid_ids=panels.tab_names())
-            _, backup = panels.apply_tab_order(
-                names, panels.load_backup(getattr(preferences, "tab_backup", "")))
-            preferences.tab_backup = panels.dump_backup(backup)
-    return order
+    panels.apply_section_order(section_order, {"HHZ_PT_order": panels.ORDER_PANEL_ORDER})
+    panels.reregister_our_panels(section_order)
+    return section_order
 
 
 def _on_preferences_update(self, context):
@@ -318,7 +310,7 @@ class HHZ_PT_order(bpy.types.Panel):
 
         # ---- 本插件的分块 ----
         box = layout.box()
-        box.label(text="本插件的分块")
+        box.label(text="本插件的面板")
         section_state = panels.DRAG_STATE.get("section") or {}
         for index, section_id in enumerate(panels.read_section_order(preferences)):
             row = box.row(align=True)
@@ -329,22 +321,13 @@ class HHZ_PT_order(bpy.types.Panel):
                 row.alert = True
         box.label(text="按住手柄上下拖动，松开确认", icon='INFO')
 
-        # ---- 侧栏标签页 ----
+        # ---- 侧栏标签页：只做展示 ----
         box = layout.box()
         box.label(text="侧栏标签页")
-        tab_state = panels.DRAG_STATE.get("tab") or {}
-        tab_names = panels.display_tab_order(preferences)
-        if len(tab_names) < 2:
-            box.label(text="侧栏里还没有其它标签页", icon='INFO')
-        for index, name in enumerate(tab_names):
-            row = box.row(align=True)
-            handle = row.operator("hhz.tab_drag", text="", icon='GRIP')
-            handle.index = index
-            row.label(text=name)
-            if tab_state.get("target") == index:
-                row.alert = True
-        box.operator("hhz.tab_restore", icon='LOOP_BACK')
-        box.label(text="会改写其它插件的面板 bl_order，可一键还原", icon='ERROR')
+        for name in panels.tab_names():
+            box.label(text="· {}".format(name))
+        box.label(text="标签页顺序 Blender 不开放给插件", icon='ERROR')
+        box.label(text="（详见 README 的说明）")
 
 
 class HHZ_PT_theme(bpy.types.Panel):
@@ -454,20 +437,9 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
     )
     panel_order: StringProperty(
         name="分块顺序",
-        description="本插件各分块在 N 面板里的先后顺序（逗号分隔，拖动排序时自动维护）",
+        description="本插件各面板在 N 面板里的先后顺序（逗号分隔，拖动排序时自动维护）",
         default=",".join(panels.DEFAULT_SECTION_ORDER),
         update=_on_panel_order_update,
-    )
-    tab_order: StringProperty(
-        name="标签页顺序",
-        description="侧栏标签页的期望顺序（逗号分隔，拖动排序时自动维护）",
-        default="",
-        update=_on_tab_order_update,
-    )
-    tab_backup: StringProperty(
-        name="标签页原顺序备份",
-        description="拖动排序前记录的各插件面板 bl_order 原值，用于一键还原",
-        default="",
     )
 
     def hotkey_label(self):

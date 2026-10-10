@@ -676,49 +676,10 @@ class HHZ_OT_section_drag(_DragReorderBase):
         preferences = compat.get_preferences(context)
         if preferences is not None:
             preferences.panel_order = ",".join(items)
-        # 走统一入口：顺手把标签页分组顺序也按偏好设置重施一遍
+        # 统一入口：写 bl_order + 按目标顺序重新注册本插件的面板
         ui.apply_panel_order(context)
 
 
-class HHZ_OT_tab_drag(_DragReorderBase):
-    bl_idname = "hhz.tab_drag"
-    bl_label = "拖动调整标签页顺序"
-    bl_description = "按住手柄上下拖动，调整侧栏里各插件标签页的顺序（会写入其它插件的面板 bl_order）"
-
-    kind = "tab"
-    row_height = 19.0
-
-    def gather(self, context):
-        return panels.display_tab_order(compat.get_preferences(context))
-
-    def commit(self, context, items):
-        preferences = compat.get_preferences(context)
-        if preferences is None:
-            return
-        preferences.tab_order = ",".join(items)
-        _, backup = panels.apply_tab_order(items, panels.load_backup(preferences.tab_backup))
-        preferences.tab_backup = panels.dump_backup(backup)
-
-
-class HHZ_OT_tab_restore(bpy.types.Operator):
-    bl_idname = "hhz.tab_restore"
-    bl_label = "恢复默认标签页顺序"
-    bl_description = "把拖动时改过的其它插件面板 bl_order 还原成原值"
-
-    def execute(self, context):
-        preferences = compat.get_preferences(context)
-        if preferences is None:
-            self.report({'ERROR'}, "读不到插件偏好设置")
-            return {'CANCELLED'}
-
-        backup = panels.load_backup(preferences.tab_backup)
-        if not backup:
-            self.report({'WARNING'}, "没有记录过原始顺序，不需要恢复")
-            return {'CANCELLED'}
-
-        restored = panels.restore_tab_order(backup)
-        preferences.tab_backup = ""
-        preferences.tab_order = ""
-        self.report({'INFO'}, "已还原 {} 个面板的原始顺序".format(restored))
-        compat.tag_redraw(context)
-        return {'FINISHED'}
+# 说明：曾经还有一个 hhz.tab_drag（拖动排其它插件的标签页）。
+# 实测那需要把其它插件的面板注销再注册，会让 Blender 4.0 / 4.2 直接段错误崩溃，
+# 所以这个功能已移除，只保留"面板顺序"面板里的标签页只读列表。

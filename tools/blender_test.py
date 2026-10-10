@@ -121,6 +121,15 @@ def select_only(objects):
     bpy.context.view_layer.objects.active = objects[0] if objects else None
 
 
+def operator_class(module, idname):
+    """把 ``hhz.xxx`` 映射到插件里的算子类。
+
+    不能用 ``hasattr(bpy.ops.hhz, "xxx")`` 判断算子是否存在 —— bpy.ops 对不存在的
+    算子名也会返回一个调用对象，只有真正调用时才报错，所以那样判断永远是"通过"。
+    """
+    return getattr(module.ops, "HHZ_OT_" + idname, None)
+
+
 def assigned_materials(obj):
     total = 0
     for slot in obj.material_slots:
@@ -335,13 +344,13 @@ def test_registration(module_name, module):
     check(getattr(bpy.types, PIE_IDNAME, None) is not None, "饼菜单类已注册")
     check(getattr(bpy.types, "HHZ_PT_main", None) is not None, "N 面板类已注册")
 
-    category = getattr(bpy.ops, "hhz", None)
-    check(category is not None, "算符分类 hhz 存在")
+    check(getattr(bpy.ops, "hhz", None) is not None, "算符分类 hhz 存在")
     for idname in (
         "remove_all_materials", "apply_all_modifiers", "remove_all_modifiers",
         "open_preferences", "capture_hotkey", "reset_hotkey",
     ):
-        check(category is not None and hasattr(category, idname), "算符 hhz.{} 存在".format(idname))
+        check(operator_class(module, idname) is not None,
+              "算符 hhz.{} 已注册".format(idname))
 
     check(module.compat.PACKAGE == module_name,
           "compat.PACKAGE 与真实模块名一致", module.compat.PACKAGE)
@@ -854,11 +863,10 @@ def test_theme(module):
     check(theme.restore_viewport_defaults(current) >= 11, "批量恢复视口默认值成功")
 
     # 算符存在 + 真跑一遍
-    category = getattr(bpy.ops, "hhz", None)
     for idname in ("theme_read", "theme_apply_preset", "theme_restore_default",
                    "theme_save_preferences"):
-        check(category is not None and hasattr(category, idname),
-              "算符 hhz.{} 存在".format(idname))
+        check(operator_class(module, idname) is not None,
+              "算符 hhz.{} 已注册".format(idname))
 
     result = bpy.ops.hhz.theme_read()
     check(result == {'FINISHED'}, "「读取当前值」算符可用", result)
@@ -995,57 +1003,51 @@ def test_panel_order(module):
     preferences.panel_order = ",".join(panels.DEFAULT_SECTION_ORDER)
     ui.apply_panel_order(context)
 
-    # ---- 侧栏标签页 ----
+    # ---- 侧栏标签页：只读展示（重排不可行，原因见 README 与 panels.py 的注释）----
     names = panels.tab_names()
     check(module.compat.ADDON_NAME in names, "标签页列表里有本插件的标签页", names)
     print("  当前侧栏标签页：{}".format(names))
-    tabs = dict(panels.collect_tabs())
-    own = tabs.get(module.compat.ADDON_NAME, [])
-    check(any(panel.__name__ == "HHZ_PT_main" for panel in own),
-          "本插件的主面板被识别为该标签页的顶层面板", [p.__name__ for p in own])
-    check(all(not getattr(panel, "bl_parent_id", "") for _, group in panels.collect_tabs() for panel in group),
+    groups = panels.panel_groups()
+    check(module.compat.ADDON_NAME in groups, "能读出本插件标签页的面板分组",
+          sorted(groups.keys()))
+    check("HHZ_PT_main" in groups[module.compat.ADDON_NAME],
+          "分组里能找到本插件的主面板", groups.get(module.compat.ADDON_NAME))
+    check(all(not getattr(panel, "bl_parent_id", "")
+              for _, group in panels.collect_tabs() for panel in group),
           "子面板没有被当成独立标签页")
 
-    display = panels.display_tab_order(preferences)
-    check(sorted(display) == sorted(names), "显示顺序包含全部标签页", display)
+    # ---- 注册顺序那一层（3D 视图侧栏真正认的）----
+    keys = panels.our_panel_keys(["theme", "settings", "hotkey"])
+    check(keys[:1] == ["HHZ_PT_main"], "主面板排在最前", keys)
+    check(keys[-1] == "HHZ_PT_order", "顺序编辑器排在最后", keys)
+    check(keys[1:4] == ["HHZ_PT_theme", "HHZ_PT_settings", "HHZ_PT_hotkey"],
+          "可排序面板按给定顺序展开", keys)
 
-    # 写顺序 -> 记录备份 -> 还原，全链路走一遍
-    if len(names) >= 2:
-        reversed_names = list(reversed(names))
-        changed, backup = panels.apply_tab_order(reversed_names, {})
-        check(changed >= len(reversed_names), "标签页顺序写入覆盖了所有标签页", changed)
-        check(bool(backup), "记录下了各面板的原 bl_order", len(backup))
-        check(panels.load_backup(panels.dump_backup(backup)) == backup,
-              "备份序列化/反序列化一致")
+    registered, failures = panels.reregister_our_panels(["theme", "settings", "hotkey"])
+    check(registered == 5 and not failures, "重新注册本插件 5 个面板成功",
+          "{} 个 / {}".format(registered, failures))
+    check(all(getattr(bpy.types, key, None) is not None
+              for key in ("HHZ_PT_main", "HHZ_PT_theme", "HHZ_PT_hotkey",
+                          "HHZ_PT_settings", "HHZ_PT_order")),
+          "重新注册后所有面板类都还在")
+    check(sorted(panels.panel_groups().keys()) == sorted(groups.keys()),
+          "重新注册后标签页一个都没少", sorted(panels.panel_groups().keys()))
 
-        first = dict(panels.collect_tabs())[reversed_names[0]]
-        check(all(panel.bl_order // panels.TAB_ORDER_STEP == 0 for panel in first),
-              "拖到第 1 位的标签页被放进第 0 组",
-              [panel.bl_order for panel in first])
-        last = dict(panels.collect_tabs())[reversed_names[-1]]
-        check(all(panel.bl_order // panels.TAB_ORDER_STEP == len(reversed_names) - 1
-                  for panel in last),
-              "拖到最后的标签页被放进最后一组",
-              [panel.bl_order for panel in last])
+    # 只允许重排本插件自己的面板：连别的插件/内置面板一起重注册会让 Blender 4.0/4.2 段错误崩溃
+    check(operator_class(module, "tab_drag") is None,
+          "危险的标签页拖动算符没有注册")
+    check(operator_class(module, "tab_restore") is None,
+          "危险的标签页还原算符没有注册")
 
-        restored = panels.restore_tab_order(backup)
-        check(restored >= len(backup) - 1, "还原覆盖了备份里的面板", restored)
-        mismatches = []
-        for class_name, value in backup.items():
-            panel = getattr(bpy.types, class_name, None)
-            if panel is None:
-                mismatches.append("{}：注册名找不到".format(class_name))
-            elif int(panel.bl_order) != int(value):
-                mismatches.append("{}：{} != {}".format(class_name, panel.bl_order, value))
-        check(not mismatches, "还原后的 bl_order 与备份一致", mismatches[:5])
-    else:
-        skip("侧栏里只有一个标签页，跳过标签页排序测试")
+    # 恢复默认顺序
+    preferences.panel_order = ",".join(panels.DEFAULT_SECTION_ORDER)
+    ui.apply_panel_order(context)
 
     # ---- 算符存在 ----
-    category = getattr(bpy.ops, "hhz", None)
-    for idname in ("section_drag", "tab_drag", "tab_restore"):
-        check(category is not None and hasattr(category, idname),
-              "算符 hhz.{} 存在".format(idname))
+    for idname in ("section_drag", "theme_read", "theme_apply_preset",
+                   "theme_restore_default", "theme_save_preferences"):
+        check(operator_class(module, idname) is not None,
+              "算符 hhz.{} 已注册".format(idname))
     check(not panels.DRAG_STATE, "拖动状态没有残留", panels.DRAG_STATE)
 
 
