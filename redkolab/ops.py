@@ -706,6 +706,101 @@ class HHZ_OT_theme_restore_default(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HHZ_OT_theme_apply_color(bpy.types.Operator):
+    bl_idname = "hhz.theme_apply_color"
+    bl_label = "应用颜色"
+    bl_description = "把调色盘里选的颜色（或十六进制框里的值）应用到当前颜色项"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        current = theme.current_theme(context)
+        if preferences is None or current is None:
+            self.report({'ERROR'}, "读不到偏好设置或主题")
+            return {'CANCELLED'}
+
+        path = getattr(preferences, "theme_target", "")
+        if theme.resolve(current, path) is None:
+            self.report({'WARNING'}, "当前颜色项在这个 Blender 版本上不存在")
+            return {'CANCELLED'}
+
+        color = None
+        hex_text = (getattr(preferences, "custom_hex", "") or "").strip()
+        if hex_text:
+            color = theme.hex_color(hex_text)
+            if color is None:
+                self.report({'WARNING'}, "十六进制写法不对，像 #C6FF00 这样写")
+                return {'CANCELLED'}
+        if color is None:
+            color = tuple(getattr(preferences, "palette_color", (1.0, 1.0, 1.0, 1.0)))
+
+        if not theme.set_color(current, path, color):
+            self.report({'WARNING'}, "应用失败")
+            return {'CANCELLED'}
+
+        applied = theme.get_color(current, path) or color
+        preferences.theme_color = applied
+        self.report({'INFO'}, "已应用 {}（{}）".format(theme.color_to_hex(applied), path))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_part_load(bpy.types.Operator):
+    bl_idname = "hhz.theme_part_load"
+    bl_label = "从当前主题读回"
+    bl_description = "把当前控件家族的各项颜色重新读进面板（在别处改过主题后同步一下）"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        if preferences is None:
+            self.report({'ERROR'}, "读不到偏好设置")
+            return {'CANCELLED'}
+        filled = ui.load_family_parts(context, preferences)
+        if not filled:
+            self.report({'WARNING'}, "这个家族在当前版本上没有可用颜色")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已读入 {} 项颜色".format(filled))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_auto_contrast(bpy.types.Operator):
+    bl_idname = "hhz.theme_auto_contrast"
+    bl_label = "自动配文字色"
+    bl_description = "按底色亮度自动挑看得清的文字色（常态与选中各配一次），解决字/图标看不清"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        current = theme.current_theme(context)
+        if preferences is None or current is None:
+            self.report({'ERROR'}, "读不到偏好设置或主题")
+            return {'CANCELLED'}
+
+        prefix = getattr(preferences, "family", "")
+        if not prefix:
+            self.report({'WARNING'}, "先在上面选一个控件家族")
+            return {'CANCELLED'}
+
+        changed = 0
+        for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+            background = theme.get_color(current, theme.family_path(prefix, background_key))
+            if background is None:
+                continue
+            text_color = theme.readable_text_color(background)
+            if theme.write_family(current, prefix, text_key, text_color):
+                changed += 1
+                try:
+                    setattr(preferences, "part_" + text_key, text_color)
+                except Exception:
+                    pass
+
+        if not changed:
+            self.report({'WARNING'}, "这个家族没有可配的底色项")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已按底色亮度自动配好文字色（{} 项）".format(changed))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
 class HHZ_OT_theme_custom_save(bpy.types.Operator):
     bl_idname = "hhz.theme_custom_save"
     bl_label = "保存为自定义配色"

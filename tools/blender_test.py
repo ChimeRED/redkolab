@@ -986,6 +986,110 @@ def test_theme(module):
         check(panel.bl_space_type == 'VIEW_3D' and panel.bl_region_type == 'UI',
               "主题面板在 3D 视图侧栏（N 面板）")
 
+    # ---- 分开设置：底色 / 图标与文字 / 边框 各自独立 ----
+    families = theme.family_items(context)
+    check(len(families) >= 15, "可选控件家族 >= 15", len(families))
+    prefix = families[0][0] if families else "wcol_regular"
+    check(prefix == "wcol_regular", "第一个家族是普通按钮", prefix)
+    parts = theme.read_family(current, prefix)
+    for member in ("inner", "text", "outline", "inner_sel"):
+        check(member in parts, "家族里读得到 {}".format(member), sorted(parts))
+
+    inner_path = theme.family_path(prefix, "inner")
+    text_path = theme.family_path(prefix, "text")
+    original_inner = theme.get_color(current, inner_path)
+    original_text = theme.get_color(current, text_path)
+    check(theme.write_family(current, prefix, "inner", (0.9, 0.1, 0.1, 1.0)),
+          "能单独改底色")
+    check(color_close(theme.get_color(current, inner_path), (0.9, 0.1, 0.1, 1.0)),
+          "底色写进去了", theme.get_color(current, inner_path))
+    check(color_close(theme.get_color(current, text_path), original_text),
+          "改底色不会动文字色（分开设置的核心）", theme.get_color(current, text_path))
+    theme.write_family(current, prefix, "inner", original_inner)
+
+    # ---- 可读文字色：亮底配深字、暗底配浅字 ----
+    check(theme.luminance((1.0, 1.0, 1.0, 1.0)) > 0.9, "白色亮度接近 1")
+    check(theme.luminance((0.0, 0.0, 0.0, 1.0)) < 0.01, "黑色亮度接近 0")
+    check(theme.readable_text_color((1.0, 1.0, 0.9, 1.0)) == theme.TEXT_ON_LIGHT,
+          "亮底 -> 深色字")
+    check(theme.readable_text_color((0.05, 0.06, 0.04, 1.0)) == theme.TEXT_ON_DARK,
+          "暗底 -> 浅色字")
+    acid = theme.hex_color("#C6FF00")
+    check(abs(theme.luminance(theme.readable_text_color(acid)) - theme.luminance(acid)) > 0.3,
+          "酸性绿底上自动配出来的字对比度足够",
+          (theme.color_to_hex(acid), theme.color_to_hex(theme.readable_text_color(acid))))
+
+    # ---- 预设必须成对给出底色与文字，否则就是"字看不清" ----
+    for preset in theme.preset_names():
+        colors = theme.preset_colors(preset)
+        missing = []
+        low_contrast = []
+        for family_prefix, _label in theme.WIDGET_FAMILIES:
+            for background_key, text_key in (("inner", "text"), ("inner_sel", "text_sel")):
+                background = colors.get(theme.family_path(family_prefix, background_key))
+                text_color = colors.get(theme.family_path(family_prefix, text_key))
+                if background is None:
+                    continue
+                if text_color is None:
+                    missing.append("{}.{}".format(family_prefix, background_key))
+                    continue
+                if abs(theme.luminance(background) - theme.luminance(text_color)) < 0.3:
+                    low_contrast.append("{}.{}".format(family_prefix, background_key))
+        check(not missing, "预设「{}」每个家族都配了文字色".format(preset), missing[:6])
+        check(not low_contrast, "预设「{}」每个家族的文字/底色对比都够".format(preset),
+              low_contrast[:6])
+
+    # 真套一次，直接查实际主题里的对比度
+    theme.apply_preset(current, theme.preset_names()[0])
+    for family_prefix, _label in theme.WIDGET_FAMILIES[:6]:
+        check(not theme.family_contrast_report(current, family_prefix),
+              "套用预设后「{}」实际主题里没有看不清的字".format(family_prefix),
+              theme.family_contrast_report(current, family_prefix))
+
+    # ---- 调色盘 / 十六进制 / 应用颜色 ----
+    preferences.family = prefix
+    preferences.theme_target = grey_path
+    check(module.ui.load_family_parts(context, preferences) >= 4, "能把家族颜色读进面板属性")
+    preferences.palette_color = (0.5, 0.25, 0.75, 1.0)
+    preferences.custom_hex = ""
+    result = bpy.ops.hhz.theme_apply_color()
+    check(result == {'FINISHED'}, "「应用颜色」算符可用", result)
+    check(color_close(theme.get_color(current, grey_path), (0.5, 0.25, 0.75, 1.0)),
+          "调色盘颜色被写进当前项", theme.get_color(current, grey_path))
+
+    preferences.custom_hex = "#123456"
+    check(color_close(tuple(preferences.palette_color), theme.hex_color("#123456")),
+          "填十六进制会同步到调色盘", tuple(preferences.palette_color))
+    result = bpy.ops.hhz.theme_apply_color()
+    check(color_close(theme.get_color(current, grey_path), theme.hex_color("#123456")),
+          "十六进制优先被应用", theme.get_color(current, grey_path))
+
+    preferences.custom_hex = "这不是颜色"
+    result = bpy.ops.hhz.theme_apply_color()
+    check(result == {'CANCELLED'}, "坏十六进制被拒绝而不是乱写", result)
+    preferences.custom_hex = ""
+
+    check(theme.hex_color("#abc") is not None, "#abc 简写也认")
+    check(theme.hex_color("xyz") is None, "坏写法返回 None")
+    check(theme.color_to_hex((0.7765, 1.0, 0.0, 1.0)) == "#C6FF00",
+          "颜色转十六进制正确", theme.color_to_hex((0.7765, 1.0, 0.0, 1.0)))
+
+    result = bpy.ops.hhz.theme_auto_contrast()
+    check(result == {'FINISHED'}, "「自动配文字色」算符可用", result)
+    check(not theme.family_contrast_report(current, prefix),
+          "自动配文字色之后该家族没有对比度问题",
+          theme.family_contrast_report(current, prefix))
+    result = bpy.ops.hhz.theme_part_load()
+    check(result == {'FINISHED'}, "「从当前主题读回」算符可用", result)
+
+    # ---- 面板里这些东西都要有（静态检查）----
+    panel_source = source_of(module, "ui.py")
+    for token in ('"palette_color"', '"custom_hex"', "应用颜色", "控件颜色分开设置",
+                  "当前值 {}", "自动配文字色", "从当前主题读回",
+                  "part_inner:", "part_text:", "part_outline:",
+                  '"part_" + member'):
+        check(token in panel_source, "主题面板里有 {}".format(token))
+
     # 还原测试前的颜色
     theme.set_color(current, rgb_path, original_rgb)
     theme.set_color(current, rgba_path, original_rgba)

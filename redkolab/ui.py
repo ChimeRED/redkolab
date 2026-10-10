@@ -152,6 +152,68 @@ def custom_items(self, context):
     return [(name, name, "套用或删除「{}」".format(name)) for name in names]
 
 
+def family_items(self, context):
+    """控件家族下拉项（只列当前版本真实存在的）。"""
+    items = theme.family_items(context)
+    if not items:
+        return [("__none__", "（没有可用控件）", "这个 Blender 版本读不到控件颜色")]
+    return [(prefix, label, "分开设置「{}」的底色 / 图标与文字 / 边框".format(label))
+            for prefix, label in items]
+
+
+def load_family_parts(context, preferences):
+    """把当前控件家族的各项颜色读进面板属性，返回读到的项数。"""
+    current = theme.current_theme(context)
+    prefix = getattr(preferences, "family", "")
+    if current is None or not prefix or prefix == "__none__":
+        return 0
+    colors = theme.read_family(current, prefix)
+    filled = 0
+    for member, color in colors.items():
+        name = "part_" + member
+        if not hasattr(preferences, name):
+            continue
+        value = tuple(float(component) for component in color)
+        if len(value) == 3:
+            value = value + (1.0,)
+        try:
+            setattr(preferences, name, value[:4])
+            filled += 1
+        except Exception:
+            continue
+    return filled
+
+
+def _on_family_update(self, context):
+    """换控件家族 -> 把该家族当前的颜色读进面板。"""
+    load_family_parts(context, self)
+
+
+def _on_part_update(self, context):
+    """面板上改了某个成员的颜色 -> 立刻写进主题（只写真的变了的）。"""
+    current = theme.current_theme(context)
+    prefix = getattr(self, "family", "")
+    if current is None or not prefix:
+        return
+    for member, _label, _group in theme.PART_MEMBERS:
+        value = getattr(self, "part_" + member, None)
+        if value is None:
+            continue
+        path = theme.family_path(prefix, member)
+        existing = theme.get_color(current, path)
+        if existing is None or theme.color_close(existing, tuple(value)):
+            continue
+        theme.set_color(current, path, tuple(value))
+    theme.read_into_preferences(context, self)
+
+
+def _on_hex_update(self, context):
+    """十六进制框一改就同步到调色盘，这样「应用颜色」只看调色盘就够了。"""
+    color = theme.hex_color(getattr(self, "custom_hex", ""))
+    if color is not None:
+        self.palette_color = color
+
+
 def layout_items(self, context):
     """已保存布局的下拉项。"""
     names = layout.names(getattr(self, "layout_slots", ""))
@@ -409,12 +471,29 @@ class HHZ_PT_theme(bpy.types.Panel):
         if theme.component_count(current, path) == 3:
             column.label(text="该项是 RGB，Alpha 会被忽略", icon='INFO')
 
-        # ---- 恢复默认：本项 / 本组 / 全部，三个范围语义各不相同 ----
+        # 自己画一行明文读数：不再依赖那个很窄的数值框（显示成一团看不清的字符）
+        shown = theme.get_color(current, path)
+        if shown is not None:
+            layout.label(text="当前值 {}   R {:.3f}  G {:.3f}  B {:.3f}".format(
+                theme.color_to_hex(shown), shown[0], shown[1], shown[2]))
+        else:
+            layout.label(text="这一项在当前版本上不存在", icon='INFO')
+
+        # ---- 自定义颜色：调色盘 + 十六进制 ----
+        box = layout.box()
+        box.label(text="自定义颜色")
+        row = box.row(align=True)
+        row.prop(preferences, "palette_color", text="")
+        row.prop(preferences, "custom_hex", text="")
+        box.label(text="调色盘选色 或 填 #RRGGBB，再点下面的「应用颜色」", icon='INFO')
+
+        # ---- 应用 / 恢复：本项 / 本组 / 全部，三个恢复范围语义各不相同 ----
         group = theme.group_of(path)
         group_paths = [item for item in theme.paths_in_group(group, available)
                        if theme.has_default(item)]
         differing = theme.differing_paths(current, group_paths)
         row = layout.row(align=True)
+        row.operator("hhz.theme_apply_color", text="应用颜色", icon='CHECKMARK')
         operation = row.operator("hhz.theme_restore_default", text="恢复本项")
         operation.scope = 'CURRENT'
         operation = row.operator("hhz.theme_restore_default", text="恢复本组")
@@ -429,6 +508,32 @@ class HHZ_PT_theme(bpy.types.Panel):
         else:
             layout.label(text="「{}」{} 项都还是出厂值".format(group, len(group_paths)),
                          icon='CHECKMARK')
+
+        # ---- 控件颜色分开设置：每一项旁边都有自己的小调色盘 ----
+        box = layout.box()
+        box.label(text="控件颜色分开设置")
+        prefix = getattr(preferences, "family", "")
+        box.prop(preferences, "family", text="")
+        shown_parts = 0
+        for member, label, _group in theme.PART_MEMBERS:
+            if theme.resolve(current, theme.family_path(prefix, member)) is None:
+                continue
+            row = box.row(align=True)
+            row.label(text=label)
+            row.prop(preferences, "part_" + member, text="")
+            shown_parts += 1
+        if not shown_parts:
+            box.label(text="这个版本上没有可分开设置的项", icon='INFO')
+        row = box.row(align=True)
+        row.operator("hhz.theme_part_load", text="从当前主题读回", icon='FILE_REFRESH')
+        row.operator("hhz.theme_auto_contrast", text="自动配文字色", icon='COLOR')
+
+        problems = theme.family_contrast_report(current, prefix)
+        if problems:
+            for text in problems:
+                box.label(text=text + "（字会看不清）", icon='ERROR')
+        elif shown_parts:
+            box.label(text="文字与底色的对比度正常", icon='CHECKMARK')
 
         # ---- 配色预设 ----
         box = layout.box()
@@ -586,6 +691,59 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         name="自定义配色名",
         description="保存自定义配色时用的名字",
         default="",
+    )
+    family: EnumProperty(
+        name="控件家族",
+        description="要分开设置颜色的控件（按钮 / 菜单 / 标签页……）",
+        items=family_items,
+        update=_on_family_update,
+    )
+    part_inner: FloatVectorProperty(
+        name="底色", description="按钮本体的颜色",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.33, 0.33, 0.33, 1.0), update=_on_part_update,
+    )
+    part_text: FloatVectorProperty(
+        name="图标与文字", description="按钮上的图标与文字颜色",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.9, 0.9, 0.9, 1.0), update=_on_part_update,
+    )
+    part_outline: FloatVectorProperty(
+        name="边框", description="按钮的描边颜色",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.24, 0.24, 0.24, 1.0), update=_on_part_update,
+    )
+    part_inner_sel: FloatVectorProperty(
+        name="选中底色", description="被选中 / 按下时的底色",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.28, 0.45, 0.70, 1.0), update=_on_part_update,
+    )
+    part_text_sel: FloatVectorProperty(
+        name="选中文字", description="被选中 / 按下时的图标与文字颜色",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(1.0, 1.0, 1.0, 1.0), update=_on_part_update,
+    )
+    part_outline_sel: FloatVectorProperty(
+        name="选中边框", description="被选中时的描边（5.x 才有）",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.28, 0.45, 0.70, 1.0), update=_on_part_update,
+    )
+    part_item: FloatVectorProperty(
+        name="高亮条/滑块", description="滑块、进度条填充、列表高亮条",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.28, 0.45, 0.70, 1.0), update=_on_part_update,
+    )
+    palette_color: FloatVectorProperty(
+        name="调色盘",
+        description="自己挑一个颜色，点「应用颜色」写进当前颜色项",
+        subtype='COLOR', size=4, min=0.0, max=1.0,
+        default=(0.776, 1.0, 0.0, 1.0),
+    )
+    custom_hex: StringProperty(
+        name="十六进制",
+        description="像 #C6FF00；改这里会同步到调色盘",
+        default="#C6FF00",
+        update=_on_hex_update,
     )
     custom_choice: EnumProperty(
         name="自定义配色",

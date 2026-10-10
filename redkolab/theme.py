@@ -65,6 +65,9 @@ WIDGET_MEMBERS = (
     ("item", "高亮条/滑块", "按钮·高亮"),
 )
 
+#: N 面板「分开设置」里逐项列出的成员（顺序就是面板上的顺序）
+PART_MEMBERS = WIDGET_MEMBERS
+
 #: 图标颜色（Blender 按对象类型给图标上的色）
 ICON_TARGETS = (
     ("user_interface.icon_scene", "场景图标", "图标颜色"),
@@ -280,62 +283,148 @@ ACID = {
 
 def hex_color(value, alpha=1.0):
     """把 ``#RRGGBB`` 换成主题要的 0-1 浮点元组。"""
-    text = (value or "").lstrip("#")
+    text = (value or "").strip().lstrip("#")
+    if len(text) == 3:  # 支持 #abc 简写
+        text = "".join(char * 2 for char in text)
     if len(text) != 6:
-        return (1.0, 1.0, 1.0, alpha)
-    rgb = tuple(int(text[index:index + 2], 16) / 255.0 for index in (0, 2, 4))
+        return None
+    try:
+        rgb = tuple(int(text[index:index + 2], 16) / 255.0 for index in (0, 2, 4))
+    except ValueError:
+        return None
     return rgb + (alpha,)
 
 
+def color_to_hex(color):
+    """``(0-1, ...)`` -> ``#RRGGBB``（面板上显示明文用）。"""
+    if not color:
+        return "#000000"
+    channels = list(color)[:3]
+    while len(channels) < 3:
+        channels.append(0.0)
+    return "#" + "".join(
+        "{:02X}".format(max(0, min(255, int(round(float(value) * 255.0)))))
+        for value in channels
+    )
+
+
+def luminance(color):
+    """相对亮度（0-1），用来决定文字该用深色还是浅色。"""
+    if not color:
+        return 0.0
+    channels = list(color)[:3]
+    while len(channels) < 3:
+        channels.append(0.0)
+    return (0.2126 * float(channels[0])
+            + 0.7152 * float(channels[1])
+            + 0.0722 * float(channels[2]))
+
+
+#: 深色字 / 浅色字（酸性配色里偏绿的那两个极端，配深底浅底都清楚）
+TEXT_ON_LIGHT = (0.043, 0.055, 0.031, 1.0)
+TEXT_ON_DARK = (0.94, 0.96, 0.90, 1.0)
+
+
+def readable_text_color(background, threshold=0.45):
+    """按背景亮度挑一个看得清的文字色。
+
+    这就是"按钮统一颜色后字看不清"的解法：底色一变，文字色跟着换成
+    深色或浅色，保证对比度。
+    """
+    if luminance(background) > threshold:
+        return TEXT_ON_LIGHT
+    return TEXT_ON_DARK
+
+
+def family_path(prefix, member):
+    """控件家族 + 成员 -> 主题路径。"""
+    return "user_interface.{}.{}".format(prefix, member)
+
+
+def family_items(context):
+    """当前 Blender 版本真实存在的控件家族 ``(前缀, 中文名)``。"""
+    current = current_theme(context)
+    result = []
+    for prefix, label in WIDGET_FAMILIES:
+        if resolve(current, family_path(prefix, "inner")) is not None:
+            result.append((prefix, label))
+    return tuple(result)
+
+
+def read_family(theme, prefix):
+    """读一个家族的各个成员颜色，返回 ``{成员: [r,g,b,a]}``（当前版本没有的成员不返回）。"""
+    result = {}
+    for member, _label, _group in PART_MEMBERS:
+        color = get_color(theme, family_path(prefix, member))
+        if color is not None:
+            result[member] = [float(value) for value in color]
+    return result
+
+
+def write_family(theme, prefix, member, color):
+    """把某个家族的某个成员颜色写进主题。"""
+    return set_color(theme, family_path(prefix, member), color)
+
+
+def family_contrast_report(theme, prefix):
+    """检查一个家族的"文字 vs 底色"对比度，返回问题描述列表。
+
+    预设与自定义配色都该保证这里没有内容 —— 否则就会出现"字看不清"。
+    """
+    colors = read_family(theme, prefix)
+    problems = []
+    for background_key, text_key, label in (
+        ("inner", "text", "常态"),
+        ("inner_sel", "text_sel", "选中"),
+    ):
+        background = colors.get(background_key)
+        text_color = colors.get(text_key)
+        if background is None or text_color is None:
+            continue
+        difference = abs(luminance(background) - luminance(text_color))
+        if difference < 0.3:
+            problems.append("{}：字与底色亮度差只有 {:.2f}".format(label, difference))
+    return problems
+
+
 def _acid_preset(hot=False):
-    """生成一套酸性配色（hot=True 是高对比版本）。"""
+    """生成一套酸性配色（hot=True 是高对比版本）。
+
+    关键：**每个家族的底色、文字与图标、边框、选中态都成对给出** ——
+    底色统一改深（或改成酸性绿）时，文字色必须跟着换，
+    否则就会出现"按钮上的图案和字看不清"。
+    """
     accent = ACID["acid_hot"] if hot else ACID["acid"]
     base = ACID["ink"] if hot else ACID["panel"]
     text = "#FFFFFF" if hot else ACID["text"]
     edge = ACID["acid_dim"] if hot else ACID["edge"]
-    return {
-        # 常态按钮
-        "user_interface.wcol_regular.inner": hex_color(base),
-        "user_interface.wcol_regular.outline": hex_color(edge),
-        "user_interface.wcol_regular.text": hex_color(text),
+
+    colors = {}
+    for prefix, _label in WIDGET_FAMILIES:
+        colors[family_path(prefix, "inner")] = hex_color(base)
+        colors[family_path(prefix, "outline")] = hex_color(edge)
+        colors[family_path(prefix, "text")] = hex_color(text)
+        colors[family_path(prefix, "inner_sel")] = hex_color(accent)
+        colors[family_path(prefix, "outline_sel")] = hex_color(accent)
+        colors[family_path(prefix, "text_sel")] = hex_color(ACID["ink"])
+        colors[family_path(prefix, "item")] = hex_color(accent)
+
+    # 需要保持透明 / 需要特别的几项，单独覆盖
+    colors.update({
         "user_interface.wcol_regular.item": hex_color(ACID["ink"], 0.5),
-        "user_interface.wcol_tool.inner": hex_color(base),
-        "user_interface.wcol_toolbar_item.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_option.inner": hex_color(base),
-        "user_interface.wcol_toggle.inner": hex_color(base),
-        "user_interface.wcol_radio.inner": hex_color(base),
-        "user_interface.wcol_num.inner": hex_color(base),
-        "user_interface.wcol_numslider.inner": hex_color(base),
-        "user_interface.wcol_text.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_menu.inner": hex_color(base),
-        "user_interface.wcol_menu_back.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_pie_menu.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_tab.inner": hex_color(ACID["ink"]),
         "user_interface.wcol_list_item.inner": hex_color(base, 0.0),
-        "user_interface.wcol_tooltip.inner": hex_color(ACID["ink"]),
-        "user_interface.wcol_progress.inner": hex_color(base),
         "user_interface.wcol_scroll.inner": hex_color(base, 0.0),
         "user_interface.wcol_box.inner": hex_color(ACID["ink"], 0.5),
-        # 选中态：酸性绿 + 黑字
-        "user_interface.wcol_regular.inner_sel": hex_color(accent),
-        "user_interface.wcol_regular.outline_sel": hex_color(accent),
-        "user_interface.wcol_regular.text_sel": hex_color(ACID["ink"]),
-        "user_interface.wcol_tool.inner_sel": hex_color(accent),
-        "user_interface.wcol_toolbar_item.inner_sel": hex_color(accent),
-        "user_interface.wcol_option.inner_sel": hex_color(accent),
-        "user_interface.wcol_toggle.inner_sel": hex_color(accent),
-        "user_interface.wcol_radio.inner_sel": hex_color(accent),
-        "user_interface.wcol_num.item": hex_color(accent),
-        "user_interface.wcol_numslider.item": hex_color(accent),
-        "user_interface.wcol_menu.inner_sel": hex_color(accent),
-        "user_interface.wcol_menu_item.inner_sel": hex_color(accent),
-        "user_interface.wcol_pie_menu.inner_sel": hex_color(accent),
-        "user_interface.wcol_tab.inner_sel": hex_color(ACID["panel_hi"]),
+        "user_interface.wcol_menu_back.inner": hex_color(ACID["ink"]),
+        "user_interface.wcol_pie_menu.inner": hex_color(ACID["ink"]),
+        "user_interface.wcol_text.inner": hex_color(ACID["ink"]),
+        "user_interface.wcol_text.inner_sel": hex_color(accent),
+        "user_interface.wcol_text.text_sel": hex_color(ACID["ink"]),
+        "user_interface.wcol_tab.inner": hex_color(ACID["ink"]),
+        # 当前标签页 / 分组框标题：用暗一档的酸性绿，这样配黑字也看得清
+        "user_interface.wcol_tab.inner_sel": hex_color(ACID["acid_dim"]),
+        "user_interface.wcol_box.inner_sel": hex_color(ACID["acid_dim"]),
         "user_interface.wcol_list_item.inner_sel": hex_color(ACID["acid_dim"]),
-        "user_interface.wcol_progress.item": hex_color(accent),
-        "user_interface.wcol_scroll.inner_sel": hex_color(accent),
-        "user_interface.wcol_box.inner_sel": hex_color(ACID["panel_hi"]),
-        "user_interface.wcol_text.inner_sel": hex_color(ACID["ink"]),
         "user_interface.panel_active": hex_color(accent),
         # 状态色
         "user_interface.wcol_state.inner_changed": hex_color(ACID["orange"]),
@@ -344,7 +433,8 @@ def _acid_preset(hot=False):
         "user_interface.wcol_state.inner_anim_sel": hex_color(accent),
         "user_interface.wcol_state.inner_key": hex_color("#E8C547"),
         "user_interface.wcol_state.inner_key_sel": hex_color(ACID["orange"]),
-    }
+    })
+    return {path: color for path, color in colors.items() if color is not None}
 
 
 def _acid_frame_colors():

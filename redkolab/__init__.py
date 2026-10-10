@@ -37,7 +37,7 @@
 bl_info = {
     "name": "红红子lab (REDKO_LAB)",
     "author": "Red04",
-    "version": (2, 1, 0),
+    "version": (2, 2, 0),
     "blender": (4, 0, 0),
     "location": "3D 视图 ▸ 侧栏(N) ▸ 红红子lab（建模 / 工具 / 主题 三页）；饼菜单默认快捷键 Ctrl+E",
     "description": "一键删材质、应用/删除修改器、一键楼梯；主题控件配色与字体、页面布局、面板顺序（REDKO_LAB）",
@@ -63,6 +63,9 @@ _classes = (
     ops.HHZ_OT_theme_read,
     ops.HHZ_OT_theme_apply_preset,
     ops.HHZ_OT_theme_restore_default,
+    ops.HHZ_OT_theme_apply_color,
+    ops.HHZ_OT_theme_part_load,
+    ops.HHZ_OT_theme_auto_contrast,
     ops.HHZ_OT_theme_custom_save,
     ops.HHZ_OT_theme_custom_apply,
     ops.HHZ_OT_theme_custom_delete,
@@ -91,6 +94,10 @@ def register():
         bpy.utils.register_class(cls)
     # bl_order 是运行时写进面板类的，重启后会丢，所以每次都按偏好设置重新应用
     ui.apply_panel_order()
+    # 面板上的「分开设置」要显示当前主题的真实颜色，注册时同步一次
+    preferences = compat.get_preferences()
+    if preferences is not None:
+        ui.load_family_parts(bpy.context, preferences)
     ui.register_keymap()
 
 
