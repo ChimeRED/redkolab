@@ -12,7 +12,7 @@
 """
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
 
 from . import compat, layout, pages, panels, theme
 
@@ -244,9 +244,12 @@ def _on_theme_adjust_update(self, context):
 
     走 ``theme.render_preset_colors``（**唯一**的入口）：永远从预设表（或已保存的
     自定义预设 JSON）出发，所以反复拖动不会累积 —— 不会越拖越灰。
+
+    值是按预设存的分量（``theme.active_preset`` 决定槽位），所以这里只会重算**当前
+    这一套**预设；改 A 预设的滑杆不会碰 B 预设存的那一份。
     """
     current = theme.current_theme(context)
-    name = getattr(self, "last_preset", "")
+    name = theme.active_preset(self)
     if current is None or not name:
         return
     colors = theme.render_preset_colors(name, self)
@@ -563,14 +566,20 @@ class HHZ_PT_theme(bpy.types.Panel):
         box.separator()
         sliders = box.column(align=True)
         sliders.scale_y = 1.2
-        sliders.prop(preferences, "preset_hue", text="色相", slider=True)
-        sliders.prop(preferences, "preset_saturation", text="饱和度", slider=True)
-        sliders.prop(preferences, "preset_value", text="明度", slider=True)
-        sliders.prop(preferences, "selection_saturation", text="选中线 / 面 饱和度", slider=True)
+        # 滑杆画的是**当前所用预设自己的那一组值**：分量下标 = 预设槽位
+        # （theme.preset_slot_names()：0/1/2 = 三套内置预设，3 = 「自定义预设」）。
+        # 所以套用某套预设后，这四个滑杆自动显示它存的值，切换预设也不会互相污染。
+        slot = theme.active_preset_slot(preferences)
+        sliders.prop(preferences, "preset_hue", index=slot, text="色相", slider=True)
+        sliders.prop(preferences, "preset_saturation", index=slot, text="饱和度", slider=True)
+        sliders.prop(preferences, "preset_value", index=slot, text="明度", slider=True)
+        sliders.prop(preferences, "selection_saturation", index=slot,
+                     text="选中线 / 面 饱和度", slider=True)
         box.operator("hhz.theme_reapply_preset", icon='FILE_REFRESH')
         save_custom = box.operator("hhz.theme_custom_save",
                                    text="保存当前为自定义预设", icon='ADD')
         save_custom.preset_mode = True
+        box.label(text="只调强调色（选中态 / 高亮 / 视口选中几何），背景文字边框不动；每个预设各存一份", icon='INFO')
         box.label(text="默认 0 度 / 100% / 100% 就是预设原样；反复调不会越调越灰", icon='INFO')
 
         # ---- 常驻 2：恢复（一个范围下拉 + 一个按钮 + 一条状态）----
@@ -917,39 +926,52 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         subtype='COLOR', size=4, min=0.0, max=1.0,
         default=(0.776, 1.0, 0.0, 1.0),
     )
-    preset_hue: FloatProperty(
+    # ---- 四个调整滑杆：**每个预设各存一份**（2.15.0）----
+    #
+    # 每个属性都是 ``FloatVectorProperty(size=4)``，分量下标就是预设槽位
+    # （``theme.preset_slot_names()``：0/1/2 = 三套内置预设，3 = 「自定义预设」）。
+    # 面板用 ``index=theme.active_preset_slot(preferences)`` 画滑杆，所以：
+    #   * 滑杆显示的就是"当前所用预设"那一组值（套用某预设后自动显示它存的）；
+    #   * 改 A 预设的滑杆只写 A 的槽位，B 预设一个字都不变。
+    # 索引映射的唯一权威定义在 theme.py（ADJUST_FIELDS / preset_slot），这里不重写一份。
+    preset_hue: FloatVectorProperty(
         name="色相",
-        description="正在使用的预设整体转多少度色相：0 度原样，±180 度是转半圈（-180 与 +180 等价）",
-        default=0.0,
+        description="当前预设的强调色整体转多少度色相：0 度原样，±180 度是转半圈（-180 与 +180 等价）；"
+                    "每个预设各存一份，互不影响",
+        default=(0.0, 0.0, 0.0, 0.0),
+        size=4,
         min=-180.0,
         max=180.0,
         update=_on_theme_adjust_update,
     )
-    preset_saturation: FloatProperty(
+    preset_saturation: FloatVectorProperty(
         name="饱和度",
-        description="正在使用的预设里所有颜色的饱和度：100% 原样，0% 变灰，200% 推满（纯灰在任何取值下都保持纯灰）",
-        default=1.0,
+        description="当前预设的强调色饱和度：100% 原样，0% 变灰，200% 推满（纯灰在任何取值下都保持纯灰）；"
+                    "每个预设各存一份，互不影响",
+        default=(1.0, 1.0, 1.0, 1.0),
+        size=4,
         min=0.0,
         max=2.0,
-        subtype='PERCENTAGE',
         update=_on_theme_adjust_update,
     )
-    preset_value: FloatProperty(
+    preset_value: FloatVectorProperty(
         name="明度",
-        description="正在使用的预设整体的明度：100% 原样，低于 100% 变暗，高于 100% 提亮（最高夹到 1.0）",
-        default=1.0,
+        description="当前预设的强调色明度：100% 原样，低于 100% 变暗，高于 100% 提亮（最高夹到 1.0）；"
+                    "每个预设各存一份，互不影响",
+        default=(1.0, 1.0, 1.0, 1.0),
+        size=4,
         min=0.0,
         max=2.0,
-        subtype='PERCENTAGE',
         update=_on_theme_adjust_update,
     )
-    selection_saturation: FloatProperty(
+    selection_saturation: FloatVectorProperty(
         name="选中几何饱和度",
-        description="只作用于视口里被选中的几何（活动元素 / 顶点 / 边 / 面 四条路径）：100% 原样，200% 推满，0% 变灰；界面控件与其它任何颜色都不受影响",
-        default=1.0,
+        description="只作用于视口里被选中的几何（活动元素 / 顶点 / 边 / 面 四条路径）：100% 原样，200% 推满，"
+                    "0% 变灰；背景 / 文字 / 边框 / 网格与其它任何颜色都不受影响；每个预设各存一份，互不影响",
+        default=(1.0, 1.0, 1.0, 1.0),
+        size=4,
         min=0.0,
         max=2.0,
-        subtype='PERCENTAGE',
         update=_on_theme_adjust_update,
     )
     last_preset: StringProperty(

@@ -821,8 +821,9 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
             return {'CANCELLED'}
 
         preferences = compat.get_preferences(context)
-        # 色相 / 饱和度 / 明度 / 选中几何饱和度：统一走 theme.render_preset_colors，
-        # 每次都从预设表（或已保存的自定义预设 JSON）重算，所以反复调整不会累积。
+        # 色相 / 饱和度 / 明度 / 选中几何饱和度：统一走 theme.render_preset_colors。
+        # 每次都从预设表（或已保存的自定义预设 JSON）重算，所以反复调整不会累积；
+        # 四个值从**这套预设自己的槽位**读，所以套用 B 拿到的永远是 B 那一份。
         colors = theme.render_preset_colors(self.preset, preferences)
         if not colors:
             if self.preset == theme.CUSTOM_PRESET_NAME:
@@ -866,7 +867,7 @@ class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
             self.report({'ERROR'}, "读不到偏好设置或主题")
             return {'CANCELLED'}
 
-        name = getattr(preferences, "last_preset", "") or theme.preset_names()[0]
+        name = theme.active_preset(preferences)
         colors = theme.render_preset_colors(name, preferences)
         if not colors:
             self.report({'WARNING'}, "没有可重新套用的预设")
@@ -877,11 +878,9 @@ class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
         theme.apply_sizes(current, theme.preset_sizes(name))
         preferences.last_preset = name
         theme.read_into_preferences(context, preferences)
+        hue, saturation, value, _selection = theme.preset_adjust(preferences, name)
         self.report({'INFO'}, "已按 色相 {:+.0f} 度 / 饱和度 {}% / 明度 {}% 重新套用「{}」（{} 项）".format(
-            theme.preference_number(preferences, "preset_hue", 0.0),
-            int(round(theme.preference_number(preferences, "preset_saturation", 1.0) * 100)),
-            int(round(theme.preference_number(preferences, "preset_value", 1.0) * 100)),
-            name, applied))
+            hue, int(round(saturation * 100)), int(round(value * 100)), name, applied))
         compat.tag_redraw(context)
         return {'FINISHED'}
 
@@ -1160,15 +1159,17 @@ class HHZ_OT_theme_custom_save(bpy.types.Operator):
         return {'FINISHED'}
 
     def _save_preset_mode(self, context, preferences):
-        """「保存当前为自定义预设」：当前预设（或当前自定义预设）+ 四个滑杆 -> 保留名。
+        """「保存当前为自定义预设」：当前预设 + 它自己的四个调整 -> 保留名。
 
-        存的是**调整之后的最终色表**，所以套用它就是把这份表原样写回去（不会累积）。
-        为了不让"这份表已经含了调整"和"滑杆还在原处"叠加两次，保存后把四个滑杆
-        **归位到原样**（0 度 / 100% / 100%）—— 之后再拖滑杆是在这份固化色表之上再调，
-        重复拖仍然从 JSON 重算，不会越调越灰。
+        存的是**当前预设的底表**（未调整的那一份），四个调整值则**原样固化进
+        「自定义预设」自己的槽位**（2.15.0 起每个预设各存一份）。所以套用它 =
+        底表 + 它自己那份调整 = 保存当时看到的颜色，**既不会叠加第二次，也不会累积**；
+        保存后滑杆显示的就是这批刚固化的值（它们属于自定义预设自己的槽位），
+        源预设的那一份一个字都不动（改它的时候是什么样，回头套用它还是什么样）。
         """
-        name = getattr(preferences, "last_preset", "") or theme.preset_names()[0]
-        colors = theme.render_preset_colors(name, preferences)
+        name = theme.active_preset(preferences)
+        hue, saturation, value, selection = theme.preset_adjust(preferences, name)
+        colors = theme.preset_colors(name, getattr(preferences, "theme_custom", ""))
         if not colors:
             self.report({'WARNING'},
                         "没有可保存的配色：先套一套预设（或先保存一次自定义预设），再点这个按钮")
@@ -1181,14 +1182,13 @@ class HHZ_OT_theme_custom_save(bpy.types.Operator):
             return {'CANCELLED'}
 
         preferences.theme_custom = text
-        preferences.preset_hue = 0.0
-        preferences.preset_saturation = 1.0
-        preferences.preset_value = 1.0
-        preferences.selection_saturation = 1.0
         preferences.last_preset = theme.CUSTOM_PRESET_NAME
+        theme.write_preset_adjust(preferences, theme.CUSTOM_PRESET_NAME,
+                                  (hue, saturation, value, selection))
         theme.read_into_preferences(context, preferences)
-        self.report({'INFO'}, "已把「{}」+ 当前调整存为自定义预设（{} 项颜色）；调整滑杆已归位".format(
-            name, len(colors)))
+        self.report({'INFO'},
+                    "已把「{}」+ 当前四个调整存为自定义预设（{} 项颜色）；"
+                    "四个调整已固化进自定义预设自己那一份".format(name, len(colors)))
         compat.tag_redraw(context)
         return {'FINISHED'}
 

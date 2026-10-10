@@ -1370,18 +1370,25 @@ def label_contrast_problems(colors, prefix, threshold=0.3):
     return problems
 
 
-def _marathon_card_preset():
+def _marathon_card_preset(accents=None):
     """马拉松「浅灰任务卡」这一套（照着游戏实拍图里的任务卡纸面）。
 
     浅灰底 + 近黑字 + 酸性黄绿选中。旧版这个工厂函数还负责另外两套马拉松配色
     （一个偏青蓝、一个偏洋红），它们已按用户选择**彻底删除**（不保留存档），
     所以这里不再需要 ``style`` 参数，也不再需要只有那两套用到的
     ``cyan_calm`` / ``magenta_calm`` 两个色名。
+
+    ``accents`` —— 由 :func:`_build_presets` 传进来的集合：**写强调色的同时顺手把路径
+    登记进去**（三个调整滑杆只作用于这些路径，见「强调色集合」小节）。不是强调色的
+    覆盖（如 ``wcol_menu_back.inner_sel`` 被改成近黑 ``ink``）会从集合里**摘掉**。
     """
+    if accents is None:
+        accents = set()
     base, text, edge = MARATHON["card"], MARATHON["ink"], MARATHON["card_edge"]
     accent, accent_text = MARATHON["lime_calm"], MARATHON["ink"]
 
     colors = {}
+    accents.update(accent_family_paths())
     for prefix, _label in WIDGET_FAMILIES:
         colors[family_path(prefix, "inner")] = hex_color(base)
         colors[family_path(prefix, "text")] = hex_color(text)
@@ -1427,8 +1434,27 @@ def _marathon_card_preset():
         "user_interface.wcol_state.inner_overridden": marathon_color("crimson"),
         "user_interface.wcol_state.inner_overridden_sel": marathon_color("crimson"),
     })
+    # ---- 强调色登记（这套里被写成强调色的路径）----
+    accents.update({
+        "user_interface.wcol_tab.inner_sel",
+        "user_interface.wcol_text.inner_sel",
+        "user_interface.wcol_box.inner_sel",
+        "user_interface.wcol_list_item.inner_sel",
+        "user_interface.panel_active",
+        "user_interface.wcol_state.inner_changed",
+        "user_interface.wcol_state.inner_changed_sel",
+        "user_interface.wcol_state.inner_anim",
+        "user_interface.wcol_state.inner_anim_sel",
+        "user_interface.wcol_state.inner_key_sel",
+        "user_interface.wcol_state.inner_driven",
+        "user_interface.wcol_state.inner_driven_sel",
+    })
+    # 这一条被预设改成了**近黑 ``ink``**（菜单选中行的底色），不是强调色 —— 摘掉。
+    accents.discard("user_interface.wcol_menu_back.inner_sel")
 
-    colors.update(global_highlight_colors(hex_color(accent)))
+    highlights = global_highlight_colors(hex_color(accent))
+    colors.update(highlights)
+    accents.update(highlights)
     # 浅灰卡这套里，菜单底 / 选中行底仍是深色（``panel`` / ``ink``），
     # 而菜单里的复选、单选圈走的是 ``wcol_menu_back.text`` 与 ``.text_sel``
     # （``interface_widgets.cc`` 的 ``widget_state_option_menu()`` 会用它覆盖家族色），
@@ -1446,7 +1472,11 @@ def _marathon_card_preset():
     # DEEP_ACCENT_FAMILIES 的说明，这也是"深色轨道 + 可拖动色块"的原版手感。
     colors.update(deep_accent_family_colors(
         hex_color(accent), hex_color(MARATHON["panel"]), hex_color(TOKENS["TEXT_PRIMARY"])))
-    colors.update(_frame_current_colors(hex_color(accent)))
+    # 视口里被选中的几何（鲜亮档黄绿）与时间线当前帧也都是强调色：登记
+    accents.update(VIEWPORT_SELECTION_PATHS)
+    frames = _frame_current_colors(hex_color(accent))
+    colors.update(frames)
+    accents.update(frames)
     return {path: color for path, color in colors.items() if color is not None}
 
 
@@ -1461,6 +1491,178 @@ def _frame_current_colors(accent):
         "image_editor.frame_current": accent,
         "view_3d.frame_current": accent,
     }
+
+
+# --------------------------------------------------------------- 强调色集合
+#
+# 用户实测反馈（v2.15.0 的缺陷 1 原话）：
+#   「色相，饱和度，明度变成改全局了，这不是我想要的，**改成只调整变成绿色的地方的**
+#     （死亡搁浅预设就是变蓝色的地方）」
+#
+# 所以三个调整滑杆**只**作用于「强调色集合」：控件家族的选中态与高亮槽位、活动面板
+# 标题、各编辑器的全局选中高亮、时间线的当前帧、以及视口里被选中的几何。
+# 背景 / 文字 / 边框 / 网格这些**一条都不在里面** —— 集合外的路径是"原对象直接沿用"，
+# 不是"算出来刚好一样"（见 :func:`adjust_accent_colors`）。
+#
+# 判据不靠"事后按颜色比对"：三套内置预设的工厂在写强调色时**顺手把路径记下来**
+# （工厂的 ``accents`` 参数，见 :func:`_marathon_preset_work` / :func:`_marathon_card_preset`
+# / :func:`_stranding_preset`），"哪些地方是强调色"这条判据就是预设自己的事实。
+
+#: 每个控件家族里属于强调色的三个槽位 —— 这三项就是"变成颜色"的地方。
+ACCENT_FAMILY_MEMBERS = ("inner_sel", "outline_sel", "item")
+
+
+def accent_family_paths():
+    """按规则枚举：每个控件家族的 ``inner_sel`` / ``outline_sel`` / ``item``。"""
+    return tuple(family_path(prefix, member)
+                 for prefix, _label in WIDGET_FAMILIES
+                 for member in ACCENT_FAMILY_MEMBERS)
+
+
+#: 强调色集合里**不属于任何控件家族**的那些路径（明确清单）。
+#: 家族之外的"变成颜色"的地方就这几类：文本 / 标签页 / 分组框 / 列表行的选中底、
+#: 活动面板标题、状态色里按设计用强调色的那几条、节点编辑器的选中节点。
+ACCENT_EXPLICIT_PATHS = (
+    "user_interface.wcol_text.inner_sel",
+    "user_interface.wcol_tab.inner_sel",
+    "user_interface.wcol_box.inner_sel",
+    "user_interface.wcol_list_item.inner_sel",
+    "user_interface.panel_active",
+    "user_interface.wcol_state.inner_changed",
+    "user_interface.wcol_state.inner_changed_sel",
+    "user_interface.wcol_state.inner_anim",
+    "user_interface.wcol_state.inner_anim_sel",
+    "user_interface.wcol_state.inner_key_sel",
+    "user_interface.wcol_state.inner_driven",
+    "user_interface.wcol_state.inner_driven_sel",
+    "node_editor.node_selected",
+)
+
+
+def _derived_accent_paths():
+    """由辅助函数派生的强调色路径：全局选中高亮 + 时间线当前帧 + 视口选中几何。
+
+    直接取两个派生函数的键（键与具体颜色无关，所以传占位色即可），
+    免得清单与实现分叉。``wcol_state.inner_key`` / ``inner_overridden`` 这类
+    "按设计不是强调色"的状态（文字色 / 危险红）**不在**本函数的产物里。
+    """
+    return (tuple(global_highlight_colors((0.0, 0.0, 0.0, 1.0)))
+            + tuple(_frame_current_colors(None))
+            + tuple(VIEWPORT_SELECTION_PATHS))
+
+
+#: 强调色**候选槽位**的静态清单（按规则可枚举）：家族三件套 + 明确清单 + 派生路径。
+#: 它只说明"哪些槽位**可能**是强调色"；某套预设里到底哪些**是**，以工厂顺手登记的结果为准
+#: （例如 ``wcol_tab.inner_sel`` 在「马拉松 浅灰卡」里真是强调色，在另外两套里被预设
+#: 改成了面板层级色 ``elevated`` —— 那就不是强调色）。
+ACCENT_STATIC_PATHS = frozenset(
+    accent_family_paths() + ACCENT_EXPLICIT_PATHS + _derived_accent_paths())
+
+#: 各预设工厂顺手登记的强调色路径（构建 :data:`PRESETS` 时填充）。
+_PRESET_ACCENT_PATHS = {}
+
+#: 「自定义预设」用的强调色槽位：三套内置预设**共同**认作强调色的槽位（构建时填充）。
+ACCENT_SHARED_PATHS = frozenset()
+
+#: 判断"这条路径上的颜色确实是这套预设的强调色"时用的**锚点**路径。
+#: 锚点都是公认的强调色落点（主强调 / 选中文字底 / 活动面板标题 / 状态强调 /
+#: 视口选中几何），与登记的路径集合无关 —— 所以拿它当判据不会自我循环：
+#: 谁把背景色误登记成强调色，色相对不上就会失败。
+ACCENT_ANCHOR_PATHS = (
+    "user_interface.wcol_regular.inner_sel",
+    "user_interface.wcol_regular.outline_sel",
+    "user_interface.wcol_regular.item",
+    "user_interface.wcol_text.inner_sel",
+    "user_interface.panel_active",
+    "user_interface.wcol_state.inner_changed",
+    "user_interface.wcol_state.inner_changed_sel",
+    "user_interface.wcol_state.inner_anim",
+    "user_interface.wcol_state.inner_key_sel",
+    "user_interface.wcol_state.inner_driven",
+    "view_3d.editmesh_active",
+)
+
+
+def accent_paths(name, custom_text=""):
+    """预设 ``name`` 的强调色路径元组（三个调整滑杆**唯一**的调整范围）。
+
+    * 三套内置预设：工厂写色表时顺手登记的那份集合（只保留这张表里真实存在的路径）；
+    * 「自定义预设」：色表是快照、没有工厂可以登记，所以用三套内置预设**共同**认作
+      强调色的槽位（:data:`ACCENT_SHARED_PATHS`）与这张表实际含有的路径取**交集**。
+      取交集而不是并集：某套里被改成面板层级色的槽位（如 ``wcol_tab.inner_sel``）
+      在三套里并不一致，交集里自然被排除 —— 宁可少几条，也绝不把背景色算成强调色。
+    """
+    if name == CUSTOM_PRESET_NAME:
+        colors = preset_colors(name, custom_text) or {}
+        return tuple(sorted(path for path in ACCENT_SHARED_PATHS
+                            if colors.get(path) is not None))
+    recorded = _PRESET_ACCENT_PATHS.get(name)
+    if not recorded:
+        return ()
+    return tuple(sorted(recorded))
+
+
+def adjust_accent_colors(colors, accents, hue_shift=0.0, saturation_scale=1.0,
+                         value_scale=1.0):
+    """**只**调整 ``accents`` 里的路径（三个滑杆的落点），返回新字典。
+
+    ``accents`` 之外的路径**原对象直接沿用**：不是"算出来刚好一样"，而是那些键
+    在返回值里仍然指向传进来的同一个元组（连浮点往返都不做）。三个参数都是"原样"时
+    整份表原样返回（位级相等，不做 HSV 往返）。
+    """
+    source = dict(colors or {})
+    if (float(hue_shift) == 0.0 and float(saturation_scale) == 1.0
+            and float(value_scale) == 1.0):
+        return source
+    wanted = {path: source[path] for path in accents if source.get(path) is not None}
+    if not wanted:
+        return source
+    source.update(adjust_colors(wanted, hue_shift, saturation_scale, value_scale))
+    return source
+
+
+def accent_reference_colors(colors):
+    """一张色表自己的**强调色参照色**（:data:`ACCENT_ANCHOR_PATHS` 上的颜色，去重）。
+
+    用来核对"登记成强调色的那些路径，颜色确实是这套预设的强调色"
+    （见真机断言：容差内必须与某一支参照色同色相）。
+    """
+    palette = []
+    for path in ACCENT_ANCHOR_PATHS:
+        color = (colors or {}).get(path)
+        if color is None:
+            continue
+        if not any(color_close(color, other, 1e-6) for other in palette):
+            palette.append(tuple(color))
+    return tuple(palette)
+
+
+def hue_angle(color):
+    """颜色的色相角（0…360 度）；纯灰没有色相，返回 None。"""
+    if not color:
+        return None
+    channels = list(color)[:3]
+    while len(channels) < 3:
+        channels.append(0.0)
+    hue, saturation, _value = colorsys.rgb_to_hsv(
+        *(max(0.0, min(1.0, float(component))) for component in channels))
+    if saturation <= 1e-6:
+        return None
+    return hue * 360.0
+
+
+def hue_close(one, two, tolerance=3.0):
+    """两个颜色是否同色相（容差按角度，绕环正确）。
+
+    强调色的各种派生（``scale_color`` 压暗、半透明填充）**只改明度 / alpha，
+    不改色相**，所以"同色相"正是"这条路径上确实是那支强调色"的判据。
+    """
+    first = hue_angle(one)
+    second = hue_angle(two)
+    if first is None or second is None:
+        return False
+    difference = abs(first - second) % 360.0
+    return min(difference, 360.0 - difference) <= tolerance
 
 
 #: 「死亡搁浅」预设里**允许**出现暖色（红 / 橙 / 琥珀）的路径白名单。
@@ -1491,7 +1693,7 @@ STRANDING_WARM_PATHS = (
 )
 
 
-def _stranding_preset():
+def _stranding_preset(accents=None):
     """「死亡搁浅」：冷炭黑 + **蓝为主强调** + **橙只做点缀**。
 
     用户逐项确认的设计约束（同时是真机断言的判据）：
@@ -1521,7 +1723,10 @@ def _stranding_preset():
     #: 配深色则全程够（满饱和 0.399、降饱和后 0.519），而且这正是项目既有的
     #: "菜单高亮行 = 强调色底 + 近黑字"设计（见 LABEL_INDEPENDENT_FAMILIES 的说明）。
     on_blue = stranding_color("bg")
+    if accents is None:
+        accents = set()
     colors = {}
+    accents.update(accent_family_paths())
     for prefix, _label in WIDGET_FAMILIES:
         colors[family_path(prefix, "inner")] = base
         colors[family_path(prefix, "text")] = text
@@ -1606,26 +1811,55 @@ def _stranding_preset():
         # 基面网格线（view_3d.grid）与法线（view_3d.normal）不在这里出现：
         # 它们由 preset_colors() 统一写回出厂默认值（见 viewport_helper_colors()）。
     })
-    colors.update(global_highlight_colors(blue))
+    # ---- 强调色登记（这套里被写成强调色的路径）----
+    accents.update({
+        "user_interface.wcol_text.inner_sel",
+        "user_interface.wcol_box.inner_sel",
+        "user_interface.wcol_list_item.inner_sel",
+        "user_interface.panel_active",
+        "user_interface.wcol_state.inner_changed",
+        "user_interface.wcol_state.inner_changed_sel",
+        "user_interface.wcol_state.inner_anim",
+        "user_interface.wcol_state.inner_anim_sel",
+        "user_interface.wcol_state.inner_key_sel",
+        "node_editor.node_selected",
+    })
+    accents.update(VIEWPORT_SELECTION_PATHS)
+    # 这两条不是强调色，摘掉：
+    #   * 活动标签的底被预设改成了**面板层级色** ``elevated``（层级不是强调）；
+    #   * ``inner_driven`` / ``inner_driven_sel`` 用的是 ``steel``（技术性钢灰）；
+    #   * ``inner_overridden`` / ``inner_overridden_sel`` 是危险红（语义固定）；都**没有**登记。
+    accents.discard("user_interface.wcol_tab.inner_sel")
+
+    highlights = global_highlight_colors(blue)
+    colors.update(highlights)
+    accents.update(highlights)
     # 标签独立型家族的标签文字：浅灰白（理由见 _label_family_override）
     colors.update(_label_family_override(stranding_color("blue_dim"), text))
     # 滑块 / 工具按钮 / 顶部工具项：面板色轨道 + 调色板里备好的蓝深档 + 浅色文字
     colors.update(deep_accent_family_colors(
         blue, base, text, inner_sel=stranding_color("blue_dim")))
-    colors.update(_frame_current_colors(blue))
+    frames = _frame_current_colors(blue)
+    colors.update(frames)
+    accents.update(frames)
     return {path: color for path, color in colors.items() if color is not None}
 
 
 #: 配色预设：照着失落星船 马拉松 的三张实拍图做的
-def _marathon_preset_work():
+def _marathon_preset_work(accents=None):
     """适合长时间建模的低干扰版本：近黑面板 + 黄绿只用在选中态，边框压到几乎看不见。
 
     实拍图里"黄绿只出现在关键状态"的克制感就是这套的思路：
     大面积是炭黑与低对比灰，强调色只落在当前选中 / 活动的东西上。
+
+    ``accents`` —— 强调色路径的登记集合（见「强调色集合」小节）。
     """
     base = TOKENS["BG_PANEL"]
     text = TOKENS["TEXT_PRIMARY"]
+    if accents is None:
+        accents = set()
     colors = {}
+    accents.update(accent_family_paths())
     for prefix, _label in WIDGET_FAMILIES:
         colors[family_path(prefix, "inner")] = hex_color(base)
         colors[family_path(prefix, "text")] = hex_color(text)
@@ -1693,7 +1927,29 @@ def _marathon_preset_work():
         "user_interface.wcol_state.inner_overridden": hex_color(TOKENS["STATE_ERROR"]),
         "user_interface.wcol_state.inner_overridden_sel": hex_color(TOKENS["STATE_ERROR"]),
     })
-    colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
+    # ---- 强调色登记（这套里被写成强调色的路径）----
+    accents.update({
+        "user_interface.wcol_text.inner_sel",
+        "user_interface.wcol_box.inner_sel",
+        "user_interface.wcol_list_item.inner_sel",
+        "user_interface.panel_active",
+        "user_interface.wcol_state.inner_changed",
+        "user_interface.wcol_state.inner_changed_sel",
+        "user_interface.wcol_state.inner_anim",
+        "user_interface.wcol_state.inner_anim_sel",
+        "user_interface.wcol_state.inner_key_sel",
+        "user_interface.wcol_state.inner_driven",
+        "user_interface.wcol_state.inner_driven_sel",
+    })
+    accents.update(VIEWPORT_SELECTION_PATHS)
+    # 活动标签的底被预设改成了**面板层级色** ``elevated``（层级不是强调色）—— 摘掉；
+    # ``inner_key``（主文字色）与 ``inner_overridden*``（危险红）按设计不是强调色，
+    # 本来就没登记。
+    accents.discard("user_interface.wcol_tab.inner_sel")
+
+    highlights = global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"]))
+    colors.update(highlights)
+    accents.update(highlights)
     # 标签独立型家族的标签文字：三套预设统一用浅色（理由见 _label_family_override）
     colors.update(_label_family_override(
         scale_color(hex_color(TOKENS["ACCENT_PRIMARY_CALM"]), OPTION_BLOCK_FACTOR),
@@ -1703,7 +1959,9 @@ def _marathon_preset_work():
     colors.update(deep_accent_family_colors(
         hex_color(TOKENS["ACCENT_PRIMARY_CALM"]), hex_color(MARATHON["panel"]),
         hex_color(TOKENS["TEXT_PRIMARY"])))
-    colors.update(_frame_current_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
+    frames = _frame_current_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"]))
+    colors.update(frames)
+    accents.update(frames)
     return {path: color for path, color in colors.items() if color is not None}
 
 
@@ -1711,13 +1969,43 @@ def _marathon_preset_work():
 #: 真机测试会断言它们都真的在 :data:`PRESETS` 里，且「死亡搁浅」不在其中）。
 MARATHON_PRESET_NAMES = ("马拉松 建模 低干扰", "马拉松 浅灰卡")
 
-#: 配色预设：两套「失落星船：马拉松」+ 一套「死亡搁浅」。
-#: 顺序就是 N 面板上按钮的顺序（按钮由 ``preset_names()`` 自动生成，ui.py 不参与）。
-PRESETS = (
-    ("马拉松 建模 低干扰", _marathon_preset_work()),
-    ("马拉松 浅灰卡", _marathon_card_preset()),
-    ("死亡搁浅", _stranding_preset()),
+#: 工厂的调用顺序就是 N 面板上按钮的顺序（按钮由 ``preset_names()`` 自动生成）。
+#: 每个工厂都收一个 ``accents`` 集合，**写强调色的同时顺手把路径登记进去**。
+_PRESET_FACTORIES = (
+    ("马拉松 建模 低干扰", _marathon_preset_work),
+    ("马拉松 浅灰卡", _marathon_card_preset),
+    ("死亡搁浅", _stranding_preset),
 )
+
+
+def _build_presets():
+    """按 :data:`_PRESET_FACTORIES` 建预设表，同时收集每套预设的强调色路径。"""
+    table = []
+    for name, factory in _PRESET_FACTORIES:
+        accents = set()
+        colors = factory(accents)
+        # 只保留这张表里真实存在的路径（工厂写进去又被 None 过滤掉的不能登记）
+        _PRESET_ACCENT_PATHS[name] = frozenset(accents) & set(colors)
+        table.append((name, colors))
+    return tuple(table)
+
+
+def _shared_accent_paths():
+    """三套内置预设**共同**认作强调色的槽位（「自定义预设」用，理由见 accent_paths）。"""
+    sets = [_PRESET_ACCENT_PATHS[name] for name, _factory in _PRESET_FACTORIES]
+    if not sets:
+        return frozenset()
+    shared = set(sets[0])
+    for item in sets[1:]:
+        shared &= item
+    return frozenset(shared)
+
+
+#: 配色预设：两套「失落星船：马拉松」+ 一套「死亡搁浅」。
+PRESETS = _build_presets()
+
+#: 「自定义预设」用的强调色槽位（三套内置预设的交集，见 :func:`accent_paths`）。
+ACCENT_SHARED_PATHS = _shared_accent_paths()
 
 #: 第 4 个预设按钮「自定义预设」在**既有的自定义配色存储**
 #: （``preferences.theme_custom``，一个 JSON 字符串）里用的**保留名**。
@@ -2153,7 +2441,11 @@ def preset_colors(name, custom_text=""):
 
 
 def preference_number(preferences, name, default):
-    """从偏好设置里安全读一个数值（缺失 / 不是数字时给默认值）。"""
+    """从偏好设置里安全读一个数值（缺失 / 不是数字时给默认值）。
+
+    2.15.0 起四个调整值是按预设存的分量，读取一律走 :func:`preset_adjust`；
+    这个通用读法留给"单个数值"的偏好设置项用（例如将来新增的数值设置）。
+    """
     value = getattr(preferences, name, None)
     if value is None:
         return float(default)
@@ -2163,6 +2455,100 @@ def preference_number(preferences, name, default):
         return float(default)
 
 
+# ------------------------------------------------- 每个预设各存一份的四个调整值
+#
+# 用户实测反馈（v2.15.0 的缺陷 2 原话）：
+#   「改一个预设的色相，饱和度，明度其他预设也会跟着变，要求所有预设的色相，
+#     饱和度，明度调整是**独立的**」
+#
+# 所以四个调整值**不是全局一份**，而是**按预设各存一份**：预设槽位固定 4 个
+# （3 套内置 + 「自定义预设」），每个槽位 4 个值。索引映射就写在这里：
+#   ``preset_hue[slot]`` / ``preset_saturation[slot]`` / ``preset_value[slot]`` /
+#   ``selection_saturation[slot]``，其中 ``slot = preset_slot(预设名)``。
+# 面板用同一个 ``slot`` 当 ``index=`` 画滑杆（ui.py），所以"滑杆显示的就是当前所用
+# 预设那一组值"是**结构性**成立的，不靠同步、也不可能互相污染。
+
+#: 四个调整值对应的偏好设置属性名（每个都是一个 ``FloatVectorProperty(size=4)``）。
+ADJUST_FIELDS = ("preset_hue", "preset_saturation", "preset_value", "selection_saturation")
+
+#: 中性值（= 预设原样）：0 度色相 / 100% 饱和度 / 100% 明度 / 100% 选中饱和度。
+NEUTRAL_ADJUST = (0.0, 1.0, 1.0, 1.0)
+
+
+def preset_slot_names():
+    """固定槽位的顺序：3 套内置预设 + 「自定义预设」（一共 4 个）。"""
+    return list(preset_names()) + [CUSTOM_PRESET_NAME]
+
+
+def preset_slot(name):
+    """预设名 -> 固定槽位下标；认不出来的名字（含空串）返回 -1。"""
+    try:
+        return preset_slot_names().index(name)
+    except ValueError:
+        return -1
+
+
+def active_preset(preferences):
+    """界面上"当前在用"的预设名：``last_preset`` 认不出来时退回第一套内置预设。
+
+    滑杆显示哪一组值、拖滑杆时重算哪一套，两处都走这一个函数 —— 所以它们永远一致。
+    """
+    name = getattr(preferences, "last_preset", "") or ""
+    if preset_slot(name) >= 0:
+        return str(name)
+    names = preset_names()
+    return names[0] if names else ""
+
+
+def active_preset_slot(preferences):
+    """当前所用预设的槽位下标（给面板 ``index=`` 用）。"""
+    return preset_slot(active_preset(preferences))
+
+
+def preset_adjust(preferences, name=None):
+    """读某一套预设的四个调整值 ``(色相, 饱和度, 明度, 选中饱和度)``。
+
+    ``name`` 为 ``None`` 时读"当前所用"的那一套（:func:`active_preset`）。
+    每套预设各存一份，**互不影响** —— 这就是"改 A 预设的滑杆，B 预设一个字都不变"。
+    """
+    slot = preset_slot(active_preset(preferences) if name is None else name)
+    values = []
+    for index, field in enumerate(ADJUST_FIELDS):
+        neutral = float(NEUTRAL_ADJUST[index])
+        if preferences is None or slot < 0:
+            values.append(neutral)
+            continue
+        vector = getattr(preferences, field, None)
+        try:
+            values.append(float(vector[slot]))
+        except (TypeError, IndexError, KeyError):
+            values.append(neutral)
+    return tuple(values)
+
+
+def write_preset_adjust(preferences, name, values):
+    """把四个调整值写进某个预设**自己的槽位**（其它预设的槽位一个字都不动）。
+
+    返回是否写入成功（名字认不出来 / 读不到向量属性时返回 ``False``，不抛异常）。
+    """
+    slot = preset_slot(name)
+    if preferences is None or slot < 0:
+        return False
+    wanted = list(values)[:len(ADJUST_FIELDS)]
+    while len(wanted) < len(ADJUST_FIELDS):
+        wanted.append(NEUTRAL_ADJUST[len(wanted)])
+    written = False
+    for field, value in zip(ADJUST_FIELDS, wanted):
+        vector = getattr(preferences, field, None)
+        if vector is None or len(vector) <= slot:
+            continue
+        updated = [float(component) for component in vector]
+        updated[slot] = float(value)
+        setattr(preferences, field, updated)
+        written = True
+    return written
+
+
 def adjusted_preset_colors(name, custom_text="", hue_shift=0.0, saturation_scale=1.0,
                            value_scale=1.0, selection_saturation=1.0):
     """「预设（或自定义预设） + 四个调整」的最终色表。
@@ -2170,30 +2556,35 @@ def adjusted_preset_colors(name, custom_text="", hue_shift=0.0, saturation_scale
     每次都从**固定的底表**重算（三套内置预设读 :data:`PRESETS`，自定义预设读已保存的
     JSON），所以反复拖滑杆 / 反复套用都**不会累积**。
 
-    顺序：先把色相 / 饱和度 / 明度作用到全部颜色，再把「选中几何饱和度」
-    只作用到 :data:`VIEWPORT_SELECTION_PATHS` 那 4 条 —— 这样 A1 的护栏
-    （其它路径在任何取值下都不变）天然成立。
+    顺序：先把色相 / 饱和度 / 明度只作用到这套预设的**强调色集合**
+    （:func:`accent_paths` —— 背景 / 文字 / 边框 / 网格一条都不在里面），
+    再把「选中几何饱和度」作用到 :data:`VIEWPORT_SELECTION_PATHS` 那 4 条。
+
+    强调色集合是 :func:`accent_paths` 的**子集**关系：视口那 4 条在集合里，
+    所以两步都只落在"变成颜色的地方"上。
     """
     colors = preset_colors(name, custom_text)
     if not colors:
         return None
-    colors = adjust_colors(colors, hue_shift, saturation_scale, value_scale)
+    colors = adjust_accent_colors(colors, accent_paths(name, custom_text),
+                                  hue_shift, saturation_scale, value_scale)
     return selection_saturation_colors(colors, selection_saturation)
 
 
 def render_preset_colors(name, preferences):
     """面板回调与算符**唯一**的「预设 + 滑杆」入口（不要另写一套应用逻辑）。
 
-    偏好设置里那四个值：``preset_hue``（-180…180 度）、``preset_saturation``、
-    ``preset_value``（都是 0…2 的倍数，1.0 = 原样）、``selection_saturation``。
+    四个值从**这个预设自己的槽位**读（:func:`preset_adjust`），所以套用某套预设拿到的
+    永远是它自己那份调整 —— 切换预设不会互相污染。
     """
+    hue, saturation, value, selection = preset_adjust(preferences, name)
     return adjusted_preset_colors(
         name,
         custom_text=getattr(preferences, "theme_custom", "") if preferences is not None else "",
-        hue_shift=preference_number(preferences, "preset_hue", 0.0),
-        saturation_scale=preference_number(preferences, "preset_saturation", 1.0),
-        value_scale=preference_number(preferences, "preset_value", 1.0),
-        selection_saturation=preference_number(preferences, "selection_saturation", 1.0),
+        hue_shift=hue,
+        saturation_scale=saturation,
+        value_scale=value,
+        selection_saturation=selection,
     )
 
 
