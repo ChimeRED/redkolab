@@ -139,14 +139,14 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          name: 红红子lab (REDKOlab) ${{ github.ref_name }}
+          name: 红红子lab (REDKO_LAB) ${{ github.ref_name }}
           files: |
             dist/*.zip
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
-            ## 红红子lab (REDKOlab) ${{ github.ref_name }}
+            ## 红红子lab (REDKO_LAB) ${{ github.ref_name }}
 
             **一个 zip 通吃 Blender 4.0 ~ 最新版**，本页附件即该版本的归档包，永久保留。
 

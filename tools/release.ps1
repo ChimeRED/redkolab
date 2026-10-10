@@ -30,6 +30,9 @@ param(
     [string]$Remote = "origin",
     [string]$Git = "",
     [string]$Python = "",
+    # Local add-on zip library: every release is copied there, replacing older versions
+    [string]$DeployTo = "D:\build\Blender\4.0\4.0chajian",
+    [switch]$NoDeploy,
     [switch]$DryRun
 )
 
@@ -147,7 +150,19 @@ $zips = Get-ChildItem -LiteralPath (Join-Path $projectRoot "dist") -Filter "*.zi
 & $pythonExe (Join-Path $PSScriptRoot "inspect_zip.py") $zips.FullName
 if ($LASTEXITCODE -ne 0) { throw "package self-check failed - release aborted" }
 
-# --- 4. commit / tag / push -------------------------------------------------
+# --- 4. local add-on zip library -------------------------------------------
+# Do this before pushing: the local library gets the new zip even if the network
+# is down and the push has to be retried later.
+$newestZip = ($zips | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+if ($DryRun) {
+    Write-Host "DryRun: would copy $([System.IO.Path]::GetFileName($newestZip)) to $DeployTo" -ForegroundColor Yellow
+} elseif ($NoDeploy) {
+    Write-Host "local deploy skipped (-NoDeploy)"
+} else {
+    & (Join-Path $PSScriptRoot "deploy_local.ps1") -Zip $newestZip -Target $DeployTo
+}
+
+# --- 5. commit / tag / push -------------------------------------------------
 $branch = (& $gitExe rev-parse --abbrev-ref HEAD).Trim()
 
 if ($DryRun) {

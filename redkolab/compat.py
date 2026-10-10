@@ -28,7 +28,7 @@ ADDON_ID = "redkolab"
 ADDON_NAME = "红红子lab"
 
 #: 英文名
-ADDON_NAME_EN = "REDKOlab"
+ADDON_NAME_EN = "REDKO_LAB"
 
 #: 插件列表里显示的完整名字（中英文都能搜到）
 ADDON_NAME_FULL = "{} ({})".format(ADDON_NAME, ADDON_NAME_EN)
@@ -40,8 +40,12 @@ MIN_BLENDER_VERSION = (4, 0, 0)
 #: "bl_ext.<仓库名>.redkolab"。偏好设置的 bl_idname 必须与它一致。
 PACKAGE = __package__ or ADDON_ID
 
-#: 默认饼菜单快捷键：` 键
-DEFAULT_KEY_TYPE = "ACCENT_GRAVE"
+#: 默认饼菜单快捷键：Ctrl + E
+DEFAULT_KEY_TYPE = "E"
+DEFAULT_KEY_CTRL = True
+DEFAULT_KEY_SHIFT = False
+DEFAULT_KEY_ALT = False
+DEFAULT_KEY_OSKEY = False
 
 VERSION = tuple(bpy.app.version)
 VERSION_STRING = ".".join(str(part) for part in VERSION)
@@ -301,6 +305,14 @@ def key_label(key_type, ctrl=False, shift=False, alt=False, oskey=False):
         parts.append("Cmd")
     parts.append(_KEY_LABELS.get(key_type, key_type or "?"))
     return " + ".join(parts)
+
+
+def default_hotkey_label():
+    """默认饼菜单快捷键的显示文本。"""
+    return key_label(
+        DEFAULT_KEY_TYPE, DEFAULT_KEY_CTRL, DEFAULT_KEY_SHIFT,
+        DEFAULT_KEY_ALT, DEFAULT_KEY_OSKEY,
+    )
 
 
 def tag_redraw(context=None):

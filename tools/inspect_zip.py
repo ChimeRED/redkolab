@@ -144,8 +144,8 @@ def inspect(path):
         if manifest_id != PACKAGE_NAME:
             problems.append("清单 id 应为 {}，实际 {}".format(PACKAGE_NAME, manifest_id))
         name = bl_info.get("name", "")
-        if "红红子lab" not in name or "REDKOlab" not in name:
-            problems.append("插件名应同时含中文名与英文名，实际「{}」".format(name))
+        if "红红子lab" not in name or "REDKO_LAB" not in name:
+            problems.append("插件名应同时含中文名与英文名（REDKO_LAB），实际「{}」".format(name))
         if read_manifest_field(manifest, "name") != name:
             problems.append("bl_info 与清单的 name 不一致")
 

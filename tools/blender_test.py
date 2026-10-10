@@ -349,15 +349,15 @@ def test_registration(module_name, module):
           "compat.ADDON_ID 与包名一致", module.compat.ADDON_ID)
     check(module.compat.ADDON_NAME == "红红子lab",
           "中文名保留为 红红子lab", module.compat.ADDON_NAME)
-    check(module.compat.ADDON_NAME_EN == "REDKOlab",
-          "英文名为 REDKOlab", module.compat.ADDON_NAME_EN)
+    check(module.compat.ADDON_NAME_EN == "REDKO_LAB",
+          "英文名为 REDKO_LAB", module.compat.ADDON_NAME_EN)
     check(tuple(bpy.app.version) >= tuple(module.compat.MIN_BLENDER_VERSION),
           "当前 Blender 满足最低版本要求",
           "{} vs {}".format(bpy.app.version, module.compat.MIN_BLENDER_VERSION))
 
     bl_info = getattr(module, "bl_info", None)
     if bl_info:
-        check(bl_info["name"] == "红红子lab (REDKOlab)",
+        check(bl_info["name"] == "红红子lab (REDKO_LAB)",
               "bl_info 名字同时含中英文名", bl_info["name"])
         check(tuple(bl_info["blender"]) == (4, 0, 0),
               "bl_info 声明最低 4.0", bl_info["blender"])
@@ -367,9 +367,13 @@ def test_registration(module_name, module):
     preferences = module.compat.get_preferences()
     check(preferences is not None, "偏好设置对象可访问")
     if preferences is not None:
-        check(preferences.key_type == "ACCENT_GRAVE", "默认按键是 `（ACCENT_GRAVE）", preferences.key_type)
+        check(preferences.key_type == "E", "默认按键是 E", preferences.key_type)
+        check(preferences.ctrl is True, "默认按住 Ctrl", preferences.ctrl)
         check(preferences.enable_pie is True, "默认启用饼菜单快捷键")
-        check(preferences.hotkey_label() == "`", "快捷键显示文本正确", preferences.hotkey_label())
+        check(preferences.hotkey_label() == "Ctrl + E",
+              "默认快捷键显示为 Ctrl + E", preferences.hotkey_label())
+        check(module.compat.default_hotkey_label() == "Ctrl + E",
+              "compat 里的默认快捷键文本一致", module.compat.default_hotkey_label())
 
     panel = getattr(bpy.types, "HHZ_PT_main", None)
     if panel is not None:
@@ -422,6 +426,32 @@ def _pie_shortcut_items(keyconfig):
     return [item for item in keymap.keymap_items if item.idname == "wm.call_menu_pie"]
 
 
+def _ctrl_e_conflicts(module):
+    """列出 Blender 自己已有的 Ctrl+E 绑定（编辑模式等场景会优先于插件）。"""
+    key_type = module.compat.DEFAULT_KEY_TYPE
+    conflicts = []
+    try:
+        keyconfigs = bpy.context.window_manager.keyconfigs
+        candidates = [getattr(keyconfigs, "active", None), getattr(keyconfigs, "user", None)]
+    except Exception:
+        return conflicts
+
+    for keyconfig in candidates:
+        if keyconfig is None:
+            continue
+        for keymap_name in ("3D View", "Object Mode", "Mesh", "Edit Mode"):
+            try:
+                keymap = keyconfig.keymaps.get(keymap_name)
+            except Exception:
+                keymap = None
+            if keymap is None:
+                continue
+            for item in keymap.keymap_items:
+                if item.type == key_type and item.ctrl and item.idname != "wm.call_menu_pie":
+                    conflicts.append("{}: {}".format(keymap_name, item.idname))
+    return sorted(set(conflicts))
+
+
 def test_keymap(module):
     section("键位注册与改键")
     keyconfig = module.compat.addon_keyconfig()
@@ -433,9 +463,16 @@ def test_keymap(module):
     items = _pie_shortcut_items(keyconfig)
     check(len(items) == 1, "3D View 里注册了 1 个饼菜单快捷键", len(items))
     if len(items) == 1:
-        check(items[0].type == "ACCENT_GRAVE", "默认绑定 ` 键", items[0].type)
+        check(items[0].type == "E", "默认绑定 E 键", items[0].type)
+        # KeyMapItem 的修饰键是 int（1/0），不是单例 True，所以用 bool() 判断
+        check(bool(items[0].ctrl) is True, "默认按住 Ctrl 触发", items[0].ctrl)
         check(getattr(items[0].properties, "name", None) == PIE_IDNAME,
               "快捷键指向饼菜单", getattr(items[0].properties, "name", None))
+
+    # Ctrl+E 在编辑模式等场景是 Blender 自己的键位（会优先于插件），这里只报告、不算失败
+    conflicts = _ctrl_e_conflicts(module)
+    print("  Ctrl+E 上已有的其它 Blender 绑定：{}（无头环境 keymap 可能不完整，仅供参考）".format(
+        conflicts if conflicts else "无"))
 
     preferences = module.compat.get_preferences()
     preferences.key_type = "K"
@@ -450,8 +487,8 @@ def test_keymap(module):
 
     bpy.ops.hhz.reset_hotkey()
     items = _pie_shortcut_items(keyconfig)
-    check(len(items) == 1 and items[0].type == "ACCENT_GRAVE" and not items[0].ctrl,
-          "恢复默认快捷键生效",
+    check(len(items) == 1 and items[0].type == "E" and bool(items[0].ctrl),
+          "恢复默认快捷键生效（Ctrl+E）",
           [(item.type, item.ctrl) for item in items])
 
     preferences.enable_pie = False
@@ -726,9 +763,17 @@ def test_bad_hotkey(module):
     except Exception as error:
         check(False, "非法按键标识不应抛异常", "{}: {}".format(type(error).__name__, error))
 
-    module.ui.apply_hotkey(bpy.context, "ACCENT_GRAVE", False, False, False, False)
-    check(len(_pie_shortcut_items(keyconfig)) == 1, "随后恢复默认键位成功",
-          len(_pie_shortcut_items(keyconfig)))
+    module.ui.apply_hotkey(
+        bpy.context,
+        module.compat.DEFAULT_KEY_TYPE,
+        module.compat.DEFAULT_KEY_CTRL,
+        module.compat.DEFAULT_KEY_SHIFT,
+        module.compat.DEFAULT_KEY_ALT,
+        module.compat.DEFAULT_KEY_OSKEY,
+    )
+    items = _pie_shortcut_items(keyconfig)
+    check(len(items) == 1 and items[0].type == module.compat.DEFAULT_KEY_TYPE and items[0].ctrl,
+          "随后恢复默认键位成功（Ctrl+E）", [(item.type, item.ctrl) for item in items])
 
 
 def test_theme(module):

@@ -343,10 +343,17 @@ class HHZ_OT_reset_hotkey(bpy.types.Operator):
     bl_description = "把饼菜单快捷键恢复为默认的 ` 键"
 
     def execute(self, context):
-        if not ui.apply_hotkey(context, compat.DEFAULT_KEY_TYPE, False, False, False, False):
+        if not ui.apply_hotkey(
+            context,
+            compat.DEFAULT_KEY_TYPE,
+            compat.DEFAULT_KEY_CTRL,
+            compat.DEFAULT_KEY_SHIFT,
+            compat.DEFAULT_KEY_ALT,
+            compat.DEFAULT_KEY_OSKEY,
+        ):
             self.report({'WARNING'}, "已恢复默认值，但键位映射注册失败")
             return {'CANCELLED'}
-        self.report({'INFO'}, "饼菜单快捷键已恢复为 {}".format(compat.key_label(compat.DEFAULT_KEY_TYPE)))
+        self.report({'INFO'}, "饼菜单快捷键已恢复为 {}".format(compat.default_hotkey_label()))
         compat.tag_redraw(context)
         return {'FINISHED'}
 
@@ -358,7 +365,8 @@ class HHZ_OT_capture_hotkey(bpy.types.Operator):
 
     bl_options = {'INTERNAL'}
 
-    _HINT = "红红子lab：请按下新的饼菜单快捷键（Esc 取消，Backspace 恢复默认 `）"
+    _HINT = "红红子lab：请按下新的饼菜单快捷键（Esc 取消，Backspace 恢复默认 {}）".format(
+        compat.default_hotkey_label())
 
     def invoke(self, context, event):
         if compat.get_preferences(context) is None:
@@ -408,7 +416,15 @@ class HHZ_OT_capture_hotkey(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         if event.type == 'BACK_SPACE':
-            self._apply(context, compat.DEFAULT_KEY_TYPE, False, False, False, False, reset=True)
+            self._apply(
+                context,
+                compat.DEFAULT_KEY_TYPE,
+                compat.DEFAULT_KEY_CTRL,
+                compat.DEFAULT_KEY_SHIFT,
+                compat.DEFAULT_KEY_ALT,
+                compat.DEFAULT_KEY_OSKEY,
+                reset=True,
+            )
             return {'FINISHED'}
 
         ctrl, shift, alt, oskey = compat.modifier_flags(event)

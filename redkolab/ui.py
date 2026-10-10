@@ -3,7 +3,7 @@
 
 包含三部分：
 
-* 饼式菜单（默认快捷键 `` 键，可在插件偏好设置里改）
+* 饼式菜单（默认快捷键 Ctrl+E，可在插件偏好设置里改）
 * 3D 视图 N 面板（侧栏里的「红红子lab」标签页），下面挂着「主题颜色」子面板
 * 插件偏好设置（快捷键捕获、手动改键、启用开关、主题颜色项）
 
@@ -42,7 +42,8 @@ def _hotkey_settings(context=None):
     """返回 (key_type, ctrl, shift, alt, oskey, 是否启用)。"""
     preferences = compat.get_preferences(context)
     if preferences is None:
-        return compat.DEFAULT_KEY_TYPE, False, False, False, False, True
+        return (compat.DEFAULT_KEY_TYPE, compat.DEFAULT_KEY_CTRL, compat.DEFAULT_KEY_SHIFT,
+                compat.DEFAULT_KEY_ALT, compat.DEFAULT_KEY_OSKEY, True)
     return (
         preferences.key_type or compat.DEFAULT_KEY_TYPE,
         bool(preferences.ctrl),
@@ -416,17 +417,17 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
 
     key_type: StringProperty(
         name="按键标识",
-        description="饼菜单快捷键的按键标识，例如 ACCENT_GRAVE 就是 ` 键。\n推荐直接点上面的「修改」，然后按一下想用的键",
+        description="饼菜单快捷键的按键标识，例如默认的 E 键就是 E、SPACE 是空格。\n推荐直接点上面的「修改」，然后按一下想用的键",
         default=compat.DEFAULT_KEY_TYPE,
         update=_on_preferences_update,
     )
-    ctrl: BoolProperty(name="Ctrl", default=False, update=_on_preferences_update)
-    shift: BoolProperty(name="Shift", default=False, update=_on_preferences_update)
-    alt: BoolProperty(name="Alt", default=False, update=_on_preferences_update)
+    ctrl: BoolProperty(name="Ctrl", default=compat.DEFAULT_KEY_CTRL, update=_on_preferences_update)
+    shift: BoolProperty(name="Shift", default=compat.DEFAULT_KEY_SHIFT, update=_on_preferences_update)
+    alt: BoolProperty(name="Alt", default=compat.DEFAULT_KEY_ALT, update=_on_preferences_update)
     oskey: BoolProperty(
         name="Cmd / Super",
         description="macOS 上的 Cmd 键（Windows/Linux 上一般用不到）",
-        default=False,
+        default=compat.DEFAULT_KEY_OSKEY,
         update=_on_preferences_update,
     )
     enable_pie: BoolProperty(
