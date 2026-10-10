@@ -510,6 +510,10 @@ class HHZ_PT_theme(bpy.types.Panel):
         else:
             layout.label(text="「{}」{} 项都还是出厂值".format(group, len(group_paths)),
                          icon='CHECKMARK')
+        missing_defaults = [item for item in available if not theme.has_default(item)]
+        if missing_defaults:
+            layout.label(text="本版本还有 {} 项没有出厂默认值记录".format(len(missing_defaults)),
+                         icon='INFO')
 
         # ---- 控件颜色分开设置：每一项旁边都有自己的小调色盘 ----
         box = layout.box()

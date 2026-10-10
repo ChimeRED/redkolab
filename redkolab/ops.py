@@ -681,8 +681,12 @@ class HHZ_OT_theme_restore_default(bpy.types.Operator):
         elif self.scope == 'ALL':
             paths = theme.default_paths()
             changed = theme.restore_defaults(current, paths)
-            self.report({'INFO' if changed else 'WARNING'},
-                        "恢复 {} 项（共记录 {} 项默认值）".format(changed, len(paths)))
+            missing = [item for item in theme.available_paths(context)
+                       if not theme.has_default(item)]
+            message = "恢复了 {} 项（本版本共记录 {} 项出厂默认值）".format(changed, len(paths))
+            if missing:
+                message += "，另有 {} 项没有默认值记录".format(len(missing))
+            self.report({'INFO' if changed else 'WARNING'}, message)
             if not changed:
                 return {'CANCELLED'}
         else:

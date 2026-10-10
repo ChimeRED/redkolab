@@ -855,10 +855,12 @@ def test_theme(module):
     check(blue_path in listed, "选中按钮颜色在列表里")
     check(theme.component_count(current, grey_path) == 4,
           "按钮颜色是 RGBA（4 分量）", theme.component_count(current, grey_path))
-    check(theme.has_default(grey_path) and theme.has_default(blue_path),
-          "按钮颜色记录了出厂默认值")
-    check(not theme.has_default("user_interface.wcol_state.error"),
-          "5.x 专属颜色不记录默认值（避免套到旧版上）")
+    check(theme.has_default("user_interface.wcol_regular.inner"), "按钮颜色记录了出厂默认值")
+    check(not theme.has_default("user_interface.wcol_state.error", version=(4, 0, 2)),
+          "5.x 专属项在 4.x 上不生效（不会被套上 5.x 的默认值）")
+    check(theme.has_default("user_interface.wcol_state.error", version=(5, 2, 2))
+          or not theme.has_default("user_interface.wcol_state.error"),
+          "5.x 专属项在 5.x 上按 5X 表取值")
     original_grey = theme.get_color(current, grey_path)
     original_blue = theme.get_color(current, blue_path)
 
@@ -937,7 +939,7 @@ def test_theme(module):
         check(has_frame, "4.x 上时间线当前帧色在列表里", frame_path)
         check(theme.has_default(frame_path), "时间线当前帧记录了出厂默认值")
         check(color_close(theme.get_color(current, frame_path),
-                          theme.DEFAULT_COLORS[frame_path]),
+                          theme.default_of(frame_path)),
               "时间线当前帧默认是蓝色", theme.get_color(current, frame_path))
     else:
         check(not has_frame, "5.x 上时间线当前帧色已被 Blender 移除（自动隐藏）", frame_path)
@@ -1138,7 +1140,27 @@ def test_theme(module):
     bad_groups = [group for _path, _label, group in theme.TARGETS if "\u00b7" in group]
     check(not bad_groups, "分组名里也没有中点号", bad_groups[:5])
 
-    # ---- 面板里这些东西都要有（静态检查）----
+    # ---- 默认值表：全部恢复之后每一项都要真的回到记录值 ----
+    # 这是"全部恢复完还有地方是绿的"的防线：预设/全局配色改过的项（大纲选中行等）
+    # 必须都能被恢复回来。
+    recorded = theme.default_paths()
+    check(len(recorded) >= 150, "记录的出厂默认值项数 >= 150", len(recorded))
+    theme.restore_defaults(current, recorded)
+    not_restored = []
+    for item in recorded:
+        live = theme.get_color(current, item)
+        expected = theme.default_of(item)
+        if live is None or expected is None or not theme.color_close(live, expected):
+            not_restored.append("{}: {} != {}".format(item, live, expected))
+    check(not not_restored,
+          "全部恢复之后每一项都回到记录的出厂值（{} 项）".format(len(recorded)),
+          not_restored[:6])
+    for item in ("outliner.selected_highlight", "outliner.active", "file_browser.selected_file",
+                 "properties.active_modifier", "user_interface.editor_outline"):
+        if item in listed_set:
+            check(theme.has_default(item), "{} 记录了出厂默认值".format(item))
+
+    # 面板上这些东西都要有（静态检查）----
     panel_source = source_of(module, "ui.py")
     for token in ('"palette_color"', '"custom_hex"', "应用颜色", "控件颜色分开设置",
                   "当前值 {}", "自动配文字色", "从当前主题读回",

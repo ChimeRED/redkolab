@@ -195,97 +195,234 @@ TARGETS = (
     + MISC_TARGETS
 )
 
-#: 出厂默认值：**只在 4.0.2 与 5.2.2 上实测一致**的颜色才记在这里，
-#: 这样「恢复默认」不会把 5.x 的默认值套到旧版上。5.x 专属项一律不记。
+#: 出厂默认值：**机械生成**（tools 里跑 4.0.2 / 4.2.23 / 5.2.2 三版导出的交集），
+#: 所以「恢复默认」写回去的就是真正的出厂值；没有记录到的项不会被瞎猜。
+#: 三个表按运行版本合并使用，见 :func:`defaults_table`。
+#: 4.0 / 4.2 / 5.2 三个版本实测完全一致的出厂值（机械生成，别手改）
 DEFAULT_COLORS = {
-    # ---- 按钮常态 ----
-    "user_interface.wcol_regular.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_regular.outline": (0.2392, 0.2392, 0.2392, 1.0),
-    "user_interface.wcol_regular.text": (0.902, 0.902, 0.902, 1.0),
-    "user_interface.wcol_regular.item": (0.1137, 0.1137, 0.1137, 0.502),
-    "user_interface.wcol_tool.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_toolbar_item.inner": (0.1569, 0.1569, 0.1569, 1.0),
-    "user_interface.wcol_option.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_toggle.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_radio.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_num.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_numslider.inner": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_text.inner": (0.1137, 0.1137, 0.1137, 1.0),
-    "user_interface.wcol_menu.inner": (0.1569, 0.1569, 0.1569, 1.0),
-    "user_interface.wcol_menu_back.inner": (0.0941, 0.0941, 0.0941, 1.0),
-    "user_interface.wcol_pie_menu.inner": (0.0941, 0.0941, 0.0941, 1.0),
-    "user_interface.wcol_tab.inner": (0.1137, 0.1137, 0.1137, 1.0),
-    "user_interface.wcol_list_item.inner": (1.0, 1.0, 1.0, 0.0),
-    "user_interface.wcol_tooltip.inner": (0.1137, 0.1137, 0.1137, 1.0),
-    "user_interface.wcol_progress.inner": (0.1333, 0.1333, 0.1333, 1.0),
-    "user_interface.wcol_scroll.inner": (0.1333, 0.1333, 0.1333, 0.0),
-    "user_interface.wcol_box.inner": (0.1137, 0.1137, 0.1137, 0.502),
-    # ---- 按钮选中（默认蓝） ----
-    "user_interface.wcol_regular.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_regular.text_sel": (1.0, 1.0, 1.0, 1.0),
-    "user_interface.wcol_tool.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_toolbar_item.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_option.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_toggle.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_radio.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_num.item": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_numslider.item": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_menu.inner_sel": (0.2784, 0.4471, 0.702, 0.702),
-    "user_interface.wcol_menu_item.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_pie_menu.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_tab.inner_sel": (0.1882, 0.1882, 0.1882, 1.0),
-    "user_interface.wcol_list_item.inner_sel": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_progress.item": (0.2784, 0.4471, 0.702, 1.0),
-    "user_interface.wcol_scroll.inner_sel": (1.0, 1.0, 1.0, 1.0),
-    "user_interface.wcol_box.inner_sel": (0.3294, 0.3294, 0.3294, 1.0),
-    "user_interface.wcol_text.inner_sel": (0.0941, 0.0941, 0.0941, 1.0),
-    # ---- 状态色 ----
-    "user_interface.wcol_state.inner_changed": (0.8, 0.4588, 0.1608),
-    "user_interface.wcol_state.inner_changed_sel": (0.8235, 0.3922, 0.0),
-    "user_interface.wcol_state.inner_anim": (0.3255, 0.6, 0.1804),
-    "user_interface.wcol_state.inner_anim_sel": (0.2196, 0.651, 0.0),
-    "user_interface.wcol_state.inner_key": (0.702, 0.6824, 0.2118),
-    "user_interface.wcol_state.inner_key_sel": (0.698, 0.5922, 0.0),
-    "user_interface.wcol_state.inner_driven": (0.5647, 0.0, 0.8),
-    "user_interface.wcol_state.inner_driven_sel": (0.6, 0.0, 0.902),
-    "user_interface.wcol_state.inner_overridden": (0.0, 0.7647, 0.7647),
-    "user_interface.wcol_state.inner_overridden_sel": (0.0667, 0.5608, 0.5608),
-    # ---- 图标颜色 ----
-    "user_interface.icon_scene": (0.8, 0.8, 0.8, 1.0),
-    "user_interface.icon_collection": (1.0, 1.0, 1.0, 1.0),
+    "console.select": (1.0000, 1.0000, 1.0000, 0.1882),
+    "dopesheet_editor.grid": (0.0863, 0.0863, 0.0863, 1.0),
+    "file_browser.selected_file": (0.2784, 0.4471, 0.7020, 1.0),
+    "graph_editor.grid": (0.1020, 0.1020, 0.1020, 1.0),
+    "graph_editor.vertex": (0.0000, 0.0000, 0.0000, 1.0),
+    "info.info_selected": (0.2314, 0.3373, 0.5373, 1.0),
+    "node_editor.node_backdrop": (0.1882, 0.1882, 0.1882, 1.0),
+    "node_editor.node_selected": (0.9294, 0.3412, 0.0000, 1.0),
+    "node_editor.wire": (0.1020, 0.1020, 0.1020, 1.0),
+    "node_editor.wire_select": (1.0000, 1.0000, 1.0000, 0.7020),
+    "outliner.active": (0.2000, 0.3020, 0.5020, 1.0),
+    "outliner.active_object": (1.0000, 0.6863, 0.1608, 1.0),
+    "outliner.selected_highlight": (0.1137, 0.1922, 0.3020, 1.0),
+    "outliner.selected_object": (0.9137, 0.4157, 0.0000, 1.0),
+    "text_editor.selected_text": (0.3020, 0.3020, 0.3020, 1.0),
+    "user_interface.icon_collection": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.icon_folder": (0.8000, 0.6784, 0.3882, 1.0),
+    "user_interface.icon_modifier": (0.4549, 0.6353, 1.0000, 1.0),
     "user_interface.icon_object": (0.8824, 0.5882, 0.3451, 1.0),
-    "user_interface.icon_object_data": (0.0, 0.8314, 0.6392, 1.0),
-    "user_interface.icon_modifier": (0.4549, 0.6353, 1.0, 1.0),
-    "user_interface.icon_shading": (0.8, 0.4, 0.4392, 1.0),
-    "user_interface.icon_folder": (0.8, 0.6784, 0.3882, 1.0),
-    "user_interface.icon_autokey": (0.6706, 0.2353, 0.2824, 1.0),
-    # ---- 时间线 / 当前帧（4.x 值，5.x 上这些项本身不存在） ----
-    "dopesheet_editor.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    "dopesheet_editor.time_scrub_background": (0.1137, 0.1137, 0.1137, 1.0),
-    "dopesheet_editor.time_marker_line": (1.0, 1.0, 1.0, 0.302),
-    "dopesheet_editor.time_marker_line_selected": (1.0, 1.0, 1.0, 0.702),
-    "graph_editor.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    "graph_editor.time_scrub_background": (0.0863, 0.0863, 0.0863, 1.0),
-    "nla_editor.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    "nla_editor.time_scrub_background": (0.0863, 0.0863, 0.0863, 1.0),
-    "sequence_editor.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    "sequence_editor.time_scrub_background": (0.0706, 0.0706, 0.0706, 1.0),
-    "clip_editor.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    "clip_editor.time_scrub_background": (0.0941, 0.0941, 0.0941, 1.0),
-    "image_editor.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    "view_3d.frame_current": (0.2784, 0.4471, 0.702, 1.0),
-    # ---- 视口 ----
-    "view_3d.space.gradients.high_gradient": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.icon_object_data": (0.0000, 0.8314, 0.6392, 1.0),
+    "user_interface.icon_scene": (0.8000, 0.8000, 0.8000, 1.0),
+    "user_interface.icon_shading": (0.8000, 0.4000, 0.4392, 1.0),
+    "user_interface.wcol_box.inner": (0.1137, 0.1137, 0.1137, 0.5020),
+    "user_interface.wcol_box.inner_sel": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_box.item": (0.0980, 0.0980, 0.0980, 1.0),
+    "user_interface.wcol_box.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_box.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_box.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_list_item.inner": (1.0000, 1.0000, 1.0000, 0.0000),
+    "user_interface.wcol_list_item.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_list_item.item": (1.0000, 1.0000, 1.0000, 0.2000),
+    "user_interface.wcol_list_item.text": (0.8000, 0.8000, 0.8000, 1.0),
+    "user_interface.wcol_list_item.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_menu.inner": (0.1569, 0.1569, 0.1569, 1.0),
+    "user_interface.wcol_menu.inner_sel": (0.2784, 0.4471, 0.7020, 0.7020),
+    "user_interface.wcol_menu.item": (0.8510, 0.8510, 0.8510, 1.0),
+    "user_interface.wcol_menu.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_menu.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_menu.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_menu_back.inner": (0.0941, 0.0941, 0.0941, 1.0),
+    "user_interface.wcol_menu_back.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_menu_back.item": (0.8510, 0.8510, 0.8510, 1.0),
+    "user_interface.wcol_menu_back.outline": (0.1412, 0.1412, 0.1412, 1.0),
+    "user_interface.wcol_menu_back.text": (0.6000, 0.6000, 0.6000, 1.0),
+    "user_interface.wcol_menu_back.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_menu_item.inner": (0.0941, 0.0941, 0.0941, 0.0000),
+    "user_interface.wcol_menu_item.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_menu_item.item": (1.0000, 1.0000, 1.0000, 0.5608),
+    "user_interface.wcol_menu_item.outline": (0.2392, 0.2392, 0.2392, 0.0000),
+    "user_interface.wcol_menu_item.text": (0.8667, 0.8667, 0.8667, 1.0),
+    "user_interface.wcol_menu_item.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_num.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_num.inner_sel": (0.1333, 0.1333, 0.1333, 1.0),
+    "user_interface.wcol_num.item": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_num.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_num.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_num.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_numslider.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_numslider.inner_sel": (0.1333, 0.1333, 0.1333, 1.0),
+    "user_interface.wcol_numslider.item": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_numslider.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_numslider.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_numslider.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_option.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_option.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_option.item": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_option.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_option.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_option.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_pie_menu.inner": (0.0941, 0.0941, 0.0941, 1.0),
+    "user_interface.wcol_pie_menu.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_pie_menu.item": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_pie_menu.outline": (0.1412, 0.1412, 0.1412, 1.0),
+    "user_interface.wcol_pie_menu.text": (0.8510, 0.8510, 0.8510, 1.0),
+    "user_interface.wcol_pie_menu.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_progress.inner": (0.1333, 0.1333, 0.1333, 1.0),
+    "user_interface.wcol_progress.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_progress.item": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_progress.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_progress.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_progress.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_pulldown.inner": (0.1333, 0.1333, 0.1333, 0.0000),
+    "user_interface.wcol_pulldown.inner_sel": (1.0000, 1.0000, 1.0000, 0.1020),
+    "user_interface.wcol_pulldown.item": (1.0000, 1.0000, 1.0000, 0.5608),
+    "user_interface.wcol_pulldown.outline": (0.2392, 0.2392, 0.2392, 0.0000),
+    "user_interface.wcol_pulldown.text": (0.8510, 0.8510, 0.8510, 1.0),
+    "user_interface.wcol_pulldown.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_radio.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_radio.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_radio.item": (0.1451, 0.1451, 0.1451, 1.0),
+    "user_interface.wcol_radio.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_radio.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_radio.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_regular.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_regular.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_regular.item": (0.1137, 0.1137, 0.1137, 0.5020),
+    "user_interface.wcol_regular.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_regular.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_regular.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_scroll.inner": (0.1333, 0.1333, 0.1333, 0.0000),
+    "user_interface.wcol_scroll.inner_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_scroll.item": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_scroll.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_scroll.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_scroll.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_state.inner_anim": (0.3255, 0.6000, 0.1804, 1.0),
+    "user_interface.wcol_state.inner_anim_sel": (0.2196, 0.6510, 0.0000, 1.0),
+    "user_interface.wcol_state.inner_changed": (0.8000, 0.4588, 0.1608, 1.0),
+    "user_interface.wcol_state.inner_changed_sel": (0.8235, 0.3922, 0.0000, 1.0),
+    "user_interface.wcol_state.inner_driven": (0.5647, 0.0000, 0.8000, 1.0),
+    "user_interface.wcol_state.inner_driven_sel": (0.6000, 0.0000, 0.9020, 1.0),
+    "user_interface.wcol_state.inner_key": (0.7020, 0.6824, 0.2118, 1.0),
+    "user_interface.wcol_state.inner_key_sel": (0.6980, 0.5922, 0.0000, 1.0),
+    "user_interface.wcol_state.inner_overridden": (0.0000, 0.7647, 0.7647, 1.0),
+    "user_interface.wcol_state.inner_overridden_sel": (0.0667, 0.5608, 0.5608, 1.0),
+    "user_interface.wcol_tab.inner": (0.1137, 0.1137, 0.1137, 1.0),
+    "user_interface.wcol_tab.inner_sel": (0.1882, 0.1882, 0.1882, 1.0),
+    "user_interface.wcol_tab.item": (0.1137, 0.1137, 0.1137, 1.0),
+    "user_interface.wcol_tab.outline": (0.1137, 0.1137, 0.1137, 1.0),
+    "user_interface.wcol_tab.text": (0.5961, 0.5961, 0.5961, 1.0),
+    "user_interface.wcol_tab.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_text.inner": (0.1137, 0.1137, 0.1137, 1.0),
+    "user_interface.wcol_text.inner_sel": (0.0941, 0.0941, 0.0941, 1.0),
+    "user_interface.wcol_text.item": (1.0000, 1.0000, 1.0000, 0.2000),
+    "user_interface.wcol_text.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_text.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_text.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_toggle.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_toggle.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_toggle.item": (0.1451, 0.1451, 0.1451, 1.0),
+    "user_interface.wcol_toggle.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_toggle.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_toggle.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_tool.inner": (0.3294, 0.3294, 0.3294, 1.0),
+    "user_interface.wcol_tool.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_tool.item": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_tool.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_tool.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_tool.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_toolbar_item.inner": (0.1569, 0.1569, 0.1569, 1.0),
+    "user_interface.wcol_toolbar_item.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_toolbar_item.item": (1.0000, 1.0000, 1.0000, 0.7020),
+    "user_interface.wcol_toolbar_item.outline": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_toolbar_item.text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_toolbar_item.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "user_interface.wcol_tooltip.inner": (0.1137, 0.1137, 0.1137, 1.0),
+    "user_interface.wcol_tooltip.inner_sel": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.wcol_tooltip.item": (0.8510, 0.8510, 0.8510, 1.0),
+    "user_interface.wcol_tooltip.outline": (0.1412, 0.1412, 0.1412, 1.0),
+    "user_interface.wcol_tooltip.text": (0.8510, 0.8510, 0.8510, 1.0),
+    "user_interface.wcol_tooltip.text_sel": (1.0000, 1.0000, 1.0000, 1.0),
+    "view_3d.bone_pose": (0.3137, 0.7843, 1.0000, 1.0),
+    "view_3d.camera": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.empty": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.grid": (0.3294, 0.3294, 0.3294, 0.5020),
+    "view_3d.light": (0.0000, 0.0000, 0.0000, 0.3137),
+    "view_3d.object_active": (1.0000, 0.6275, 0.1569, 1.0),
+    "view_3d.object_selected": (0.9294, 0.3412, 0.0000, 1.0),
     "view_3d.space.gradients.gradient": (0.1882, 0.1882, 0.1882, 1.0),
-    "view_3d.grid": (0.3294, 0.3294, 0.3294, 0.502),
-    "view_3d.wire": (0.0, 0.0, 0.0, 1.0),
-    "view_3d.vertex": (0.0, 0.0, 0.0, 1.0),
-    "view_3d.object_selected": (0.9294, 0.3412, 0.0, 1.0),
-    "view_3d.object_active": (1.0, 0.6275, 0.1569, 1.0),
-    "view_3d.camera": (0.0, 0.0, 0.0, 1.0),
-    "view_3d.empty": (0.0, 0.0, 0.0, 1.0),
-    "view_3d.light": (0.0, 0.0, 0.0, 0.3137),
-    "view_3d.bone_pose": (0.3137, 0.7843, 1.0, 1.0),
+    "view_3d.space.gradients.high_gradient": (0.2392, 0.2392, 0.2392, 1.0),
+    "view_3d.vertex": (0.0000, 0.0000, 0.0000, 1.0),
+    "view_3d.wire": (0.0000, 0.0000, 0.0000, 1.0),
+}
+
+#: 5.x 专属项，或 5.x 与 4.x 取值不同的项（只在 5.x 上用）
+DEFAULT_COLORS_5X = {
+    "node_editor.grid": (0.1882, 0.1882, 0.1882, 1.0),
+    "user_interface.editor_outline": (1.0000, 1.0000, 1.0000, 0.0824),
+    "user_interface.editor_outline_active": (1.0000, 1.0000, 1.0000, 0.1647),
+    "user_interface.icon_autokey": (0.6706, 0.2353, 0.2824, 1.0),
+    "user_interface.panel_active": (0.2784, 0.4471, 0.7020, 1.0),
+    "user_interface.panel_back": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.panel_header": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.panel_outline": (1.0000, 1.0000, 1.0000, 0.0667),
+    "user_interface.panel_text": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.panel_title": (0.9020, 0.9020, 0.9020, 1.0),
+    "user_interface.wcol_box.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_list_item.outline": (0.1765, 0.1765, 0.1765, 0.0000),
+    "user_interface.wcol_list_item.outline_sel": (0.1765, 0.1765, 0.1765, 1.0),
+    "user_interface.wcol_menu.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_menu_back.outline_sel": (0.1412, 0.1412, 0.1412, 1.0),
+    "user_interface.wcol_menu_item.outline_sel": (0.2392, 0.2392, 0.2392, 0.0000),
+    "user_interface.wcol_num.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_numslider.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_option.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_pie_menu.outline_sel": (0.1412, 0.1412, 0.1412, 1.0),
+    "user_interface.wcol_progress.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_pulldown.outline_sel": (0.2392, 0.2392, 0.2392, 0.0000),
+    "user_interface.wcol_radio.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_regular.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_scroll.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_state.error": (0.6000, 0.0863, 0.0863, 1.0),
+    "user_interface.wcol_state.info": (0.1569, 0.2824, 0.4902, 1.0),
+    "user_interface.wcol_state.success": (0.0941, 0.5255, 0.1451, 1.0),
+    "user_interface.wcol_state.warning": (0.6745, 0.5294, 0.2157, 1.0),
+    "user_interface.wcol_tab.outline_sel": (0.1137, 0.1137, 0.1137, 1.0),
+    "user_interface.wcol_text.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_toggle.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_tool.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_toolbar_item.outline_sel": (0.2392, 0.2392, 0.2392, 1.0),
+    "user_interface.wcol_tooltip.outline_sel": (0.1412, 0.1412, 0.1412, 1.0),
+}
+
+#: 4.x 专属项，或与 5.x 取值不同的项（只在 4.x 上用）
+DEFAULT_COLORS_4X = {
+    "clip_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "clip_editor.time_scrub_background": (0.0941, 0.0941, 0.0941, 1.0),
+    "dopesheet_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "dopesheet_editor.time_marker_line": (1.0000, 1.0000, 1.0000, 0.3020),
+    "dopesheet_editor.time_marker_line_selected": (1.0000, 1.0000, 1.0000, 0.7020),
+    "dopesheet_editor.time_scrub_background": (0.1137, 0.1137, 0.1137, 1.0),
+    "graph_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "graph_editor.time_scrub_background": (0.0863, 0.0863, 0.0863, 1.0),
+    "image_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "nla_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "nla_editor.time_scrub_background": (0.0863, 0.0863, 0.0863, 1.0),
+    "node_editor.grid": (0.1569, 0.1569, 0.1569, 1.0),
+    "properties.active_modifier": (0.2784, 0.4471, 0.7020, 1.0),
+    "sequence_editor.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
+    "sequence_editor.time_scrub_background": (0.0706, 0.0706, 0.0706, 1.0),
+    "user_interface.editor_outline": (0.0863, 0.0863, 0.0863, 1.0),
+    "user_interface.wcol_list_item.outline": (0.1765, 0.1765, 0.1765, 1.0),
+    "view_3d.frame_current": (0.2784, 0.4471, 0.7020, 1.0),
 }
 
 
@@ -680,8 +817,24 @@ def available_paths(context=None):
     return [item[0] for item in target_items(None, context)]
 
 
-def has_default(path):
-    return path in DEFAULT_COLORS
+def defaults_table(version=None):
+    """按运行版本把三张默认值表合并起来（5.x 用 5X 表，4.x 用 4X 表）。"""
+    v = tuple(version or bpy.app.version)
+    table = dict(DEFAULT_COLORS)
+    if v >= (5, 0, 0):
+        table.update(DEFAULT_COLORS_5X)
+    else:
+        table.update(DEFAULT_COLORS_4X)
+    return table
+
+
+def default_of(path, version=None):
+    """某一项的出厂默认值（没有记录就返回 None）。"""
+    return defaults_table(version).get(path)
+
+
+def has_default(path, version=None):
+    return path in defaults_table(version)
 
 
 def preset_names():
@@ -731,7 +884,7 @@ def apply_preset(theme, name):
 
 def restore_default(theme, path):
     """把某一项恢复为记录的默认值。"""
-    color = DEFAULT_COLORS.get(path)
+    color = default_of(path)
     if color is None:
         return False
     return set_color(theme, path, color)
@@ -748,12 +901,12 @@ def restore_defaults(theme, paths):
 
 def widget_paths():
     """记录了默认值的按钮 / 状态色路径。"""
-    return [path for path in DEFAULT_COLORS if path.startswith("user_interface.")]
+    return [path for path in defaults_table() if path.startswith("user_interface.")]
 
 
 def viewport_paths():
     """记录了默认值的视口路径。"""
-    return [path for path in DEFAULT_COLORS if path.startswith("view_3d.")]
+    return [path for path in defaults_table() if path.startswith("view_3d.")]
 
 
 def restore_widget_defaults(theme):
@@ -814,17 +967,18 @@ def paths_in_group(group, paths=None):
 
 
 def default_paths(group=""):
-    """有出厂默认值的项（可按分组过滤）—— 只包含 4.0 与 5.2 实测一致的项。"""
+    """有出厂默认值的项（可按分组过滤）—— 按当前版本合并后的表。"""
+    table = defaults_table()
     if group:
-        return [path for path in DEFAULT_COLORS if group_of(path) == group]
-    return list(DEFAULT_COLORS)
+        return [path for path in table if group_of(path) == group]
+    return list(table)
 
 
 def differing_paths(theme, paths):
     """列出与出厂默认值不同的项（用来告诉用户"其实没东西要恢复"）。"""
     result = []
     for path in paths:
-        default = DEFAULT_COLORS.get(path)
+        default = default_of(path)
         if default is None:
             continue
         current = get_color(theme, path)

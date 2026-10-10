@@ -402,13 +402,13 @@ N 面板 ▸ `红红子lab` ▸ 顶部切到 **工具** 页 ▸ **「面板顺�
 
 | Blender | 安装入口 | 装成的模块 | 断言 | 结果 |
 | --- | --- | --- | --- | --- |
-| 4.0.2 | 插件页 Install from Disk | `redkolab` | 429 | ✔ |
-| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 429 | ✔ |
-| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 427 | ✔ |
-| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 427 | ✔ |
-| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 425 | ✔ |
+| 4.0.2 | 插件页 Install from Disk | `redkolab` | 437 | ✔ |
+| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 437 | ✔ |
+| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 435 | ✔ |
+| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 435 | ✔ |
+| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 432 | ✔ |
 
-> 断言数 429 / 427 / 425 的差别：扩展安装下 Blender 会接管元数据（不再暴露 `bl_info`），
+> 断言数 437 / 435 / 432 的差别：扩展安装下 Blender 会接管元数据（不再暴露 `bl_info`），
 > 测试会跳过 2 项元数据检查，功能断言一项不少。
 
 扩展清单另外用官方校验器验过（4.2 与 5.2 都验）：
@@ -447,7 +447,7 @@ redkolab/
 │  ├─ build_zips.py             打包（默认 nested 布局，可选其他布局做对比）
 │  ├─ check_version.py          版本号一致性检查（发布守门）
 │  ├─ inspect_zip.py            安装包结构自检（发布守门）
-│  ├─ blender_test.py           Blender 内部真机测试（429 项断言，含边界情况）
+│  ├─ blender_test.py           Blender 内部真机测试（437 项断言，含边界情况）
 │  ├─ run_tests.ps1             在指定 Blender 上跑测试（自动隔离配置目录）
 │  ├─ release.ps1               一键发版：校验 → 升版本 → 本地部署 → 打 tag → 推送
 │  ├─ deploy_local.ps1          把新包复制进本地插件 zip 库并替换旧版本
