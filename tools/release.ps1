@@ -102,12 +102,14 @@ function Set-Version {
 }
 
 function Invoke-GitPush {
-    param([string]$Reference, [int]$Attempts = 4)
+    # The first connection attempt to github.com intermittently times out on some
+    # networks (~21s) and succeeds on retry, so be patient.
+    param([string]$Reference, [int]$Attempts = 6)
     for ($i = 1; $i -le $Attempts; $i++) {
         & $gitExe push $Remote $Reference
         if ($LASTEXITCODE -eq 0) { return }
-        Write-Host "push $Reference failed (attempt $i/$Attempts), retrying in 5s ..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 5
+        Write-Host "push $Reference failed (attempt $i/$Attempts), retrying in 15s ..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 15
     }
     throw "git push $Reference failed after $Attempts attempts"
 }
