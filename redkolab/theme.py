@@ -25,6 +25,7 @@
   避免把 5.x 的默认值套到 4.0 上。
 """
 
+import colorsys
 import json
 
 import bpy
@@ -642,6 +643,9 @@ TOKENS = {
     "STATE_ACTIVE": "#3FB6E0",      # 活动
     "STATE_WARNING": "#E8B33C",     # 警告
     "STATE_ERROR": "#E0433A",       # 错误 / 危险
+    "ACCENT_PRIMARY_CALM": "#B9CE4E",   # 主强调的低饱和版（长时间工作用）
+    "ACCENT_SECONDARY_CALM": "#5E8FA8", # 次强调的低饱和版
+    "ACCENT_TERTIARY_CALM": "#9E6B93",  # 第三强调的低饱和版
     "CARD": "#C4C6C9",              # 浅灰卡片（实拍图里的任务卡纸面）
     "CARD_TEXT": "#0B0D12",         # 卡片上的近黑文字
 }
@@ -670,6 +674,9 @@ MARATHON = {
     "text_dim": TOKENS["TEXT_SECONDARY"],
     "border": TOKENS["BORDER_SUBTLE"],
     "warning": TOKENS["STATE_WARNING"],
+    "lime_calm": TOKENS["ACCENT_PRIMARY_CALM"],
+    "cyan_calm": TOKENS["ACCENT_SECONDARY_CALM"],
+    "magenta_calm": TOKENS["ACCENT_TERTIARY_CALM"],
 }
 
 #: 旧名字保留（早期版本叫 ACID）
@@ -724,6 +731,40 @@ def luminance(color):
 #: 深色字 / 浅色字（酸性配色里偏绿的那两个极端，配深底浅底都清楚）
 TEXT_ON_LIGHT = (0.043, 0.055, 0.031, 1.0)
 TEXT_ON_DARK = (0.94, 0.96, 0.90, 1.0)
+
+
+def saturation_of(color):
+    """颜色的饱和度（0-1），用来对比"降饱和前后"。"""
+    if not color:
+        return 0.0
+    values = list(color)[:3]
+    while len(values) < 3:
+        values.append(0.0)
+    return colorsys.rgb_to_hsv(*(max(0.0, min(1.0, float(v))) for v in values))[1]
+
+
+def desaturate_color(color, factor=1.0):
+    """按倍数缩放饱和度：factor=1 原样、0 变灰。
+
+    只动饱和度、保留色相与明度 —— 所以降饱和不会把界面调暗，也不会串色系。
+    """
+    if color is None:
+        return None
+    values = [float(v) for v in color]
+    while len(values) < 3:
+        values.append(0.0)
+    red, green, blue = (max(0.0, min(1.0, v)) for v in values[:3])
+    hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
+    saturation = max(0.0, min(1.0, saturation * float(factor)))
+    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
+    alpha = values[3] if len(values) > 3 else 1.0
+    return (red, green, blue, alpha)
+
+
+def desaturate_colors(colors, factor=1.0):
+    """批量降饱和（"把正在用的预设整体压灰"就靠它）。"""
+    return {path: desaturate_color(color, factor)
+            for path, color in dict(colors or {}).items()}
 
 
 def readable_text_color(background, threshold=0.45):
@@ -887,13 +928,13 @@ def _marathon_preset(style):
     """
     if style == "card":
         base, text, edge = MARATHON["card"], MARATHON["ink"], MARATHON["card_edge"]
-        accent, accent_text = MARATHON["lime"], MARATHON["ink"]
+        accent, accent_text = MARATHON["lime_calm"], MARATHON["ink"]
     elif style == "alert":
         base, text, edge = MARATHON["panel"], MARATHON["text"], MARATHON["magenta_dim"]
-        accent, accent_text = MARATHON["magenta"], MARATHON["ink"]
+        accent, accent_text = MARATHON["magenta_calm"], MARATHON["ink"]
     else:
         base, text, edge = MARATHON["ink"], MARATHON["text"], MARATHON["cyan_dim"]
-        accent, accent_text = MARATHON["cyan"], MARATHON["ink"]
+        accent, accent_text = MARATHON["cyan_calm"], MARATHON["ink"]
 
     colors = {}
     for prefix, _label in WIDGET_FAMILIES:
@@ -968,10 +1009,10 @@ def _marathon_preset_work():
         colors[family_path(prefix, "inner")] = hex_color(base)
         colors[family_path(prefix, "text")] = hex_color(text)
         colors[family_path(prefix, "outline")] = hex_color(TOKENS["BORDER_SUBTLE"])
-        colors[family_path(prefix, "inner_sel")] = hex_color(TOKENS["ACCENT_PRIMARY"])
+        colors[family_path(prefix, "inner_sel")] = hex_color(TOKENS["ACCENT_PRIMARY_CALM"])
         colors[family_path(prefix, "text_sel")] = hex_color(TOKENS["TEXT_ON_ACCENT"])
-        colors[family_path(prefix, "outline_sel")] = hex_color(TOKENS["ACCENT_PRIMARY"])
-        colors[family_path(prefix, "item")] = hex_color(TOKENS["ACCENT_PRIMARY"])
+        colors[family_path(prefix, "outline_sel")] = hex_color(TOKENS["ACCENT_PRIMARY_CALM"])
+        colors[family_path(prefix, "item")] = hex_color(TOKENS["ACCENT_PRIMARY_CALM"])
     colors.update({
         "user_interface.wcol_list_item.inner": hex_color(base, 0.0),
         "user_interface.wcol_scroll.inner": hex_color(base, 0.0),
@@ -982,15 +1023,15 @@ def _marathon_preset_work():
         "user_interface.wcol_tab.inner": hex_color(TOKENS["BG_PRIMARY"]),
         "user_interface.wcol_tab.text": hex_color(TOKENS["TEXT_SECONDARY"]),
         "user_interface.wcol_tab.inner_sel": hex_color(TOKENS["BG_ELEVATED"]),
-        "user_interface.wcol_tab.text_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_tab.text_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
         "user_interface.wcol_text.inner": hex_color(TOKENS["BG_SECONDARY"]),
         "user_interface.wcol_text.text": hex_color(text),
-        "user_interface.wcol_text.inner_sel": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "user_interface.wcol_text.inner_sel": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
         "user_interface.wcol_text.text_sel": hex_color(TOKENS["TEXT_ON_ACCENT"]),
         "user_interface.wcol_box.inner": hex_color(TOKENS["BG_SECONDARY"], 0.5),
-        "user_interface.wcol_box.inner_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "user_interface.wcol_list_item.inner_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "user_interface.panel_active": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "user_interface.wcol_box.inner_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "user_interface.wcol_list_item.inner_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "user_interface.panel_active": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
         # 面板层级：近黑 -> 面板 -> 浮起，三级区分
         "view_3d.back": hex_color(TOKENS["BG_PRIMARY"]),
         "outliner.back": hex_color(TOKENS["BG_PANEL"]),
@@ -1005,32 +1046,32 @@ def _marathon_preset_work():
         "properties.tab_active": hex_color(TOKENS["BG_ELEVATED"]),
         "properties.tab_inactive": hex_color(TOKENS["BG_PRIMARY"]),
         # 3D 编辑模式：顶点白、选中黄绿、缝合/锐边/折痕各自可辨
-        "view_3d.editmesh_active": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "view_3d.vertex_select": hex_color(TOKENS["ACCENT_PRIMARY"]),
+        "view_3d.editmesh_active": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "view_3d.vertex_select": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
         "view_3d.vertex_active": hex_color("#FFFFFF"),
-        "view_3d.edge_select": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "view_3d.face_select": hex_color(TOKENS["ACCENT_PRIMARY"], 0.5),
+        "view_3d.edge_select": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "view_3d.face_select": hex_color(TOKENS["ACCENT_PRIMARY_CALM"], 0.5),
         "view_3d.edge_seam": hex_color(TOKENS["STATE_ERROR"]),
-        "view_3d.edge_sharp": hex_color(TOKENS["ACCENT_SECONDARY"]),
-        "view_3d.edge_crease": hex_color(TOKENS["ACCENT_TERTIARY"]),
+        "view_3d.edge_sharp": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
+        "view_3d.edge_crease": hex_color(TOKENS["ACCENT_TERTIARY_CALM"]),
         "view_3d.edge_bevel": hex_color(TOKENS["STATE_WARNING"]),
         "view_3d.wire_edit": hex_color(TOKENS["TEXT_SECONDARY"]),
         "view_3d.grid": hex_color(TOKENS["BORDER_SUBTLE"], 0.5),
-        "view_3d.normal": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "view_3d.normal": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
         # 状态色语义
-        "user_interface.wcol_state.inner_changed": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "user_interface.wcol_state.inner_changed_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "user_interface.wcol_state.inner_anim": hex_color(TOKENS["ACCENT_SECONDARY"]),
-        "user_interface.wcol_state.inner_anim_sel": hex_color(TOKENS["ACCENT_SECONDARY"]),
+        "user_interface.wcol_state.inner_changed": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "user_interface.wcol_state.inner_changed_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "user_interface.wcol_state.inner_anim": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
+        "user_interface.wcol_state.inner_anim_sel": hex_color(TOKENS["ACCENT_SECONDARY_CALM"]),
         "user_interface.wcol_state.inner_key": hex_color(TOKENS["TEXT_PRIMARY"]),
-        "user_interface.wcol_state.inner_key_sel": hex_color(TOKENS["ACCENT_PRIMARY"]),
-        "user_interface.wcol_state.inner_driven": hex_color(TOKENS["ACCENT_TERTIARY"]),
-        "user_interface.wcol_state.inner_driven_sel": hex_color(TOKENS["ACCENT_TERTIARY"]),
+        "user_interface.wcol_state.inner_key_sel": hex_color(TOKENS["ACCENT_PRIMARY_CALM"]),
+        "user_interface.wcol_state.inner_driven": hex_color(TOKENS["ACCENT_TERTIARY_CALM"]),
+        "user_interface.wcol_state.inner_driven_sel": hex_color(TOKENS["ACCENT_TERTIARY_CALM"]),
         "user_interface.wcol_state.inner_overridden": hex_color(TOKENS["STATE_ERROR"]),
         "user_interface.wcol_state.inner_overridden_sel": hex_color(TOKENS["STATE_ERROR"]),
     })
-    colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY"])))
-    colors.update(_marathon_frame_colors(hex_color(TOKENS["ACCENT_PRIMARY"])))
+    colors.update(global_highlight_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
+    colors.update(_marathon_frame_colors(hex_color(TOKENS["ACCENT_PRIMARY_CALM"])))
     return {path: color for path, color in colors.items() if color is not None}
 
 

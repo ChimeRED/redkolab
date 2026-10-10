@@ -227,6 +227,22 @@ def _on_part_update(self, context):
     theme.read_into_preferences(context, self)
 
 
+def _on_saturation_update(self, context):
+    """饱和度一改就用它重算最近一次的预设（永远从预设表出发，不累积）。"""
+    current = theme.current_theme(context)
+    name = getattr(self, "last_preset", "")
+    if current is None or not name:
+        return
+    colors = theme.preset_colors(name)
+    if not colors:
+        return
+    factor = float(getattr(self, "preset_saturation", 1.0))
+    if factor < 1.0:
+        colors = theme.desaturate_colors(colors, factor)
+    theme.apply_colors(current, colors)
+    theme.read_into_preferences(context, self)
+
+
 def _on_hex_update(self, context):
     """十六进制框一改就同步到调色盘，这样「应用颜色」只看调色盘就够了。"""
     color = theme.hex_color(getattr(self, "custom_hex", ""))
@@ -588,6 +604,9 @@ class HHZ_PT_theme(bpy.types.Panel):
         for name in theme.preset_names():
             operation = grid.operator("hhz.theme_apply_preset", text=name)
             operation.preset = name
+        box.prop(preferences, "preset_saturation", text="饱和度", slider=True)
+        box.operator("hhz.theme_reapply_preset", icon='FILE_REFRESH')
+        box.label(text="调到 60% 左右最耐看：强调色会整体压灰，反复调也不会越调越灰", icon='INFO')
 
         # ---- 自定义配色 ----
         box = layout.box()
@@ -791,6 +810,20 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         description="自己挑一个颜色，点「应用颜色」写进当前颜色项",
         subtype='COLOR', size=4, min=0.0, max=1.0,
         default=(0.776, 1.0, 0.0, 1.0),
+    )
+    preset_saturation: FloatProperty(
+        name="饱和度",
+        description="正在使用的预设里所有高饱和颜色的强度：1.0 原样，越低越灰（适合长时间工作）",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        subtype='PERCENTAGE',
+        update=_on_saturation_update,
+    )
+    last_preset: StringProperty(
+        name="最近使用的预设",
+        description="用来在调整饱和度时重新套用（自动维护）",
+        default="",
     )
     custom_hex: StringProperty(
         name="十六进制",

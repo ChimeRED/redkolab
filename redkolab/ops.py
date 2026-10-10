@@ -626,15 +626,50 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
             self.report({'ERROR'}, "读不到当前主题")
             return {'CANCELLED'}
 
-        changed = theme.apply_preset(current, self.preset)
+        preferences = compat.get_preferences(context)
+        # 饱和度：永远从预设表重算再写入，所以反复调整不会累积变灰
+        factor = float(getattr(preferences, "preset_saturation", 1.0)) if preferences else 1.0
+        colors = theme.preset_colors(self.preset) or {}
+        if factor < 1.0:
+            colors = theme.desaturate_colors(colors, factor)
+        changed = theme.apply_colors(current, colors)
         if not changed:
             self.report({'WARNING'}, "这套预设没有可用颜色")
             return {'CANCELLED'}
 
-        preferences = compat.get_preferences(context)
         if preferences is not None:
+            preferences.last_preset = self.preset
             theme.read_into_preferences(context, preferences)
         self.report({'INFO'}, "已套用「{}」配色（{} 项）".format(self.preset, changed))
+        compat.tag_redraw(context)
+        return {'FINISHED'}
+
+
+class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
+    bl_idname = "hhz.theme_reapply_preset"
+    bl_label = "按当前饱和度重新套用"
+    bl_description = "用现在的饱和度重新套用最近一次用过的预设（从预设表重算，不会累积）"
+
+    def execute(self, context):
+        preferences = compat.get_preferences(context)
+        current = theme.current_theme(context)
+        if preferences is None or current is None:
+            self.report({'ERROR'}, "读不到偏好设置或主题")
+            return {'CANCELLED'}
+
+        name = getattr(preferences, "last_preset", "") or theme.preset_names()[0]
+        colors = theme.preset_colors(name)
+        if not colors:
+            self.report({'WARNING'}, "没有可重新套用的预设")
+            return {'CANCELLED'}
+
+        factor = float(getattr(preferences, "preset_saturation", 1.0))
+        colors = theme.desaturate_colors(colors, factor) if factor < 1.0 else colors
+        applied = theme.apply_colors(current, colors)
+        preferences.last_preset = name
+        theme.read_into_preferences(context, preferences)
+        self.report({'INFO'}, "已按 {}% 饱和度重新套用「{}」（{} 项）".format(
+            int(round(factor * 100)), name, applied))
         compat.tag_redraw(context)
         return {'FINISHED'}
 
