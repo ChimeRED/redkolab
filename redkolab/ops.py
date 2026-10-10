@@ -821,6 +821,9 @@ class HHZ_OT_theme_apply_preset(bpy.types.Operator):
             return {'CANCELLED'}
 
         preferences = compat.get_preferences(context)
+        # 进任何主题算符之前先把四个调整值的 16 个分量归一化一次（幂等）：
+        # 历史遗留的垃圾分量（未初始化内存 / 越界 / NaN）在这里就被写回中性值。
+        theme.normalize_adjust_preferences(preferences)
         # 色相 / 饱和度 / 明度 / 选中几何饱和度：统一走 theme.render_preset_colors。
         # 每次都从预设表（或已保存的自定义预设 JSON）重算，所以反复调整不会累积；
         # 四个值从**这套预设自己的槽位**读，所以套用 B 拿到的永远是 B 那一份。
@@ -868,6 +871,7 @@ class HHZ_OT_theme_reapply_preset(bpy.types.Operator):
             return {'CANCELLED'}
 
         name = theme.active_preset(preferences)
+        theme.normalize_adjust_preferences(preferences)
         colors = theme.render_preset_colors(name, preferences)
         if not colors:
             self.report({'WARNING'}, "没有可重新套用的预设")
@@ -1142,6 +1146,7 @@ class HHZ_OT_theme_custom_save(bpy.types.Operator):
         if self.preset_mode:
             return self._save_preset_mode(context, preferences)
 
+        theme.normalize_adjust_preferences(preferences)
         name = getattr(preferences, "custom_name", "").strip()
         if not name:
             self.report({'WARNING'}, "先给这套配色起个名字")
@@ -1168,6 +1173,7 @@ class HHZ_OT_theme_custom_save(bpy.types.Operator):
         源预设的那一份一个字都不动（改它的时候是什么样，回头套用它还是什么样）。
         """
         name = theme.active_preset(preferences)
+        theme.normalize_adjust_preferences(preferences)
         hue, saturation, value, selection = theme.preset_adjust(preferences, name)
         colors = theme.preset_colors(name, getattr(preferences, "theme_custom", ""))
         if not colors:

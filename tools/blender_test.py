@@ -21,6 +21,7 @@ BLENDER_USER_EXTENSIONS 环境变量把配置目录指到临时目录，就不�
 import ast
 import colorsys
 import glob
+import math
 import os
 import re
 import struct
@@ -196,6 +197,79 @@ def prop_defaults(prop):
         return tuple(float(component) for component in prop.default_array)
     except (AttributeError, TypeError):
         return ()
+
+
+def adjust_problems(theme, field_values):
+    """逐个分量核对四个调整值向量：非有限 / 越界 / 非规格化 都算问题。
+
+    ``field_values`` 是 ``{属性名: [4 个分量]}``。判据与 theme.sanitize_component
+    一致 —— 这正是"垃圾分量"的机械定义（``4.2039e-45`` 那种 float32 非规格化数
+    只可能来自未初始化内存，不可能是用户拖出来的）。
+    """
+    problems = []
+    for field, name in enumerate(theme.ADJUST_FIELDS):
+        low, high = theme.ADJUST_COMPONENT_RANGE[field]
+        for index, value in enumerate(field_values.get(name, [])):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                problems.append("{}{} 不是数字".format(name, index))
+                continue
+            if not math.isfinite(number):
+                problems.append("{}{} 非有限 {}".format(name, index, number))
+            elif number < low - 1e-6 or number > high + 1e-6:
+                problems.append("{}{} 越界 {}（合法 {}…{}）".format(
+                    name, index, number, low, high))
+            elif number != 0.0 and abs(number) < theme.FLOAT32_MIN_NORMAL:
+                problems.append("{}{} 非规格化 {}".format(name, index, number))
+    return problems
+
+
+def read_adjust_fields(theme, preferences):
+    """把四个向量属性的 4×4 个分量读成 ``{属性名: [分量…]}``（不做任何净化）。"""
+    values = {}
+    for name in theme.ADJUST_FIELDS:
+        try:
+            values[name] = [float(component) for component in getattr(preferences, name)]
+        except (AttributeError, TypeError):
+            values[name] = []
+    return values
+
+
+class _LegacyPrefs(object):
+    """模拟 **2.14.0 的偏好设置形状**：只有四个标量、没有 2.15.1 的向量属性。
+
+    这就是发布级事故的输入条件（旧 userpref 里存着 ``preset_hue`` 这类标量），
+    用纯 Python 对象复现它，不需要真的装一份 2.14.0。
+    """
+
+    def __init__(self, last_preset="马拉松 建模 低干扰", theme_custom=""):
+        self.last_preset = last_preset
+        self.theme_custom = theme_custom
+        self.preset_hue = -30.0
+        self.preset_saturation = 0.6
+        self.preset_value = 0.8
+        self.selection_saturation = 1.5
+
+
+class _GarbagePrefs(object):
+    """模拟 2.15.0 坏掉的偏好设置形状：四个向量在，但分量是垃圾。
+
+    ``values`` 会**逐个属性**写成同一个 4 分量向量（每个槽位取的是各属性同一分量，
+    所以"四个属性都是这一组值"最贴近事故现场）；要按属性分别给值时用 ``per_field``。
+    """
+
+    def __init__(self, values, per_field=None):
+        self.last_preset = "死亡搁浅"
+        self.theme_custom = ""
+        fields = ("preset_adjust_hue", "preset_adjust_saturation",
+                  "preset_adjust_value", "preset_adjust_selection")
+        if per_field:
+            for name, vector in per_field.items():
+                setattr(self, name, list(vector))
+            return
+        for name in fields:
+            setattr(self, name, list(values))
 
 
 def select_target(theme, preferences, path, context=None):
@@ -1853,7 +1927,7 @@ def test_theme(module):
     check(not adv_missing, "收进进阶的算符仍然全部注册着（隐藏不等于删除）", adv_missing)
     retained_attrs = ("palette_color", "custom_hex", "custom_name", "custom_choice",
                       "global_base", "global_accent", "global_auto_text", "global_text",
-                      "theme_target", "theme_color", "preset_saturation")
+                      "theme_target", "theme_color", "preset_adjust_saturation")
     attrs_missing = [name for name in retained_attrs if not hasattr(preferences, name)]
     check(not attrs_missing, "进阶里的偏好设置属性仍然保留（隐藏不等于删除）", attrs_missing)
     # 简洁模式的 update 回调必须返回 None（返回元组会让 Blender 打 ValueError）
@@ -1914,7 +1988,7 @@ def test_theme(module):
     # 还原测试前的颜色
     theme.set_color(current, rgb_path, original_rgb)
     theme.set_color(current, rgba_path, original_rgba)
-    # ---- 饱和度：预设滑杆（theme.desaturate_* + preferences.preset_saturation）----
+    # ---- 饱和度：预设滑杆（theme.desaturate_* + 按预设存的调整值）----
     # 功能早就实现了，却一直没有断言：滑到 0 会不会把界面弄脏、反复拖动会不会越拖
     # 越灰，之前没人管。纯函数与真实算符两条路都验一遍。
     probe = (0.7765, 1.0, 0.0, 1.0)   # 酸性黄绿：饱和度高、明度也高
@@ -2631,6 +2705,310 @@ def test_target_item_labels(module):
           "简洁模式下的控件家族条目同样不再重复分组名")
 
 
+# ---------------------- A-. 调整值偏好设置的卫生（2.15.1 事故回归防线）
+
+#: 用户机器上实测到的垃圾分量（float32 最小非规格化数），用于复现"升级后读旧值"。
+USER_REPORTED_DENORMAL = 4.2039e-45
+
+
+def test_adjust_preferences_hygiene(module):
+    """调整值偏好设置的三层防线：**全新安装**读中性 / **旧标量升级**不炸 / **垃圾分量**净化。
+
+    这一批断言是 2.15.0 发布级事故（升级后四个滑杆变成 0 / 4.2039e-45 / 0 / 0，
+    所有预设变纯黑）的直接回归防线。事故机制（4.5.14 沙箱实测）：
+
+    * 2.14.0 的四个**标量** ``preset_hue`` 等存在 userpref 里；
+    * 2.15.0 把同名属性改成 ``FloatVectorProperty(size=4)``；
+    * 载入那份 userpref 时，Blender **既没有**把旧标量映射进来，**也没有**套用新默认值，
+      四个向量的 16 个分量读到的是**未初始化内存**（实测 ``7.1613`` / ``4.59e-41`` /
+      ``5.0e+36`` / ``7.02e-43``）；在那个状态下**写也写不进去**（写一个属性会改动别的
+      属性）—— 用户"拖任意一个滑杆立刻变 0 / 4.2039e-45 / 0 / 0"就是这么来的；
+      明度分量是 0 → ``V' = V * 0 = 0`` → 强调色全黑。
+
+    2.15.1 的修法：属性改名（旧条目不再被读取）+ 读侧净化 + 入口一次性归一化 +
+    回调异常安全。这里逐条核对。
+    """
+    section("调整值偏好设置：全新安装中性 / 旧标量升级 / 垃圾分量 / 拖动只动一格")
+    theme = module.theme
+    preferences = module.compat.get_preferences()
+    current = theme.current_theme(bpy.context)
+    check(preferences is not None and current is not None, "能取到偏好设置与当前主题")
+    if preferences is None or current is None:
+        return
+
+    props = type(preferences).bl_rna.properties
+    fields = tuple(theme.ADJUST_FIELDS)
+    presets = theme.preset_names()
+    first_preset = presets[0]
+
+    # ---- 1. 属性改名（根治）：2.14.0 的四个标量名不能再出现在 RNA 里 ----
+    check(fields == ("preset_adjust_hue", "preset_adjust_saturation",
+                     "preset_adjust_value", "preset_adjust_selection"),
+          "四个调整值用的是 2.15.1 的新属性名（与 2.14.0 的标量名不同）", fields)
+    legacy = [name for name in ("preset_hue", "preset_saturation", "preset_value",
+                                "selection_saturation") if name in props]
+    check(not legacy,
+          "2.14.0 的四个标量名已从 RNA 里消失（旧 userpref 的同名条目不会被读进来）",
+          legacy)
+    wrong_size = [name for name in fields if props[name].array_length != theme.SLOT_COUNT]
+    check(not wrong_size, "四个属性都是 size={} 的向量".format(theme.SLOT_COUNT), wrong_size)
+
+    # ---- 2. **全新安装**：16 个分量**逐个**等于声明的中性默认 ----
+    # （这条是上一版漏掉的那一条：只验了"写进去再读回来"，从没验过"一开始是什么"。）
+    fresh = read_adjust_fields(theme, preferences)
+    for field, name in enumerate(fields):
+        neutral = float(theme.ADJUST_COMPONENT_NEUTRAL[field])
+        mismatched = {index: value for index, value in enumerate(fresh[name])
+                      if abs(value - neutral) > 1e-9}
+        check(len(fresh[name]) == theme.SLOT_COUNT and not mismatched,
+              "全新安装下 {} 的 {} 个分量逐个都是中性 {}".format(
+                  name, theme.SLOT_COUNT, neutral),
+              (fresh[name], mismatched))
+    check(not adjust_problems(theme, fresh),
+          "全新安装下 16 个分量没有任何非有限 / 越界 / 非规格化值",
+          adjust_problems(theme, fresh))
+    check(adjust_close(theme.preset_adjust(preferences, first_preset),
+                       theme.NEUTRAL_ADJUST),
+          "全新安装下读到的是中性四个值", theme.preset_adjust(preferences, first_preset))
+
+    original_last = getattr(preferences, "last_preset", "")
+    try:
+        # ---- 3. 槽位：空串 / 不存在 / **已删除的预设名** / 越界名 都回落到合法下标 ----
+        check(theme.SLOT_COUNT == len(theme.preset_slot_names()) == 4,
+              "固定槽位就是 4 个（3 套内置 + 自定义预设）", theme.preset_slot_names())
+        check(theme.preset_slot("马拉松 洋红警戒") == -1,
+              "2.12.0 删掉的「马拉松 洋红警戒」查不到槽位（返回 -1，不抛异常）")
+        for label, name in (("空串", ""),
+                            ("不存在的名字", "不存在的预设"),
+                            ("已删除的预设名（马拉松 洋红警戒）", "马拉松 洋红警戒"),
+                            ("越界 / 乱写的名字", "zzz 越界 名")):
+            preferences.last_preset = name
+            slot = theme.active_preset_slot(preferences)
+            picked = theme.active_preset(preferences)
+            check(0 <= slot < theme.SLOT_COUNT,
+                  "last_preset = {} -> active_preset_slot() = {}（合法，绝不越界）".format(
+                      label, slot), slot)
+            check(picked in theme.preset_slot_names(),
+                  "last_preset = {} -> 回落到的预设「{}」在名单里".format(label, picked), picked)
+            check(theme.preset_slot(picked) == slot,
+                  "last_preset = {} -> 回落后的名字与下标自洽".format(label),
+                  (picked, slot))
+
+        # ---- 4. 模拟"拖动一次"：只改当前槽位的那一个分量，其余 15 个逐分量不变 ----
+        preferences.last_preset = presets[2]
+        theme.normalize_adjust_preferences(preferences, force=True)
+        slot = theme.active_preset_slot(preferences)
+        check(slot == theme.preset_slot(presets[2]),
+              "拖动前的槽位就是当前预设的槽位", (slot, theme.preset_slot(presets[2])))
+        before = read_adjust_fields(theme, preferences)
+        getattr(preferences, fields[0])[slot] = 42.0
+        after = read_adjust_fields(theme, preferences)
+        moved = [(name, index) for name in fields
+                 for index in range(theme.SLOT_COUNT)
+                 if abs(after[name][index] - before[name][index]) > 1e-9]
+        check(moved == [(fields[0], slot)],
+              "拖动色相只改这一个分量（其余 15 个逐分量一动不动）", moved)
+        check(not adjust_problems(theme, after),
+              "拖动之后 16 个分量仍然全部合法", adjust_problems(theme, after))
+        dragged = theme.preset_adjust(preferences, presets[2])
+        check(abs(dragged[0] - 42.0) < 1e-6 and adjust_close(dragged[1:], (1.0, 1.0, 1.0)),
+              "拖动后读到的就是（42 度 / 100% / 100% / 100%）", dragged)
+        check(adjust_close(theme.preset_adjust(preferences, presets[0]),
+                           theme.NEUTRAL_ADJUST),
+              "拖动当前预设不会改动别的预设那一份（A/B 仍然互不影响）",
+              theme.preset_adjust(preferences, presets[0]))
+
+        # ---- 5. **旧标量形状**的偏好设置：新向量属性缺失 -> 必须走中性分支 ----
+        legacy_prefs = _LegacyPrefs(last_preset=presets[0])
+        legacy_values = theme.preset_adjust(legacy_prefs, presets[0])
+        check(legacy_values == theme.NEUTRAL_ADJUST,
+              "只有 2.14.0 标量的偏好设置对象：读到的是中性值（不是垃圾、不抛异常）",
+              legacy_values)
+        legacy_render = theme.render_preset_colors(presets[0], legacy_prefs)
+        legacy_base = theme.preset_colors(presets[0])
+        legacy_diff = [path for path in legacy_base
+                       if legacy_render[path] != legacy_base[path]]
+        check(not legacy_diff,
+              "旧标量形状下渲染结果与预设底表逐项位级相同（不是黑色）", legacy_diff[:5])
+        legacy_dark = min(theme.luminance(legacy_render[path])
+                          for path in theme.accent_paths(presets[0]))
+        check(legacy_dark > 0.02,
+              "旧标量形状下强调色最小亮度 {:.4f} > 0.02（明度分量不是 0）".format(legacy_dark),
+              legacy_dark)
+
+        # ---- 6. **垃圾分量**形状：NaN / Inf / 越界 / 用户截图里那个非规格化数 ----
+        for values in ((float("nan"),) * theme.SLOT_COUNT,
+                       (float("inf"),) * theme.SLOT_COUNT,
+                       (1e30, -1e30, 1e30, -1e30),
+                       (USER_REPORTED_DENORMAL,) * theme.SLOT_COUNT):
+            garbage_prefs = _GarbagePrefs(values)
+            for name in presets:
+                check(theme.preset_adjust(garbage_prefs, name) == theme.NEUTRAL_ADJUST,
+                      "垃圾分量 {} 下「{}」读到的是中性值".format(values[0], name),
+                      theme.preset_adjust(garbage_prefs, name))
+            rendered = theme.render_preset_colors(presets[0], garbage_prefs)
+            base = theme.preset_colors(presets[0])
+            moved = [path for path in base if rendered[path] != base[path]]
+            check(not moved,
+                  "垃圾分量 {} 下渲染结果与预设底表逐项相同（明度没有被算成 0）".format(
+                      values[0]),
+                  moved[:5])
+            darkest = min(theme.luminance(rendered[path])
+                          for path in theme.accent_paths(presets[0]))
+            check(darkest > 0.02,
+                  "垃圾分量 {} 下强调色没有变黑（最小亮度 {:.4f} > 0.02）".format(
+                      values[0], darkest), darkest)
+        for label, kwargs in (("NaN", {"value_scale": float("nan")}),
+                              ("Inf", {"value_scale": float("inf")}),
+                              ("非规格化", {"value_scale": USER_REPORTED_DENORMAL}),
+                              ("NaN 色相", {"hue_shift": float("nan")}),
+                              ("Inf 饱和", {"saturation_scale": float("inf")})):
+            poisoned = theme.adjusted_preset_colors(
+                presets[0], "", kwargs.get("hue_shift", 0.0),
+                kwargs.get("saturation_scale", 1.0), kwargs.get("value_scale", 1.0), 1.0)
+            darkest = min(theme.luminance(poisoned[path])
+                          for path in theme.accent_paths(presets[0]))
+            check(darkest > 0.02,
+                  "渲染入口收到 {} 也不会产出纯黑（最小亮度 {:.4f} > 0.02）".format(
+                      label, darkest), darkest)
+
+        # ---- 7. 真偏好设置被写坏之后：读侧净化 + 归一化自愈 ----
+        for name in fields:
+            setattr(preferences, name, (float("nan"),) * theme.SLOT_COUNT)
+        poisoned = read_adjust_fields(theme, preferences)
+        # RNA 会把 NaN/Inf 变成各种垃圾位模式（实测 6.6e15 / 5.3e-43 / 5.85 / 4.59e-41），
+        # 所以这里不假设读回来是什么，只要求"净化后是中性、渲染不黑"。
+        check(adjust_problems(theme, poisoned) != [],
+              "写 NaN 之后的确拿到了垃圾分量（RNA 不接受 NaN，会留下位模式垃圾）",
+              poisoned)
+        for name in presets:
+            check(theme.preset_adjust(preferences, name) == theme.NEUTRAL_ADJUST,
+                  "真偏好设置被写坏后「{}」读到的仍是中性值".format(name),
+                  theme.preset_adjust(preferences, name))
+        rendered = theme.render_preset_colors(first_preset, preferences)
+        base = theme.preset_colors(first_preset)
+        moved = [path for path in base if rendered[path] != base[path]]
+        check(not moved,
+              "真偏好设置被写坏后渲染结果仍与预设底表逐项相同（不是纯黑）", moved[:5])
+        darkest = min(theme.luminance(rendered[path])
+                      for path in theme.accent_paths(first_preset))
+        check(darkest > 0.02,
+              "真偏好设置被写坏后强调色没有变黑（最小亮度 {:.4f}）".format(darkest), darkest)
+
+        fixed = theme.normalize_adjust_preferences(preferences, force=True)
+        repaired = read_adjust_fields(theme, preferences)
+        check(fixed >= 1, "归一化报告修好了 {} 个分量".format(fixed), fixed)
+        check(not adjust_problems(theme, repaired),
+              "归一化之后 16 个分量全部合法（老用户装上本版即自愈，不需要清偏好）",
+              adjust_problems(theme, repaired))
+        for field, name in enumerate(fields):
+            neutral = float(theme.ADJUST_COMPONENT_NEUTRAL[field])
+            wrong = {index: value for index, value in enumerate(repaired[name])
+                     if abs(value - neutral) > 1e-9}
+            check(not wrong,
+                  "归一化之后 {} 的每个分量都是中性 {}".format(name, neutral), wrong)
+
+        # ---- 8. 合法值不能被"净化"掉：0.0 是合法取值（0% 明度就是纯黑），
+        # 只有 NaN / Inf / 越界 / 非规格化 才按中性处理 ----
+        legal_zero = _GarbagePrefs(None, per_field={
+            theme.ADJUST_FIELDS[0]: (0.0,) * theme.SLOT_COUNT,
+            theme.ADJUST_FIELDS[1]: (0.5,) * theme.SLOT_COUNT,
+            theme.ADJUST_FIELDS[2]: (2.0,) * theme.SLOT_COUNT,
+            theme.ADJUST_FIELDS[3]: (1.0,) * theme.SLOT_COUNT,
+        })
+        check(adjust_close(theme.preset_adjust(legal_zero, presets[0]),
+                           (0.0, 0.5, 2.0, 1.0)),
+              "合法的 0.0 不会被当成垃圾（0% 明度仍然允许，净化只针对非有限/越界/非规格化）",
+              theme.preset_adjust(legal_zero, presets[0]))
+        check(theme.sanitize_component(1, 0.0) == 0.0
+              and theme.sanitize_component(2, 0.0) == 0.0
+              and theme.sanitize_component(0, 0.0) == 0.0,
+              "sanitize_component 对合法 0 原样返回")
+        check(theme.sanitize_component(2, USER_REPORTED_DENORMAL) == 1.0
+              and theme.sanitize_component(0, float("nan")) == 0.0
+              and theme.sanitize_component(1, float("inf")) == 1.0
+              and theme.sanitize_component(1, 3.0) == 1.0
+              and theme.sanitize_component(1, -1.0) == 1.0,
+              "sanitize_component 把非规格化 / NaN / Inf / 越界全部换成该字段的中性值",
+              [theme.sanitize_component(0, float("nan")),
+               theme.sanitize_component(1, float("inf")),
+               theme.sanitize_component(1, 3.0)])
+        check(not theme.write_preset_adjust(preferences, "不存在的预设", (10.0, 1.0, 1.0, 1.0)),
+              "写入端对认不出来的名字直接拒绝（不写非法槽位）")
+        check(not theme.write_preset_adjust(None, presets[0], theme.NEUTRAL_ADJUST),
+              "写入端对空偏好设置直接拒绝（不抛异常）")
+
+        # ---- 9. 归一化是幂等的：干净状态下再调一次不写任何东西 ----
+        check(theme.normalize_adjust_preferences(preferences, force=True) == 0,
+              "干净状态下再归一化报告 0 个改动（幂等，不会每帧写盘）")
+
+        # ---- 9. 滑杆回调：极端输入不抛异常，且运行后 16 个分量仍然合法 ----
+        adjust_update = getattr(module.ui, "_on_theme_adjust_update", None)
+        check(callable(adjust_update), "能取到滑杆的更新回调 _on_theme_adjust_update")
+        if callable(adjust_update):
+            for label, values in (("下界", (0.0, 0.0, 0.0, 0.0)),
+                                  ("上界", (180.0, 2.0, 2.0, 2.0)),
+                                  ("负下界", (-180.0, 0.0, 0.0, 0.0)),
+                                  ("上界 + 满饱和", (180.0, 2.0, 2.0, 2.0))):
+                preferences.last_preset = presets[1]
+                theme.write_preset_adjust(preferences, presets[1], values)
+                raised = None
+                try:
+                    adjust_update(preferences, bpy.context)
+                except Exception as error:  # noqa: BLE001 - 回调抛异常就是"拖不动"
+                    raised = repr(error)
+                check(raised is None,
+                      "回调在{}输入 {} 下不抛异常（拖动不会失效）".format(label, values),
+                      raised)
+                problems = adjust_problems(theme, read_adjust_fields(theme, preferences))
+                check(not problems,
+                      "回调在{}输入后 16 个分量仍全部合法".format(label), problems)
+            for name in fields:
+                setattr(preferences, name, (float("nan"),) * theme.SLOT_COUNT)
+            raised = None
+            try:
+                adjust_update(preferences, bpy.context)
+            except Exception as error:  # noqa: BLE001
+                raised = repr(error)
+            check(raised is None, "回调在 NaN 垃圾分量下也不抛异常", raised)
+            theme.normalize_adjust_preferences(preferences, force=True)
+            problems = adjust_problems(theme, read_adjust_fields(theme, preferences))
+            check(not problems, "回调跑过 NaN 之后 16 个分量被归一化回合法值", problems)
+            live = theme.get_color(current, "user_interface.wcol_regular.inner_sel")
+            check(live is not None and min(live[:3]) > 0.0,
+                  "NaN 之后真主题里的选中色不是纯黑", live)
+
+        # ---- 10. 源码级：回调异常安全 + 下标只有一个来源 + 写入端挡越界 ----
+        ui_source = source_of(module, "ui.py")
+        callback_source = function_source(ui_source, "_on_theme_adjust_update")
+        check("try:" in callback_source and "except Exception" in callback_source,
+              "滑杆更新回调整段包在 try/except 里（异常被吞掉并打印，不冒给 Blender）")
+        check("normalize_adjust_preferences" in callback_source,
+              "回调开头会做一次幂等的分量归一化（历史垃圾分量自愈）")
+        panel_source = class_source(ui_source, "HHZ_PT_theme")
+        check("theme.active_preset_slot(preferences)" in panel_source
+              and "index=slot" in panel_source,
+              "面板的 index 只来自 theme.active_preset_slot()（夹紧过的合法下标）")
+        check("normalize_adjust_preferences" in panel_source,
+              "画面板之前也会归一化一次（老用户一打开主题页就自愈）")
+        theme_source = source_of(module, "theme.py")
+        slot_source = function_source(theme_source, "active_preset_slot")
+        check("SLOT_COUNT - 1" in slot_source and "min(" in slot_source,
+              "active_preset_slot() 里有把结果夹到 0…SLOT_COUNT-1 的那一步")
+        write_source = function_source(theme_source, "write_preset_adjust")
+        check("0 <= slot < SLOT_COUNT" in write_source,
+              "写入端也挡掉越界下标（不写非法槽位）")
+    finally:
+        # 把偏好设置恢复成"干净的中性状态"，不给后面的用例留垃圾
+        preferences.last_preset = original_last
+        for field, name in enumerate(fields):
+            neutral = float(theme.ADJUST_COMPONENT_NEUTRAL[field])
+            setattr(preferences, name, (neutral,) * theme.SLOT_COUNT)
+        theme.normalize_adjust_preferences(preferences, force=True)
+        if presets:
+            bpy.ops.hhz.theme_apply_preset(preset=presets[0])
+
+
 # ------------------------------------------------- A0：色相 / 饱和度 / 明度调整
 #
 # 关键的两条护栏（用户原话）：
@@ -2725,46 +3103,50 @@ def test_theme_adjust_colors(module):
           and theme.adjust_color((0.2, 0.4, 0.6), 0.0, 1.0, 1.0)[3] == 1.0,
           "只改 HSV：alpha 原样保留（RGB 三通道项读进来补的 1.0 照旧返回）")
 
-    # ---- 6. 滑杆本身的默认值与范围（2.15.0：每个预设各存一份 -> size=4 的向量）----
+    # ---- 6. 滑杆本身的默认值与范围（每个预设各存一份 -> size=4 的向量）----
+    # 属性名在 2.15.1 换过（热修，见 test_adjust_preferences_hygiene），这里一律用
+    # theme.ADJUST_FIELDS 的权威名字，不再写死字符串。
     props = type(preferences).bl_rna.properties
-    hue_default = prop_defaults(props["preset_hue"])
-    check(props["preset_hue"].array_length == 4
-          and len(hue_default) == 4
+    field_names = tuple(theme.ADJUST_FIELDS)
+    hue_field, saturation_field, value_field, selection_field = field_names
+    hue_default = prop_defaults(props[hue_field])
+    check(props[hue_field].array_length == theme.SLOT_COUNT
+          and len(hue_default) == theme.SLOT_COUNT
           and all(abs(component) < 1e-9 for component in hue_default)
-          and round(props["preset_hue"].hard_min, 3) == -180.0
-          and round(props["preset_hue"].hard_max, 3) == 180.0,
+          and round(props[hue_field].hard_min, 3) == -180.0
+          and round(props[hue_field].hard_max, 3) == 180.0,
           "色相：4 个预设槽位默认都是 0 度、范围 -180…+180",
-          (props["preset_hue"].array_length, hue_default,
-           props["preset_hue"].hard_min, props["preset_hue"].hard_max))
-    saturation_default = prop_defaults(props["preset_saturation"])
-    check(props["preset_saturation"].array_length == 4
-          and len(saturation_default) == 4
+          (props[hue_field].array_length, hue_default,
+           props[hue_field].hard_min, props[hue_field].hard_max))
+    saturation_default = prop_defaults(props[saturation_field])
+    check(props[saturation_field].array_length == theme.SLOT_COUNT
+          and len(saturation_default) == theme.SLOT_COUNT
           and all(abs(component - 1.0) < 1e-9 for component in saturation_default)
-          and round(props["preset_saturation"].hard_min, 3) == 0.0
-          and round(props["preset_saturation"].hard_max, 3) == 2.0,
+          and round(props[saturation_field].hard_min, 3) == 0.0
+          and round(props[saturation_field].hard_max, 3) == 2.0,
           "饱和度：4 个槽位默认都是 100%（= 预设原样）、范围 0…200%",
-          (saturation_default, props["preset_saturation"].hard_max))
-    value_default = prop_defaults(props["preset_value"])
-    check(props["preset_value"].array_length == 4
-          and len(value_default) == 4
+          (saturation_default, props[saturation_field].hard_max))
+    value_default = prop_defaults(props[value_field])
+    check(props[value_field].array_length == theme.SLOT_COUNT
+          and len(value_default) == theme.SLOT_COUNT
           and all(abs(component - 1.0) < 1e-9 for component in value_default)
-          and round(props["preset_value"].hard_max, 3) == 2.0,
+          and round(props[value_field].hard_max, 3) == 2.0,
           "明度：4 个槽位默认都是 100%、范围 0…200%",
-          (value_default, props["preset_value"].hard_max))
-    selection_default = prop_defaults(props["selection_saturation"])
-    check(props["selection_saturation"].array_length == 4
-          and len(selection_default) == 4
+          (value_default, props[value_field].hard_max))
+    selection_default = prop_defaults(props[selection_field])
+    check(props[selection_field].array_length == theme.SLOT_COUNT
+          and len(selection_default) == theme.SLOT_COUNT
           and all(abs(component - 1.0) < 1e-9 for component in selection_default),
           "选中几何饱和度：4 个槽位默认都是 100%（= 原样）",
           selection_default)
-    check(tuple(theme.ADJUST_FIELDS) == ("preset_hue", "preset_saturation",
-                                         "preset_value", "selection_saturation")
-          and theme.NEUTRAL_ADJUST == (0.0, 1.0, 1.0, 1.0),
+    check(field_names == ("preset_adjust_hue", "preset_adjust_saturation",
+                          "preset_adjust_value", "preset_adjust_selection")
+          and theme.NEUTRAL_ADJUST == (0.0, 1.0, 1.0, 1.0)
+          and theme.SLOT_COUNT == 4,
           "四个槽位向量的属性名与中性值在 theme.py 里只有一份定义",
-          (theme.ADJUST_FIELDS, theme.NEUTRAL_ADJUST))
-    sliders = sorted(name for name in props.keys()
-                     if name.startswith("preset_") or name == "selection_saturation")
-    check(sliders == ["preset_hue", "preset_saturation", "preset_value", "selection_saturation"],
+          (field_names, theme.NEUTRAL_ADJUST, theme.SLOT_COUNT))
+    sliders = sorted(name for name in props.keys() if name.startswith("preset_adjust_"))
+    check(sliders == sorted(field_names),
           "这一批就这四个滑杆属性（没有多出别的设置项）", sliders)
 
     # ---- 7. 旧值兼容：0…1 的旧倍数语义一个字都没变 ----
@@ -3025,15 +3407,16 @@ def test_selection_saturation(module):
         return
 
     props = type(preferences).bl_rna.properties
-    selection_default = prop_defaults(props["selection_saturation"])
-    check(props["selection_saturation"].array_length == 4
-          and len(selection_default) == 4
+    selection_field = theme.ADJUST_FIELDS[3]
+    selection_default = prop_defaults(props[selection_field])
+    check(props[selection_field].array_length == theme.SLOT_COUNT
+          and len(selection_default) == theme.SLOT_COUNT
           and all(abs(component - 1.0) < 1e-9 for component in selection_default)
-          and round(props["selection_saturation"].hard_min, 3) == 0.0
-          and round(props["selection_saturation"].hard_max, 3) == 2.0,
+          and round(props[selection_field].hard_min, 3) == 0.0
+          and round(props[selection_field].hard_max, 3) == 2.0,
           "选中几何饱和度：4 个槽位默认都是 100%（= 原样）、范围 0…200%",
-          (selection_default, props["selection_saturation"].hard_min,
-           props["selection_saturation"].hard_max))
+          (selection_default, props[selection_field].hard_min,
+           props[selection_field].hard_max))
     check(tuple(theme.VIEWPORT_SELECTION_PATHS) == (
         "view_3d.editmesh_active", "view_3d.vertex_select",
         "view_3d.edge_select", "view_3d.face_select"),
@@ -3612,8 +3995,9 @@ def test_theme_ui_conventions(module):
     missing_props = [name for name in prop_names if not hasattr(preferences, name)]
     check(not missing_props,
           "面板引用的偏好设置属性全都存在（{} 个）".format(len(prop_names)), missing_props)
-    for token in ("theme_group", "theme_target", "preset_hue", "preset_saturation",
-                  "preset_value", "selection_saturation"):
+    for token in ("theme_group", "theme_target", "preset_adjust_hue",
+                  "preset_adjust_saturation", "preset_adjust_value",
+                  "preset_adjust_selection"):
         check(token in prop_names, "面板确实画了新加的 {}".format(token))
     # 四个滑杆都绑到**当前所用预设**的槽位上（每个预设各存一份，靠 index 而非同步）
     check("theme.active_preset_slot(preferences)" in panel,
@@ -3663,7 +4047,7 @@ def test_theme_ui_conventions(module):
     # 关键按钮位置：三套内置预设仍在最前，「自定义预设」排在其后，滑杆再往后
     first_presets = panel.find("for name in theme.preset_names()")
     custom_button = panel.find("theme.CUSTOM_PRESET_NAME")
-    sliders = panel.find('"preset_hue"')
+    sliders = panel.find('"preset_adjust_hue"')
     reapply = panel.find('"hhz.theme_reapply_preset"')
     save_custom = panel.find("theme_custom_save")
     check(0 <= first_presets < custom_button < sliders < reapply < save_custom,
@@ -4761,6 +5145,9 @@ def main():
     module = __import__(module_name, fromlist=["compat"])
     print("  模块 __package__ = {}".format(getattr(module.compat, "PACKAGE", "?")))
 
+    # 放在最前：它要在**任何用例动过**这四个调整值之前，核对"全新安装下 16 个分量
+    # 逐个都是中性默认"（2.15.0 的事故正是漏了这一条 —— 只验了"写进去再读回来"）。
+    run("调整值偏好设置卫生（升级 / 垃圾分量 / 拖动）", test_adjust_preferences_hygiene, module)
     run("注册与界面结构", test_registration, module_name, module)
     run("图标名合法性", test_icons, module)
     run("饼菜单按钮依赖", test_menu_operator)

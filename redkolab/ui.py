@@ -247,16 +247,25 @@ def _on_theme_adjust_update(self, context):
 
     值是按预设存的分量（``theme.active_preset`` 决定槽位），所以这里只会重算**当前
     这一套**预设；改 A 预设的滑杆不会碰 B 预设存的那一份。
+
+    **异常安全**：这是 UI 更新回调，抛异常会让"拖动失效"（用户看到的就是滑杆拖不动）。
+    所以整段都包在 try/except 里：任何意外只打印一条说明并放弃这一次调整，
+    绝不把异常抛回 Blender。开头还会做一次（幂等的）分量归一化，
+    把历史遗留的垃圾分量就地修回中性值。
     """
-    current = theme.current_theme(context)
-    name = theme.active_preset(self)
-    if current is None or not name:
-        return
-    colors = theme.render_preset_colors(name, self)
-    if not colors:
-        return
-    theme.apply_colors(current, colors)
-    theme.read_into_preferences(context, self)
+    try:
+        theme.normalize_adjust_preferences(self)
+        current = theme.current_theme(context)
+        name = theme.active_preset(self)
+        if current is None or not name:
+            return
+        colors = theme.render_preset_colors(name, self)
+        if not colors:
+            return
+        theme.apply_colors(current, colors)
+        theme.read_into_preferences(context, self)
+    except Exception as error:  # noqa: BLE001 - UI 回调绝不能让异常冒出去
+        print("[redkolab] 调整滑杆本次更新已忽略（{}）".format(error))
 
 
 def _on_theme_group_update(self, context):
@@ -539,6 +548,9 @@ class HHZ_PT_theme(bpy.types.Panel):
         if preferences is None:
             layout.label(text="读不到插件偏好设置", icon='ERROR')
             return
+        # 画之前先做一次（幂等的）分量归一化：历史遗留的垃圾分量（未初始化内存 /
+        # 越界 / NaN）第一次画面板就被写回中性值 —— 已经坏掉的用户装上本版即自愈。
+        theme.normalize_adjust_preferences(preferences)
         current = theme.current_theme(context)
         if current is None:
             layout.label(text="读不到当前主题", icon='ERROR')
@@ -568,12 +580,14 @@ class HHZ_PT_theme(bpy.types.Panel):
         sliders.scale_y = 1.2
         # 滑杆画的是**当前所用预设自己的那一组值**：分量下标 = 预设槽位
         # （theme.preset_slot_names()：0/1/2 = 三套内置预设，3 = 「自定义预设」）。
-        # 所以套用某套预设后，这四个滑杆自动显示它存的值，切换预设也不会互相污染。
+        # 槽位**只**来自 theme.active_preset_slot()（它把结果夹在 0…SLOT_COUNT-1），
+        # 读与写共用这一个来源 —— 传进 prop(index=…) 的下标永远合法。
         slot = theme.active_preset_slot(preferences)
-        sliders.prop(preferences, "preset_hue", index=slot, text="色相", slider=True)
-        sliders.prop(preferences, "preset_saturation", index=slot, text="饱和度", slider=True)
-        sliders.prop(preferences, "preset_value", index=slot, text="明度", slider=True)
-        sliders.prop(preferences, "selection_saturation", index=slot,
+        sliders.prop(preferences, "preset_adjust_hue", index=slot, text="色相", slider=True)
+        sliders.prop(preferences, "preset_adjust_saturation", index=slot,
+                     text="饱和度", slider=True)
+        sliders.prop(preferences, "preset_adjust_value", index=slot, text="明度", slider=True)
+        sliders.prop(preferences, "preset_adjust_selection", index=slot,
                      text="选中线 / 面 饱和度", slider=True)
         box.operator("hhz.theme_reapply_preset", icon='FILE_REFRESH')
         save_custom = box.operator("hhz.theme_custom_save",
@@ -926,15 +940,20 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         subtype='COLOR', size=4, min=0.0, max=1.0,
         default=(0.776, 1.0, 0.0, 1.0),
     )
-    # ---- 四个调整滑杆：**每个预设各存一份**（2.15.0）----
+    # ---- 四个调整滑杆：**每个预设各存一份**（2.15.0 起）----
     #
     # 每个属性都是 ``FloatVectorProperty(size=4)``，分量下标就是预设槽位
     # （``theme.preset_slot_names()``：0/1/2 = 三套内置预设，3 = 「自定义预设」）。
     # 面板用 ``index=theme.active_preset_slot(preferences)`` 画滑杆，所以：
     #   * 滑杆显示的就是"当前所用预设"那一组值（套用某预设后自动显示它存的）；
     #   * 改 A 预设的滑杆只写 A 的槽位，B 预设一个字都不变。
-    # 索引映射的唯一权威定义在 theme.py（ADJUST_FIELDS / preset_slot），这里不重写一份。
-    preset_hue: FloatVectorProperty(
+    # 索引映射的唯一权威定义在 theme.py（ADJUST_FIELDS / active_preset_slot），
+    # 写入一律走 theme.write_preset_adjust（夹紧下标 + 净化分量）。
+    #
+    # **属性名必须与 2.14.0 的四个标量名不同**（2.15.0 沿用旧名造成过发布级事故：
+    # 升级时同名旧条目让 16 个分量读到未初始化内存 → 明度 0 → 所有预设纯黑，
+    # 详见 theme.py 的 ADJUST_FIELDS 注释与 README 的「已知限制」）。
+    preset_adjust_hue: FloatVectorProperty(
         name="色相",
         description="当前预设的强调色整体转多少度色相：0 度原样，±180 度是转半圈（-180 与 +180 等价）；"
                     "每个预设各存一份，互不影响",
@@ -944,7 +963,7 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         max=180.0,
         update=_on_theme_adjust_update,
     )
-    preset_saturation: FloatVectorProperty(
+    preset_adjust_saturation: FloatVectorProperty(
         name="饱和度",
         description="当前预设的强调色饱和度：100% 原样，0% 变灰，200% 推满（纯灰在任何取值下都保持纯灰）；"
                     "每个预设各存一份，互不影响",
@@ -954,7 +973,7 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         max=2.0,
         update=_on_theme_adjust_update,
     )
-    preset_value: FloatVectorProperty(
+    preset_adjust_value: FloatVectorProperty(
         name="明度",
         description="当前预设的强调色明度：100% 原样，低于 100% 变暗，高于 100% 提亮（最高夹到 1.0）；"
                     "每个预设各存一份，互不影响",
@@ -964,7 +983,7 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         max=2.0,
         update=_on_theme_adjust_update,
     )
-    selection_saturation: FloatVectorProperty(
+    preset_adjust_selection: FloatVectorProperty(
         name="选中几何饱和度",
         description="只作用于视口里被选中的几何（活动元素 / 顶点 / 边 / 面 四条路径）：100% 原样，200% 推满，"
                     "0% 变灰；背景 / 文字 / 边框 / 网格与其它任何颜色都不受影响；每个预设各存一份，互不影响",

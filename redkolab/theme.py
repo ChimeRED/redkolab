@@ -28,6 +28,7 @@
 
 import colorsys
 import json
+import math
 
 import bpy
 
@@ -1071,7 +1072,7 @@ def selection_saturation_colors(colors, scale=1.0):
     """**只**对 :data:`VIEWPORT_SELECTION_PATHS` 那 4 条路径应用饱和度倍数。
 
     与界面控件的饱和度分开：界面降饱和是为了长时间耐看，"视口里哪些东西被选中"
-    必须一眼看清，所以它有自己的滑杆（``preferences.selection_saturation``）。
+    必须一眼看清，所以它有自己的滑杆（``preset_adjust_selection`` 那一个分量）。
 
     **其它任何路径在任何取值下都不变** —— 不是"算出来刚好一样"，而是这些键
     原对象直接沿用（连浮点往返都不做）；``scale == 1.0`` 时整份表原样返回。
@@ -2463,25 +2464,90 @@ def preference_number(preferences, name, default):
 #
 # 所以四个调整值**不是全局一份**，而是**按预设各存一份**：预设槽位固定 4 个
 # （3 套内置 + 「自定义预设」），每个槽位 4 个值。索引映射就写在这里：
-#   ``preset_hue[slot]`` / ``preset_saturation[slot]`` / ``preset_value[slot]`` /
-#   ``selection_saturation[slot]``，其中 ``slot = preset_slot(预设名)``。
+#   ``preset_adjust_hue[slot]`` / ``preset_adjust_saturation[slot]`` /
+#   ``preset_adjust_value[slot]`` / ``preset_adjust_selection[slot]``，
+#   其中 ``slot`` 一律来自 :func:`active_preset_slot`（**永远**夹在 0…3）。
 # 面板用同一个 ``slot`` 当 ``index=`` 画滑杆（ui.py），所以"滑杆显示的就是当前所用
 # 预设那一组值"是**结构性**成立的，不靠同步、也不可能互相污染。
+#
+# ---- 为什么 2.15.1 要换属性名（发布级事故，见 README「已知限制」）----
+# 2.15.0 把四个**标量** ``FloatProperty``（2.14.0 的 ``preset_hue`` 等）改成了
+# ``FloatVectorProperty(size=4)``，却**沿用了同一个属性名**。实测（4.5.14，沙箱）：
+#   1) 用 2.14.0 存下标量 → 换上 2.15.0 的代码 → 四个向量的 4 个分量读到的是
+#      **未初始化内存**（实测 ``7.1613`` / ``4.59e-41`` / ``5.0e+36`` / ``7.02e-43``），
+#      既不是新默认值、也不是旧标量值；
+#   2) 在那个状态下**写也写不进去**（写 ``preset_hue`` 反而改动了别的属性）——
+#      这就是用户看到的"**拖动任意一个滑杆，四个滑杆立刻变成 0 / 4.2e-45 / 0 / 0，
+#      所有预设变纯黑**"：明度分量是 0 → ``V' = V * 0 = 0`` → 强调色全黑。
+# 换名字后，旧 userpref 里那四条同名条目**不再被任何属性读取**，新属性拿到的是
+# 干净的声明默认值 —— 这是根治；:func:`sanitize_component` 与
+# :func:`normalize_adjust_preferences` 是第二、第三道防线（读侧净化 + 一次写回归一化）。
 
 #: 四个调整值对应的偏好设置属性名（每个都是一个 ``FloatVectorProperty(size=4)``）。
-ADJUST_FIELDS = ("preset_hue", "preset_saturation", "preset_value", "selection_saturation")
+#: **属性名必须与 2.14.0 的标量名不同**（理由见上面那段事故记录）。
+ADJUST_FIELDS = ("preset_adjust_hue", "preset_adjust_saturation",
+                 "preset_adjust_value", "preset_adjust_selection")
 
 #: 中性值（= 预设原样）：0 度色相 / 100% 饱和度 / 100% 明度 / 100% 选中饱和度。
+#: 与 :data:`ADJUST_FIELDS` 同序，是"四个**值**"的中性。
 NEUTRAL_ADJUST = (0.0, 1.0, 1.0, 1.0)
+
+#: 每个**向量属性**的分量中性值（与 :data:`ADJUST_FIELDS` 同序）：
+#: 色相那一支的 4 个分量都是 0，另外三支的 4 个分量都是 1.0。
+ADJUST_COMPONENT_NEUTRAL = (0.0, 1.0, 1.0, 1.0)
+
+#: 每个调整值的合法区间（与 ui.py 里的 ``hard_min`` / ``hard_max`` 一致）。
+ADJUST_COMPONENT_RANGE = ((-180.0, 180.0), (0.0, 2.0), (0.0, 2.0), (0.0, 2.0))
+
+#: 固定槽位数量：3 套内置预设 + 「自定义预设」。
+SLOT_COUNT = 4
+
+#: float32 的最小**规格化**数。比它小的非零值（如 ``4.2039e-45``）不可能是用户拖出来
+#: 的值，只可能是未初始化内存或位模式错乱的产物 —— 一律按中性值处理。
+FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
+
+#: 已经做过一次归一化的偏好设置对象（按 ``as_pointer()`` 记账），避免每帧都全量扫。
+_NORMALIZED_POINTERS = set()
+
+
+def sanitize_component(field, value):
+    """把一个分量值净化成合法值：**非有限 / 越界 / 非规格化**一律按该字段的中性值。
+
+    ``field`` 是 :data:`ADJUST_FIELDS` 里的下标。这是"读侧"的唯一判据 ——
+    未初始化的垃圾（``4.2039e-45``、``5.0e36``、NaN、Inf）在这里全部被挡掉，
+    所以滑杆与渲染链**永远拿不到会算出黑值的输入**。
+    """
+    index = int(field) if 0 <= int(field) < len(ADJUST_FIELDS) else 0
+    neutral = float(ADJUST_COMPONENT_NEUTRAL[index])
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return neutral
+    if not math.isfinite(number):
+        return neutral
+    low, high = ADJUST_COMPONENT_RANGE[index]
+    if number < low or number > high:
+        return neutral
+    if number != 0.0 and abs(number) < FLOAT32_MIN_NORMAL:
+        return neutral
+    return number
+
+
+def sanitize_adjust(values):
+    """净化"四个值" ``(色相, 饱和度, 明度, 选中饱和度)``（逐项走 :func:`sanitize_component`）。"""
+    given = list(values or [])[:len(ADJUST_FIELDS)]
+    while len(given) < len(ADJUST_FIELDS):
+        given.append(NEUTRAL_ADJUST[len(given)])
+    return tuple(sanitize_component(field, value) for field, value in enumerate(given))
 
 
 def preset_slot_names():
-    """固定槽位的顺序：3 套内置预设 + 「自定义预设」（一共 4 个）。"""
+    """固定槽位的顺序：3 套内置预设 + 「自定义预设」（一共 :data:`SLOT_COUNT` 个）。"""
     return list(preset_names()) + [CUSTOM_PRESET_NAME]
 
 
 def preset_slot(name):
-    """预设名 -> 固定槽位下标；认不出来的名字（含空串）返回 -1。"""
+    """预设名 -> 固定槽位下标；认不出来的名字（含空串、已删除的预设名）返回 -1。"""
     try:
         return preset_slot_names().index(name)
     except ValueError:
@@ -2492,6 +2558,8 @@ def active_preset(preferences):
     """界面上"当前在用"的预设名：``last_preset`` 认不出来时退回第一套内置预设。
 
     滑杆显示哪一组值、拖滑杆时重算哪一套，两处都走这一个函数 —— 所以它们永远一致。
+    ``last_preset`` 为空串、拼错、或指向**早期版本已经删除的那套预设**时，
+    一律回落到第一套内置预设，绝不把非法槽位传下去。
     """
     name = getattr(preferences, "last_preset", "") or ""
     if preset_slot(name) >= 0:
@@ -2501,8 +2569,15 @@ def active_preset(preferences):
 
 
 def active_preset_slot(preferences):
-    """当前所用预设的槽位下标（给面板 ``index=`` 用）。"""
-    return preset_slot(active_preset(preferences))
+    """当前所用预设的槽位下标，**永远**落在 ``0 … SLOT_COUNT-1``。
+
+    面板的 ``prop(..., index=slot)`` 与写入端都用这一个来源：即使将来预设名单变了
+    （增删预设、认不出来的名字），也不会有越界下标传进 RNA。
+    """
+    slot = preset_slot(active_preset(preferences))
+    if slot < 0:
+        slot = 0
+    return min(slot, max(0, SLOT_COUNT - 1))
 
 
 def preset_adjust(preferences, name=None):
@@ -2510,43 +2585,88 @@ def preset_adjust(preferences, name=None):
 
     ``name`` 为 ``None`` 时读"当前所用"的那一套（:func:`active_preset`）。
     每套预设各存一份，**互不影响** —— 这就是"改 A 预设的滑杆，B 预设一个字都不变"。
+
+    每个分量都过一遍 :func:`sanitize_component`：槽位越界、属性缺失、垃圾分量
+    （NaN / Inf / 越界 / 非规格化）一律按中性值返回，**绝不把非法值交给渲染链**。
     """
     slot = preset_slot(active_preset(preferences) if name is None else name)
     values = []
-    for index, field in enumerate(ADJUST_FIELDS):
-        neutral = float(NEUTRAL_ADJUST[index])
-        if preferences is None or slot < 0:
+    for field, prop_name in enumerate(ADJUST_FIELDS):
+        neutral = float(ADJUST_COMPONENT_NEUTRAL[field])
+        if preferences is None or not 0 <= slot < SLOT_COUNT:
             values.append(neutral)
             continue
-        vector = getattr(preferences, field, None)
+        vector = getattr(preferences, prop_name, None)
         try:
-            values.append(float(vector[slot]))
+            raw = vector[slot]
         except (TypeError, IndexError, KeyError):
-            values.append(neutral)
+            raw = neutral
+        values.append(sanitize_component(field, raw))
     return tuple(values)
 
 
 def write_preset_adjust(preferences, name, values):
     """把四个调整值写进某个预设**自己的槽位**（其它预设的槽位一个字都不动）。
 
-    返回是否写入成功（名字认不出来 / 读不到向量属性时返回 ``False``，不抛异常）。
+    写入端同样夹紧：名字认不出来（-1）、下标越界、向量长度不是 :data:`SLOT_COUNT`
+    时**不写**；写进去的值先过 :func:`sanitize_component`，所以偏好设置里不会出现
+    非法分量。返回是否有过写入。
     """
     slot = preset_slot(name)
-    if preferences is None or slot < 0:
+    if preferences is None or not 0 <= slot < SLOT_COUNT:
         return False
-    wanted = list(values)[:len(ADJUST_FIELDS)]
-    while len(wanted) < len(ADJUST_FIELDS):
-        wanted.append(NEUTRAL_ADJUST[len(wanted)])
+    wanted = sanitize_adjust(values)
     written = False
-    for field, value in zip(ADJUST_FIELDS, wanted):
-        vector = getattr(preferences, field, None)
-        if vector is None or len(vector) <= slot:
+    for field, prop_name in enumerate(ADJUST_FIELDS):
+        vector = getattr(preferences, prop_name, None)
+        if vector is None or len(vector) != SLOT_COUNT:
             continue
         updated = [float(component) for component in vector]
-        updated[slot] = float(value)
-        setattr(preferences, field, updated)
+        updated[slot] = wanted[field]
+        setattr(preferences, prop_name, updated)
         written = True
     return written
+
+
+def normalize_adjust_preferences(preferences, force=False):
+    """把 16 个分量**就地归一化**一次，返回修好的分量数（0 = 本来就干净）。
+
+    任何入口（画面板、拖滑杆、套用预设）第一次走到这里时，就把已经坏掉的分量
+    （非有限 / 越界 / 非规格化）写回该字段的中性值 —— 所以**已经升级坏掉的用户
+    装上 2.15.1 之后会自动恢复正常，不需要清偏好设置**。
+
+    按 ``as_pointer()`` 记账，同一个偏好设置对象只全量扫一次（``force=True`` 可强制
+    再扫一遍，测试用）。写回会触发一次属性更新回调，但那时数据已经干净，
+    不会递归下去（第二次进来直接命中"已归一化"分支返回 0）。
+    """
+    if preferences is None:
+        return 0
+    pointer = None
+    try:
+        pointer = preferences.as_pointer()
+    except AttributeError:
+        pointer = None
+    if pointer and not force and pointer in _NORMALIZED_POINTERS:
+        return 0
+
+    fixed = 0
+    for field, prop_name in enumerate(ADJUST_FIELDS):
+        vector = getattr(preferences, prop_name, None)
+        if vector is None:
+            continue
+        try:
+            current = [float(component) for component in vector]
+        except (TypeError, ValueError):
+            continue
+        wanted = [sanitize_component(field, component) for component in current]
+        if wanted == current:
+            continue
+        fixed += sum(1 for before, after in zip(current, wanted) if before != after)
+        setattr(preferences, prop_name, wanted)
+
+    if pointer:
+        _NORMALIZED_POINTERS.add(pointer)
+    return fixed
 
 
 def adjusted_preset_colors(name, custom_text="", hue_shift=0.0, saturation_scale=1.0,
@@ -2562,7 +2682,13 @@ def adjusted_preset_colors(name, custom_text="", hue_shift=0.0, saturation_scale
 
     强调色集合是 :func:`accent_paths` 的**子集**关系：视口那 4 条在集合里，
     所以两步都只落在"变成颜色的地方"上。
+
+    四个参数先过 :func:`sanitize_adjust`：非有限 / 越界 / 非规格化的输入按中性值处理，
+    所以这条渲染链**永远不可能**因为垃圾输入算出 ``V = 0`` 的纯黑强调色
+    （唯一的例外是调用方**明确**传 0% 明度 —— 那是合法取值，不是垃圾）。
     """
+    hue_shift, saturation_scale, value_scale, selection_saturation = sanitize_adjust(
+        (hue_shift, saturation_scale, value_scale, selection_saturation))
     colors = preset_colors(name, custom_text)
     if not colors:
         return None
