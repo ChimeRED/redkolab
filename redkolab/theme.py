@@ -1697,11 +1697,34 @@ def set_color(theme, path, color):
         return False
 
 
+#: 控件家族那批条目的分组名（「按钮 底色」这类共 7 个）。
+#: 它们的标签本身已经写明家族与部位（「普通按钮 底色」），下拉里再拼一次分组名
+#: 就是把同一个词说两遍 —— 见 :func:`item_label`。
+WIDGET_GROUPS = tuple(group for _member, _label, group in WIDGET_MEMBERS)
+
+
+def item_label(label, group):
+    """颜色项下拉里那一行的显示文本。
+
+    默认是 ``分组 标签``；**控件家族那一批只留标签**：它们的标签已经写明家族与部位
+    （「普通按钮 底色」），再拼上「按钮 底色」纯属重复，而且让条目变得很长。
+
+    为什么要短：弹出的条目框列宽有限，Blender 会把放不下的条目标签**按像素宽度
+    从中间截断**（``interface_widgets.cc`` 的 ``text_clip_middle`` / ``text_clip_middle_ex``），
+    中文字被切在半个字上时，落单的多字节会被当成无效序列画成乱码（那个函数里就有
+    ``TODO: proper handling of non UTF8 strings`` 的注释）。标签短一点，需要截断的条目就少一点、
+    截得更靠后一点 —— 这是**缓解**，不是根治（根治在他的 Blender / 字体侧）。
+    """
+    if not group or group in WIDGET_GROUPS:
+        return label
+    return "{} {}".format(group, label)
+
+
 def target_items(self=None, context=None):
     """给 EnumProperty 用的动态条目：只列出当前 Blender 真的有的颜色。
 
     简洁模式（``preferences.simple_mode``）下只留下常用项，避免两百多项把人绕晕；
-    关掉简洁模式就能看到全部条目。
+    关掉简洁模式就能看到全部条目。条目标签的拼法见 :func:`item_label`。
     """
     simple = bool(getattr(self, "simple_mode", False))
     theme = current_theme(context if context is not None else bpy.context)
@@ -1711,7 +1734,7 @@ def target_items(self=None, context=None):
             continue
         if resolve(theme, path) is None:
             continue
-        items.append((path, "{} {}".format(group, label), path))
+        items.append((path, item_label(label, group), path))
     if not items:
         items.append(("__unavailable__", "（当前版本没有可用颜色项）", ""))
     return items

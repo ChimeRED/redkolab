@@ -2327,6 +2327,72 @@ def test_viewport_selection_accent(module):
           below)
 
 
+#: 颜色项下拉标签的平均 UTF-8 字节长度上限（缓解弹出框里的宽度截断）。
+#: 实测（4.0.2 / 5.2.2）：改前全部 TARGETS 平均 37.13 字节、改后 28.33；
+#: 当前版本可用项 4.0.2 = 27.47、5.2.2 = 26.19 —— 32 留了余量。
+TARGET_LABEL_AVG_BYTES_MAX = 32.0
+
+#: 「超过 12 个汉字」的条目占总数的比例上限。实测可用项：改前 146/219（4.0.2）、
+#: 152/225（5.2.2），改后 47/219、33/225。
+TARGET_LABEL_LONG_RATIO = 1.0 / 3.0
+
+
+def test_target_item_labels(module):
+    section("颜色项下拉标签（缩短以减少弹出框里的宽度截断）")
+    theme = module.theme
+    context = bpy.context
+    current = theme.current_theme(context)
+    check(current is not None, "能取到当前主题")
+    if current is None:
+        return
+
+    expected_groups = ("按钮 底色", "按钮 文字与图标", "按钮 边框", "按钮 选中底色",
+                       "按钮 选中文字", "按钮 选中边框", "按钮 高亮")
+    check(tuple(theme.WIDGET_GROUPS) == expected_groups,
+          "控件家族的 7 个分组名一个没变（只是下拉里不再重复拼它们）", theme.WIDGET_GROUPS)
+
+    items = theme.target_items(None, context)
+    labels = [item[1] for item in items]
+    check(bool(labels), "颜色项下拉有条目（{} 项）".format(len(labels)))
+    if not labels:
+        return
+    check(all(label.strip() for label in labels), "每个条目的显示文本都非空")
+    repeated = [label for label in labels if label.startswith("按钮 ")]
+    check(not repeated,
+          "控件家族的条目不再重复拼「按钮 xx」分组名（标签本身已写明家族 + 部位）",
+          repeated[:5])
+
+    by_path = dict((item[0], item[1]) for item in items)
+    icon_label = by_path.get("user_interface.icon_object")
+    if icon_label is not None:
+        check(icon_label.startswith("图标颜色 "),
+              "非控件家族的条目仍然带分组前缀（改动只作用于控件家族那批）", icon_label)
+
+    old_labels = ["{} {}".format(group, label) for path, label, group in theme.TARGETS
+                  if theme.resolve(current, path) is not None]
+    old_avg = sum(len(text.encode("utf-8")) for text in old_labels) / float(len(old_labels))
+    new_avg = sum(len(text.encode("utf-8")) for text in labels) / float(len(labels))
+    old_long = sum(1 for text in old_labels if len(text) > 12)
+    new_long = sum(1 for text in labels if len(text) > 12)
+    print("  颜色项标签：{} 项，平均字节 {:.2f} -> {:.2f}；超过 12 汉字的 {} -> {}".format(
+        len(labels), old_avg, new_avg, old_long, new_long))
+    check(new_avg < old_avg,
+          "标签确实变短了（不是把格式又拼回长的）", (old_avg, new_avg))
+    check(new_avg <= TARGET_LABEL_AVG_BYTES_MAX,
+          "标签平均 UTF-8 字节长度 <= {}（改后实测 {:.2f}，改前 {:.2f}）".format(
+              TARGET_LABEL_AVG_BYTES_MAX, new_avg, old_avg))
+    check(new_long <= len(labels) * TARGET_LABEL_LONG_RATIO,
+          "超过 12 汉字的条目 <= 总数的三分之一（改后 {}/{}，改前 {}/{}）".format(
+              new_long, len(labels), old_long, len(labels)))
+
+    simple = type("_Prefs", (object,), {"simple_mode": True})()
+    simple_labels = [item[1] for item in theme.target_items(simple, context)]
+    check(simple_labels and len(simple_labels) <= 40,
+          "简洁模式的短列表仍然 <= 40 项（没有被这次改动影响）", len(simple_labels))
+    check(not [label for label in simple_labels if label.startswith("按钮 ")],
+          "简洁模式下的控件家族条目同样不再重复分组名")
+
+
 def test_save_preferences(module):
     section("功能：保存到偏好设置（算子名 + 真跑一次）")
     # 注意：不能用 hasattr(bpy.ops.wm, "save_userpref") —— 项目已知它对不存在的算子名恒为真
@@ -3234,6 +3300,7 @@ def main():
     run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
     run("主题颜色（N 面板）", test_theme, module)
+    run("颜色项下拉标签（缩短）", test_target_item_labels, module)
     run("预设：标签独立型家族", test_preset_label_families, module)
     run("预设：死亡搁浅", test_preset_death_stranding, module)
     run("预设：视口辅助元素", test_preset_viewport_helpers, module)

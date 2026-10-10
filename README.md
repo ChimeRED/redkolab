@@ -463,18 +463,18 @@ N 面板 ▸ `红红子lab` ▸ 顶部切到 **工具** 页 ▸ **「面板顺�
 
 ### 实测矩阵
 
-同一份 `redkolab-2.12.1.zip`，真机无头测试：真的装包、真启用、真建场景、真跑功能并断言。
-（跑之前清干净隔离沙箱 `%TEMP%\redkolab_tests`，并显式指定被测的包 `-Zip dist\redkolab-2.12.1.zip`。）
+同一份 `redkolab-2.12.2.zip`，真机无头测试：真的装包、真启用、真建场景、真跑功能并断言。
+（跑之前清干净隔离沙箱 `%TEMP%\redkolab_tests`，并显式指定被测的包 `-Zip dist\redkolab-2.12.2.zip`。）
 
 | Blender | 安装入口 | 装成的模块 | 断言 | 结果 |
 | --- | --- | --- | --- | --- |
-| 4.0.2 | 插件页 Install from Disk | `redkolab` | 817 | ✔ |
-| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 817 | ✔ |
-| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 815 | ✔ |
-| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 810 | ✔ |
-| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 808 | ✔ |
+| 4.0.2 | 插件页 Install from Disk | `redkolab` | 828 | ✔ |
+| 4.2.23 LTS | 插件页 Install from Disk | `redkolab` | 828 | ✔ |
+| 4.2.23 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 826 | ✔ |
+| 5.2.2 LTS | 插件页 Install from Disk | `redkolab` | 821 | ✔ |
+| 5.2.2 LTS | 扩展页 Install from Disk | `bl_ext.user_default.redkolab` | 819 | ✔ |
 
-> 断言数 817 / 817 / 815 / 810 / 808 的差别来自安装入口与 Blender 版本，不是少测功能：
+> 断言数 828 / 828 / 826 / 821 / 819 的差别来自安装入口与 Blender 版本，不是少测功能：
 > **扩展页安装**下 Blender 会接管元数据（不再暴露 `bl_info`），测试会跳过 2 项元数据检查
 > （所以 4.2.23 与 5.2.2 的扩展页各比同版本的插件页少 2）；5.x 上另有几条 4.x 独有的断言
 > （时间线当前帧色那几项、4.x 无头环境下 `is_dirty` 恒为真的那一组）换成了对应的 5.x 断言 ——
@@ -483,8 +483,8 @@ N 面板 ▸ `红红子lab` ▸ 顶部切到 **工具** 页 ▸ **「面板顺�
 扩展清单另外用官方校验器验过（4.2.23 LTS 与 5.2.2 LTS 都验，退出码 0）：
 
 ```bash
-blender --factory-startup --command extension validate dist/redkolab-2.12.1.zip
-# -> Success parsing TOML in "dist\redkolab-2.12.1.zip"    # 两个版本输出相同
+blender --factory-startup --command extension validate dist/redkolab-2.12.2.zip
+# -> Success parsing TOML in "dist\redkolab-2.12.2.zip"    # 两个版本输出相同
 ```
 
 ### 关于 2.80 ~ 3.x
@@ -516,7 +516,7 @@ redkolab/
 │  ├─ build_zips.py             打包（默认 nested 布局，可选其他布局做对比）
 │  ├─ check_version.py          版本号一致性检查（发布守门）
 │  ├─ inspect_zip.py            安装包结构自检（发布守门）
-│  ├─ blender_test.py           Blender 内部真机测试（817 项断言，随版本 808~817，含边界情况）
+│  ├─ blender_test.py           Blender 内部真机测试（828 项断言，随版本 819~828，含边界情况）
 │  ├─ run_tests.ps1             在指定 Blender 上跑测试（自动隔离配置目录）
 │  ├─ release.ps1               一键发版：校验 → 升版本 → 本地部署 → 打 tag → 推送
 │  ├─ deploy_local.ps1          把新包复制进本地插件 zip 库并替换旧版本
@@ -616,4 +616,32 @@ powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "D:\其�
 * **侧栏的标签页本身没法用鼠标拖动排序**：那部分是 Blender 的 C 代码绘制并处理鼠标的，
   Python 没有钩子（社区里排标签页也要另装 SIMPLE TABS 之类插件）；而用重新注册面板的方式
   去改别的插件的顺序，实测会让 Blender 4.0 / 4.2 崩溃，所以本插件不做这件事
+* **颜色项下拉可能出现乱码**（只有那个弹出条目框，面板其它中文正常）—— 见下面一小节
 * 许可证：GPL-3.0-or-later（Blender 插件的通行许可）
+
+### 故障排查：颜色项下拉出现乱码怎么办
+
+**现象**：N 面板 ▸ 主题 页 ▸ 进阶 ▸「逐项微调」里的**颜色项下拉**，弹出的条目显示成
+`¤C` / `°ðC` 这类乱码，而同一个面板的其它中文（「逐项微调」「颜色项」「自定义配色」）正常，
+鼠标悬停提示气泡里的路径（`user_interface.wco…`）也正常。
+
+**结论：不是数据坏了**（包里的源码是合法 UTF-8、无 BOM，按 UTF-8 解码「底色」这类中文完全正常），
+而是那个**弹出条目框的绘制层**问题：条目多了以后列宽有限，Blender 会把放不下的条目标签
+**按像素宽度从中间截断**（`interface_widgets.cc` 里的 `text_clip_middle` / `text_clip_middle_ex`），
+中文字被切在半个字上时，落单的多字节会被画成乱码 —— 那个函数里就留着
+`TODO: proper handling of non UTF8 strings` 的注释，说明 Blender 自己也承认这条路径对非 ASCII 不完善。
+
+本版已把控件家族那批条目的**显示文本缩短**（不再重复拼「按钮 xx」分组名）：全部 284 个条目的
+平均标签从 37.1 字节降到 28.3 字节、「超过 12 个汉字」的条目从 197 项降到 78 项（当前版本可用项
+上分别是从 37.1 → 27.5 字节、146 → 47 项）。需要截断的条目因此少了很多，但这是**缓解**、
+不是根治（根治在 Blender / 字体侧），所以下面两步值得你自己试一次：
+
+1. **打开「简洁模式」**（主题页里的开关）：颜色项从二百多项缩到 40 项以内，弹出框变短，多半不再需要截断；
+2. **清空自定义界面字体**：`编辑 ▸ 偏好设置 ▸ 界面 ▸ 界面字体` 把文件路径清掉（改用 Blender 自带字体）再看一次 ——
+   自定义字体缺字或字宽异常时，这类截断问题更容易暴露。
+
+另外两条不受影响的路子：
+
+* 改某个**家族**的整组颜色，用「**控件颜色分开设置**」（家族 + 7 个部位：底色 / 图标与文字 / 边框 /
+  选中底色 / 选中文字 / 选中边框 / 高亮条，中文显示正常）；
+* 想按路径逐个核对，看鼠标悬停的提示气泡，或用「全局按钮配色」「自定义配色」这两块。
