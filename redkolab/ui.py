@@ -359,11 +359,14 @@ class HHZ_MT_pie(bpy.types.Menu):
         layout = self.layout
         pie = layout.menu_pie()
 
-        # 四个方向：左 / 右 / 下 / 上 —— 插件设置已按需求挪到 N 面板，不再占饼菜单
+        # 六个方向：左 / 右 / 下 / 上 / 左上 / 右上 —— 插件设置已按需求挪到
+        # N 面板，不再占饼菜单
         pie.operator("hhz.remove_all_materials", icon='MATERIAL')
         pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')
         pie.operator("hhz.remove_all_modifiers", icon='TRASH')
         pie.operator("hhz.stairs", icon='MOD_ARRAY')
+        pie.operator("hhz.flip_normals", icon='NORMALS_FACE')
+        pie.operator("hhz.toggle_face_orientation", icon='OVERLAY')
 
 
 # ------------------------------------------------------------------- N 面板
@@ -391,6 +394,14 @@ class HHZ_PT_main(bpy.types.Panel):
         column.separator()
         column.operator("hhz.stairs", icon='MOD_ARRAY')
         layout.label(text="一键楼梯：鼠标换方向 滚轮改节数", icon='INFO')
+
+        # 翻面 / 检测反面 / 查看面朝向放在同一个 column 里、按钮相邻（没有新增面板）
+        column.separator()
+        column.operator("hhz.flip_normals", icon='NORMALS_FACE')
+        column.operator("hhz.detect_flipped", icon='INFO')
+        column.operator("hhz.toggle_face_orientation", icon='OVERLAY')
+        layout.label(text="检测：闭合网格看体积 非闭合只报疑似", icon='INFO')
+        layout.label(text="查看面朝向：朝外蓝 朝内红（再点一次收起）", icon='INFO')
 
         layout.separator()
         if context.mode != 'OBJECT':

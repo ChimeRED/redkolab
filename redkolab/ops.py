@@ -1,18 +1,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """红红子lab 功能算符
 
-三个核心功能（都作用在「选中的物体」，没选中时作用在活动物体）：
+核心功能（都作用在「选中的物体」，没选中时作用在活动物体，目标机制见
+``compat.get_target_objects``，不额外引入设置项）：
 
 * :class:`HHZ_OT_remove_all_materials`  一键删除所有材质
 * :class:`HHZ_OT_apply_all_modifiers`   一键应用所有修改器
 * :class:`HHZ_OT_remove_all_modifiers`  一键删除所有修改器
+* :class:`HHZ_OT_flip_normals`          一键翻面（整体翻转网格所有面的朝向）
+* :class:`HHZ_OT_detect_flipped`        检测是否有物体整体翻面（只读，不改任何数据）
 
 另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键、
 检查并修复缺失文件，以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
 """
 
+import math
 import os
 
+import bmesh
 import bpy
 
 from . import compat, layout, panels, stairs, theme, ui
@@ -311,6 +316,580 @@ class HHZ_OT_remove_all_modifiers(_BaseTargetsOperator):
                 {'INFO'},
                 _join_notes(["已从 {} 个物体删除 {} 个修改器".format(changed, removed)] + notes),
             )
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------- 一键翻面
+
+#: 面朝向的判定结果（`detect_flip` / `_flip_verdict` 的返回值）
+FACE_ORIENTATION_FLIPPED = "flipped"    #: 可靠结论：整体翻面
+FACE_ORIENTATION_NORMAL = "normal"      #: 可靠结论：朝向正常
+FACE_ORIENTATION_SUSPECT = "suspect"    #: 只敢说「疑似」（非闭合网格的启发式）
+FACE_ORIENTATION_UNKNOWN = "unknown"    #: 判不了（没有面数据等）
+
+
+def score_threshold(coordinates):
+    """闭合性 / 体积判定的长度尺度。
+
+    用包围盒对角线，空网格或退化网格退化成 1.0，保证阈值不是 0。
+    """
+    if not coordinates:
+        return 1.0
+    low = [float("inf")] * 3
+    high = [float("-inf")] * 3
+    for coordinate in coordinates:
+        for axis in range(3):
+            value = float(coordinate[axis])
+            if value < low[axis]:
+                low[axis] = value
+            if value > high[axis]:
+                high[axis] = value
+    span = 0.0
+    for axis in range(3):
+        span += (high[axis] - low[axis]) ** 2
+    return math.sqrt(span) or 1.0
+
+
+def _signed_volume(coordinates, faces):
+    """有符号体积：**外向法线**的闭合网格为正（散度定理的三角扇展开）。
+
+    只需要「顶点坐标 + 多边形顶点索引」，可以脱离 bpy 数据块单独测试。
+    """
+    total = 0.0
+    for face in faces:
+        indices = list(face)
+        if len(indices) < 3:
+            continue
+        anchor = coordinates[indices[0]]
+        for position in range(1, len(indices) - 1):
+            second = coordinates[indices[position]]
+            third = coordinates[indices[position + 1]]
+            total += (
+                float(anchor[0]) * (float(second[1]) * float(third[2]) - float(second[2]) * float(third[1]))
+                - float(anchor[1]) * (float(second[0]) * float(third[2]) - float(second[2]) * float(third[0]))
+                + float(anchor[2]) * (float(second[0]) * float(third[1]) - float(second[1]) * float(third[0]))
+            )
+    return total / 6.0
+
+
+def _is_closed_manifold(faces):
+    """所有边恰好被两个面用到 —— 只有主判据（有符号体积）在这个前提下才成立。"""
+    counts = {}
+    for face in faces:
+        indices = [int(index) for index in face]
+        length = len(indices)
+        if length < 3:
+            continue
+        for position in range(length):
+            first = indices[position]
+            second = indices[(position + 1) % length]
+            edge = (first, second) if first < second else (second, first)
+            counts[edge] = counts.get(edge, 0) + 1
+    if not counts:
+        return False
+    return all(count == 2 for count in counts.values())
+
+
+def _face_center(coordinates, face):
+    indices = list(face)
+    total = [0.0, 0.0, 0.0]
+    for index in indices:
+        coordinate = coordinates[index]
+        total[0] += float(coordinate[0])
+        total[1] += float(coordinate[1])
+        total[2] += float(coordinate[2])
+    count = max(len(indices), 1)
+    return (total[0] / count, total[1] / count, total[2] / count)
+
+
+def _centroid(coordinates):
+    total = [0.0, 0.0, 0.0]
+    for coordinate in coordinates:
+        total[0] += float(coordinate[0])
+        total[1] += float(coordinate[1])
+        total[2] += float(coordinate[2])
+    count = max(len(coordinates), 1)
+    return (total[0] / count, total[1] / count, total[2] / count)
+
+
+def _newell_normal(coordinates, face):
+    """多边形法线（Newell 法，与网格自带的法线定义一致）。"""
+    indices = list(face)
+    normal = [0.0, 0.0, 0.0]
+    length = len(indices)
+    for position in range(length):
+        current = coordinates[indices[position]]
+        following = coordinates[indices[(position + 1) % length]]
+        normal[0] += (float(current[1]) - float(following[1])) * (float(current[2]) + float(following[2]))
+        normal[1] += (float(current[2]) - float(following[2])) * (float(current[0]) + float(following[0]))
+        normal[2] += (float(current[0]) - float(following[0])) * (float(current[1]) + float(following[1]))
+    return normal
+
+
+def _inward_face_ratio(coordinates, faces):
+    """「质心朝外」启发式：法线与「质心 -> 面心」同向的面算朝内。
+
+    返回 ``(比例, 参与统计的面数)``。这是启发式，不是几何事实（见
+    :func:`detect_flip` 的说明）。
+    """
+    centroid = _centroid(coordinates)
+    inward = 0
+    considered = 0
+    for face in faces:
+        indices = list(face)
+        if len(indices) < 3:
+            continue
+        center = _face_center(coordinates, face)
+        outward = [center[0] - centroid[0], center[1] - centroid[1], center[2] - centroid[2]]
+        length = math.sqrt(outward[0] ** 2 + outward[1] ** 2 + outward[2] ** 2)
+        if length <= 1e-12:
+            continue
+        normal = _newell_normal(coordinates, face)
+        dot = (
+            normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2]
+        ) / length
+        considered += 1
+        if dot < 0.0:
+            inward += 1
+    if not considered:
+        return 0.0, 0
+    return inward / considered, considered
+
+
+def detect_flip(coordinates, faces, closed=None):
+    """判断一组网格数据是否整体翻面 —— **纯函数**，不碰 bpy。
+
+    返回 ``{"verdict", "criterion", "volume", "is_closed", "faces",
+    "inward_ratio", "inward_faces", "reliable"}``。
+
+    两份判据，可靠性完全不同：
+
+    1. **闭合网格（每条边恰好两个面）→ 有符号体积**。外向法线的闭合网格
+       体积为正，整体翻面后为负。这是几何事实，判为 ``flipped`` / ``normal``。
+    2. **非闭合网格 → 「质心朝外」启发式**。统计法线指向质心的面（内指面）
+       占比，超过 ``FACE_SUSPECT_RATIO`` 就报 ``suspect``。**它只是启发式**：
+       整体翻面的空心壳、法线一致向内的球都能被它看出来，但
+       * 凹壳（例如 L 形、甜甜圈）里「朝质心」的面本来就可能过半 → 误报；
+       * 平面 / 单层结构没有内外之分 → 无意义；
+       * 非流形的碎面组合更是随口一说。
+       所以非闭合一律标成「疑似」，**不得当成确定结论**。
+
+    空数据（没有顶点或没有面）判为 ``unknown``。
+    """
+    coordinates = list(coordinates or ())
+    faces = [list(face) for face in (faces or ())]
+    usable = [face for face in faces if len(face) >= 3]
+
+    result = {
+        "verdict": FACE_ORIENTATION_UNKNOWN,
+        "criterion": "",
+        "volume": None,
+        "is_closed": None,
+        "faces": len(usable),
+        "inward_ratio": None,
+        "inward_faces": 0,
+        "reliable": False,
+    }
+    if not coordinates or not usable:
+        result["criterion"] = "没有面数据，无法判定"
+        return result
+
+    if closed is None:
+        closed = _is_closed_manifold(usable)
+    result["is_closed"] = bool(closed)
+
+    scale = score_threshold(coordinates)
+    volume = _signed_volume(coordinates, usable)
+    tolerance = (scale ** 3) * VOLUME_ZERO_RATIO
+
+    if closed:
+        result["criterion"] = "闭合网格：有符号体积"
+        if math.isfinite(volume) and volume < -tolerance:
+            result["volume"] = volume
+            result["verdict"] = FACE_ORIENTATION_FLIPPED
+            result["reliable"] = True
+            return result
+        if math.isfinite(volume) and volume > tolerance:
+            result["volume"] = volume
+            result["verdict"] = FACE_ORIENTATION_NORMAL
+            result["reliable"] = True
+            return result
+        # 闭合但体积约等于 0（自相交、零体积壳）：体积判不出方向，
+        # 但**仍能**用启发式看一眼，结论照样只是「疑似」。
+        result["volume"] = volume if math.isfinite(volume) else None
+
+    ratio, considered = _inward_face_ratio(coordinates, usable)
+    result["inward_ratio"] = ratio
+    result["inward_faces"] = int(round(ratio * considered))
+    result["faces"] = considered or len(usable)
+    if considered and ratio >= FACE_SUSPECT_RATIO:
+        result["verdict"] = FACE_ORIENTATION_SUSPECT
+        if closed:
+            result["criterion"] = "闭合但体积约等于 0：改用「质心朝外」启发式（疑似）"
+        else:
+            result["criterion"] = "非闭合网格：「质心朝外」启发式（疑似）"
+    else:
+        result["verdict"] = FACE_ORIENTATION_NORMAL
+        result["criterion"] = (
+            "闭合但体积约等于 0 且内指面不占多数（按启发式判正常）"
+            if closed else "非闭合网格：内指面不占多数（按启发式判正常，但不可靠）"
+        )
+    return result
+
+
+def detect_objects_flip(objects):
+    """对一串物体跑 :func:`detect_flip`，返回 ``(结果列表, 跳过计数)``。
+
+    跳过 = 非网格 / 空网格 / 没有面。**只读**：不写邮箱、不改选择、不动网格。
+    """
+    results = []
+    skipped = 0
+    for obj in objects:
+        coordinates, faces = mesh_geometry(obj)
+        if not faces:
+            skipped += 1
+            continue
+        verdict = detect_flip(coordinates, faces)
+        verdict["name"] = obj.name
+        results.append(verdict)
+    return results, skipped
+
+
+def describe_flip_result(result):
+    """把一条判定结果压成一行中文说明（报告与控制台共用）。"""
+    verdict = result.get("verdict")
+    if verdict == FACE_ORIENTATION_FLIPPED:
+        return "整体翻面（{} {:.6g}）".format(result.get("criterion") or "", result.get("volume") or 0.0)
+    if verdict == FACE_ORIENTATION_SUSPECT:
+        return "疑似翻面（{} 内指面 {:.0%}）".format(
+            result.get("criterion") or "", result.get("inward_ratio") or 0.0)
+    if verdict == FACE_ORIENTATION_NORMAL:
+        return "正常（{}）".format(result.get("criterion") or "")
+    return "无法判定（{}）".format(result.get("criterion") or "")
+
+
+def mesh_geometry(obj):
+    """取出物体的 ``(顶点坐标列表, 面顶点索引列表)``；非网格返回 ``([], [])``。
+
+    只读操作：优先用只读的 ``to_mesh()``，拿不到时退回 ``data`` 本体
+    （此时只取顶点坐标与 polygon 索引，不算、也不写任何网格数据）。
+    """
+    if getattr(obj, "type", "") != 'MESH' or getattr(obj, "data", None) is None:
+        return [], []
+    mesh = None
+    temporary = False
+    try:
+        mesh = obj.to_mesh()
+        temporary = mesh is not None
+    except Exception:
+        mesh = None
+    if mesh is None:
+        mesh = obj.data
+        temporary = False
+    try:
+        coordinates = [tuple(vertex.co) for vertex in mesh.vertices]
+        faces = [tuple(polygon.vertices) for polygon in mesh.polygons]
+        return coordinates, faces
+    except Exception:
+        return [], []
+    finally:
+        if temporary:
+            try:
+                obj.to_mesh_clear()
+            except Exception:
+                pass
+
+
+def flip_faces_in_place(mesh):
+    """用 bmesh 原地翻转网格的所有面，返回翻过的面数。
+
+    不进入编辑模式（所以不会打扰用户、也不会踩编辑模式快捷键），
+    不动 UV / 顶点组 / 材质槽 —— ``bmesh.ops.reverse_faces`` 只重排每个面的
+    顶点顺序，这些图层是按「面 / 顶点」索引存的，不受影响；自定义拆分法线
+    数据（corner 层）同样保留，只是它的方向会跟着面一起翻过去。
+
+    ``bmesh.ops.reverse_faces`` 只接受 ``faces`` 与 ``flip_multires`` 两个参数
+    （4.5.14 实测：传 ``flip_uvs`` 会直接 ``TypeError``），所以 UV 由它原样保留。
+    """
+    bmesh_module = bmesh
+    mesh_bmesh = bmesh_module.new()
+    try:
+        mesh_bmesh.from_mesh(mesh)
+        targets = [face for face in mesh_bmesh.faces]
+        if not targets:
+            return 0
+        bmesh_module.ops.reverse_faces(
+            mesh_bmesh, faces=targets, flip_multires=False)
+        mesh_bmesh.to_mesh(mesh)
+    finally:
+        mesh_bmesh.free()
+    mesh.update()
+    return len(targets)
+
+def _flip_object_mesh(obj):
+    """翻一个物体的网格，返回 ``(翻过的面数, 是否做了单用户化)``。
+
+    多用户网格先复制成单用户（复用 ``compat.ensure_single_user_data``），
+    否则会把共享同一份网格数据的**其它物体**一起改掉。
+    """
+    if getattr(obj, "type", "") != 'MESH' or getattr(obj, "data", None) is None:
+        return 0, False
+    became_single_user = compat.ensure_single_user_data(obj)
+    faces = flip_faces_in_place(obj.data)
+    return faces, became_single_user
+
+class HHZ_OT_flip_normals(_BaseTargetsOperator):
+    bl_idname = "hhz.flip_normals"
+    bl_label = "一键翻面"
+    bl_description = (
+        "把选中物体（没选中时是活动物体）的网格所有面整体翻转，"
+        "即把朝内的法线翻成朝外；多用户网格会先复制成单用户，非网格物体跳过"
+    )
+
+    def execute(self, context):
+        global _LAST_RUN
+        usable, skipped_library = _editable_targets(context)
+        if not usable:
+            self.report({'WARNING'}, "没有可处理的物体（库链接物体已跳过）")
+            return {'CANCELLED'}
+
+        flipped = 0
+        faces_total = 0
+        skipped_mesh = 0
+        skipped_empty = 0
+        single_user = 0
+
+        for obj in usable:
+            if getattr(obj, "type", "") != 'MESH' or getattr(obj, "data", None) is None:
+                skipped_mesh += 1
+                continue
+            if not len(getattr(obj.data, "polygons", ()) or ()):
+                skipped_empty += 1
+                continue
+            faces, became_single_user = _flip_object_mesh(obj)
+            if became_single_user:
+                single_user += 1
+            if faces:
+                flipped += 1
+                faces_total += faces
+
+        _LAST_RUN = {
+            "flipped": flipped,
+            "faces": faces_total,
+            "skipped_non_mesh": skipped_mesh,
+            "skipped_empty": skipped_empty,
+            "single_user": single_user,
+            "skipped_library": len(skipped_library),
+        }
+
+        notes = []
+        if skipped_mesh:
+            notes.append("跳过 {} 个非网格物体".format(skipped_mesh))
+        if skipped_empty:
+            notes.append("跳过 {} 个没有面的网格".format(skipped_empty))
+        if single_user:
+            notes.append("其中 {} 个多用户网格已复制成单用户".format(single_user))
+        if skipped_library:
+            notes.append("跳过 {} 个库链接物体".format(len(skipped_library)))
+
+        if flipped == 0:
+            self.report({'INFO'}, _join_notes(["没有可翻面的网格"] + notes))
+        else:
+            self.report({'INFO'}, _join_notes(
+                ["已翻面 {} 个 / 跳过 {} 个（非网格）".format(flipped, skipped_mesh)]
+                + ["（共 {} 个面）".format(faces_total)]
+                + notes))
+        return {'FINISHED'}
+
+
+# ------------------------------------------------- 检测「是否有物体有反面」
+
+#: 非闭合网格启发式：内指面占到这么多就报「疑似」
+FACE_SUSPECT_RATIO = 0.5
+
+#: 有符号体积小于「包围盒对角线³ × 这个比例」就算约等于 0（判不了方向）
+VOLUME_ZERO_RATIO = 1e-6
+
+#: 检测算符最近一次的汇总结果（真机测试直接断言它，不必去解析 report 文本）
+_LAST_RUN = {}
+
+
+class HHZ_OT_detect_flipped(_BaseTargetsOperator):
+    bl_idname = "hhz.detect_flipped"
+    bl_label = "检测是否有反面"
+    bl_description = (
+        "只读检查：闭合网格用有符号体积判断是否整体翻面（可靠），"
+        "非闭合网格用「质心朝外」启发式给出疑似结果；不修改任何网格与选择"
+    )
+
+    def execute(self, context):
+        global _LAST_RUN
+        usable, skipped_library = _editable_targets(context)
+        if not usable:
+            self.report({'WARNING'}, "没有可检测的物体（库链接物体已跳过）")
+            return {'CANCELLED'}
+
+        results, skipped = detect_objects_flip(usable)
+
+        counts = {
+            FACE_ORIENTATION_FLIPPED: 0,
+            FACE_ORIENTATION_SUSPECT: 0,
+            FACE_ORIENTATION_NORMAL: 0,
+            FACE_ORIENTATION_UNKNOWN: 0,
+        }
+        for result in results:
+            counts[result.get("verdict", FACE_ORIENTATION_UNKNOWN)] += 1
+
+        total_skipped = skipped + len(skipped_library)
+        _LAST_RUN = {
+            "detected": len(results),
+            "flipped": counts[FACE_ORIENTATION_FLIPPED],
+            "suspect": counts[FACE_ORIENTATION_SUSPECT],
+            "normal": counts[FACE_ORIENTATION_NORMAL],
+            "unknown": counts[FACE_ORIENTATION_UNKNOWN],
+            "skipped": total_skipped,
+            "skipped_non_mesh": skipped,
+            "skipped_library": len(skipped_library),
+            "results": [dict(result) for result in results],
+        }
+
+        # 逐个物体打到系统控制台：判据、体积或内指面比例都要能看到
+        for result in results:
+            print("[{} 检测] {}：{}".format(
+                compat.ADDON_NAME, result.get("name", "?"), describe_flip_result(result)))
+            if result.get("volume") is not None:
+                print("[{} 检测]     有符号体积 {:.6g}（闭合网格，外向法线为正）".format(
+                    compat.ADDON_NAME, result["volume"]))
+            if result.get("inward_ratio") is not None:
+                print("[{} 检测]     内指面 {}/{} = {:.1%}（非闭合时只作「疑似」参考）".format(
+                    compat.ADDON_NAME, result.get("inward_faces", 0), result.get("faces", 0),
+                    result["inward_ratio"]))
+
+        summary = "检测 {} 个：整体翻面 {} 个 / 疑似 {} 个 / 正常 {} 个 / 跳过 {} 个".format(
+            len(results) + total_skipped, counts[FACE_ORIENTATION_FLIPPED],
+            counts[FACE_ORIENTATION_SUSPECT], counts[FACE_ORIENTATION_NORMAL], total_skipped)
+
+        notes = []
+        if counts[FACE_ORIENTATION_UNKNOWN]:
+            notes.append("{} 个无法判定".format(counts[FACE_ORIENTATION_UNKNOWN]))
+        if skipped:
+            notes.append("跳过 {} 个非网格或空网格".format(skipped))
+        if skipped_library:
+            notes.append("跳过 {} 个库链接物体".format(len(skipped_library)))
+        notes.append("非闭合网格只能给出「疑似」（质心朝外是启发式，凹壳会误报）")
+
+        level = {'INFO'}
+        if counts[FACE_ORIENTATION_FLIPPED]:
+            level = {'WARNING'}
+        self.report(level, _join_notes([summary] + notes))
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------- 一键查看面朝向
+
+#: 3D 视口叠加层里「面朝向」的开关属性名（Blender 自带，不是本插件的设置项）
+FACE_ORIENTATION_PROPERTY = "show_face_orientation"
+
+
+def next_face_orientation_state(states):
+    """由一组「当前开关状态」算出切换后的目标状态 —— **纯函数**。
+
+    语义：只要还有任何一个视口是关着的，就**全部打开**；全部已经打开才**全部关闭**。
+    这样点一次就能看到面朝向、再点一次就收起来。
+
+    空输入返回 ``True``（没有视口可看时按「要打开」处理，交给调用方去报告
+    找不到视口）。逻辑本身与 bpy 上下文完全解耦，所以无头环境也能完整测。
+    """
+    values = [bool(state) for state in (states or ())]
+    if not values:
+        return True
+    return not all(values)
+
+
+def _viewport_overlays(context):
+    """当前屏幕（``context.screen``）里所有 3D 视口的叠加层设置。
+
+    取的是**当前屏幕的全部 3D 视口**，不是只看鼠标所在的那一个 ——
+    所以从饼菜单点、在任何一个 3D 视口上都能用。
+    ``--background`` 下没有 ``context.screen``（``bpy.context.screen`` 是 None），
+    这时返回空列表，由调用方给出友好提示。
+    """
+    overlays = []
+    screen = getattr(context, "screen", None)
+    if screen is None:
+        return overlays
+    try:
+        areas = list(screen.areas)
+    except Exception:
+        return overlays
+    for area in areas:
+        if getattr(area, "type", "") != 'VIEW_3D':
+            continue
+        space = None
+        try:
+            for candidate in area.spaces:
+                if getattr(candidate, "type", "") == 'VIEW_3D':
+                    space = candidate
+                    break
+        except Exception:
+            space = None
+        if space is None:
+            continue
+        overlay = getattr(space, "overlay", None)
+        if overlay is None:
+            continue
+        overlays.append(overlay)
+    return overlays
+
+
+class HHZ_OT_toggle_face_orientation(bpy.types.Operator):
+    bl_idname = "hhz.toggle_face_orientation"
+    bl_label = "一键查看面朝向"
+    bl_description = (
+        "切换当前屏幕里所有 3D 视口的面朝向叠加层（朝外蓝、朝内红）："
+        "只要有视口是关着的就全部打开，全部已打开才全部关闭"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        try:
+            return getattr(context, "screen", None) is not None
+        except Exception:
+            return False
+
+    def execute(self, context):
+        overlays = _viewport_overlays(context)
+        if not overlays:
+            self.report({'WARNING'}, "当前上下文没有 3D 视口")
+            return {'CANCELLED'}
+
+        current = []
+        for overlay in overlays:
+            try:
+                current.append(bool(getattr(overlay, FACE_ORIENTATION_PROPERTY)))
+            except Exception:
+                current.append(False)
+
+        target = next_face_orientation_state(current)
+        changed = 0
+        for overlay in overlays:
+            try:
+                setattr(overlay, FACE_ORIENTATION_PROPERTY, target)
+                changed += 1
+            except Exception:
+                pass
+
+        if changed == 0:
+            self.report({'WARNING'}, "当前上下文没有 3D 视口")
+            return {'CANCELLED'}
+
+        # 切换可能发生在非 3D 区域的上下文里，全部视口都要重画
+        compat.tag_redraw(context)
+        if target:
+            self.report({'INFO'}, "已打开 {} 个视口的面朝向".format(changed))
+        else:
+            self.report({'INFO'}, "已关闭 {} 个视口的面朝向".format(changed))
         return {'FINISHED'}
 
 

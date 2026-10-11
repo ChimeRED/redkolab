@@ -503,6 +503,18 @@ def test_registration(module_name, module):
         check(operator_class(module, idname) is not None,
               "算符 hhz.{} 已注册".format(idname))
 
+    # 2.16.0 新增的三个算符：已注册 + 可调用 + bl_idname 精确比对
+    for idname in ("flip_normals", "detect_flipped", "toggle_face_orientation"):
+        operator = operator_class(module, idname)
+        check(operator is not None, "算符 hhz.{} 已注册".format(idname))
+        if operator is None:
+            continue
+        check(operator.bl_idname == "hhz.{}".format(idname),
+              "hhz.{} 的 bl_idname 精确匹配".format(idname), operator.bl_idname)
+        call = getattr(getattr(bpy.ops, "hhz", None), idname, None)
+        check(call is not None, "bpy.ops.hhz.{} 可调用".format(idname))
+        check(callable(call), "bpy.ops.hhz.{} 是调用对象".format(idname))
+
     check(module.compat.PACKAGE == module_name,
           "compat.PACKAGE 与真实模块名一致", module.compat.PACKAGE)
     check(module.compat.ADDON_ID == PACKAGE_HINT,
@@ -879,6 +891,546 @@ def test_remove_modifiers():
     select_only([plain])
     result = bpy.ops.hhz.remove_all_modifiers()
     check(result == {'FINISHED'}, "没有修改器时正常结束", result)
+
+
+# ---------------------------------------- 功能：一键翻面 / 检测是否有反面
+
+#: 被测插件模块（翻面 / 检测用例里给纯函数辅助用）
+module_under_test = None
+
+
+def reverse_winding_sample(mesh):
+    """把立方体每个面的顶点顺序倒过来（精确造出「法线朝内」的样本）。
+
+    不调用被测代码 —— 默认立方体的 6 个面按「顶面 / 底面 / 四个侧面」成对
+    反向缠绕，全部倒置相当于整体翻面。
+    """
+    for polygon in mesh.polygons:
+        polygon.vertices = list(reversed(list(polygon.vertices)))
+
+
+def cube_face_data(obj):
+    """``(顶点坐标, 面索引)`` 立方体数据，供纯函数判别使用。"""
+    mesh = obj.data
+    coordinates = [tuple(vertex.co) for vertex in mesh.vertices]
+    faces = [tuple(polygon.vertices) for polygon in mesh.polygons]
+    return coordinates, faces
+
+
+def signed_volume_of(obj):
+    """直接调用被测模块的纯函数算有符号体积（外向法线为正）。"""
+    return module_under_test.ops._signed_volume(*cube_face_data(obj))
+
+
+def pure_verdict(obj):
+    """纯函数判别结果（不经过算符、不经过 UI）。"""
+    return module_under_test.ops.detect_flip(*cube_face_data(obj))
+
+
+def polygonal_key(mesh):
+    """网格的面缠绕指纹 —— 用来判断多用户网格有没有被连带改动。"""
+    return [tuple(polygon.vertices) for polygon in mesh.polygons]
+
+
+def make_light(name):
+    data = bpy.data.lights.new(name + "Data", type='POINT')
+    light = bpy.data.objects.new(name, data)
+    bpy.context.collection.objects.link(light)
+    return light
+
+
+def test_flip_normals_pure(module):
+    section("纯函数：有符号体积与面朝向判定（不启动算符）")
+    ops = module.ops
+    reset_scene()
+    cube = add_cube("CubeVolume")
+    coordinates, faces = cube_face_data(cube)
+
+    check(len(faces) == 6, "立方体样本有 6 个面", len(faces))
+    check(ops._is_closed_manifold(faces) is True, "立方体被判为闭合（每条边恰好两个面）")
+
+    outward = ops._signed_volume(coordinates, faces)
+    check(abs(outward - 8.0) < 1e-6,
+          "外向法线立方体（棱长 2）的有符号体积 = +8", outward)
+
+    reversed_faces = [tuple(reversed(face)) for face in faces]
+    inverted = ops._signed_volume(coordinates, reversed_faces)
+    check(abs(inverted + 8.0) < 1e-6,
+          "缠绕反过来之后有符号体积 = -8（判据成对）", inverted)
+
+    normal = ops.detect_flip(coordinates, faces)
+    check(normal["verdict"] == ops.FACE_ORIENTATION_NORMAL,
+          "纯函数：外向法线 -> 正常", normal)
+    check(normal["reliable"] is True, "闭合网格的结论是可靠结论（不是疑似）")
+    check(normal["criterion"].startswith("闭合网格"), "判据写明是闭合网格的有符号体积",
+          normal["criterion"])
+
+    flipped = ops.detect_flip(coordinates, reversed_faces)
+    check(flipped["verdict"] == ops.FACE_ORIENTATION_FLIPPED,
+          "纯函数：反向缠绕 -> 整体翻面", flipped)
+    check(flipped["volume"] is not None and flipped["volume"] < 0,
+          "整体翻面时报告的体积为负", flipped["volume"])
+
+    # 非闭合：开口盒子（5 个面 —— 去掉一个面；注意比对的是**反向**后的那一份）
+    removed = tuple(reversed(faces[0]))
+    open_faces = [face for face in reversed_faces if face != removed]
+    check(len(open_faces) == 5, "开口盒子样本剩 5 个面", len(open_faces))
+    check(ops._is_closed_manifold(open_faces) is False, "开口盒子被判为非闭合")
+    suspect = ops.detect_flip(coordinates, open_faces)
+    check(suspect["verdict"] in (ops.FACE_ORIENTATION_SUSPECT, ops.FACE_ORIENTATION_NORMAL),
+          "非闭合网格只给「疑似」或「按启发式判正常」，绝不给可靠结论", suspect["verdict"])
+    check(suspect["reliable"] is False, "非闭合网格的结论一律标为不可靠")
+    check("疑似" in suspect["criterion"] or "启发式" in suspect["criterion"],
+          "非闭合的判据文本写明是启发式", suspect["criterion"])
+    check(suspect["inward_ratio"] is not None, "非闭合时报出内指面比例",
+          suspect["inward_ratio"])
+
+    unknown = ops.detect_flip([], [])
+    check(unknown["verdict"] == ops.FACE_ORIENTATION_UNKNOWN, "空数据判为无法判定", unknown)
+    check(ops.detect_flip([(0.0, 0.0, 0.0)], [])["verdict"] == ops.FACE_ORIENTATION_UNKNOWN,
+          "没有面的网格判为无法判定")
+    check(ops.score_threshold([]) == 1.0, "空数据的长度尺度退化为 1.0（阈值不为 0）",
+          ops.score_threshold([]))
+
+    thin = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (2.0, 2.0, 0.0), (0.0, 2.0, 0.0)]
+    planar = ops.detect_flip(thin, [(0, 1, 2, 3)])
+    check(planar["volume"] is None or abs(planar["volume"]) < 1e-9,
+          "单张平面的有符号体积约等于 0（非闭合时干脆不上报体积）", planar["volume"])
+    check(planar["verdict"] in (ops.FACE_ORIENTATION_SUSPECT, ops.FACE_ORIENTATION_NORMAL),
+          "零体积结构不会给出「整体翻面」这种确定结论", planar["verdict"])
+    check(abs(ops._signed_volume(thin, [(0, 1, 2, 3)])) < 1e-9,
+          "纯函数层面：平面的有符号体积确实约等于 0")
+
+
+def test_flip_normals(module):
+    global module_under_test
+    module_under_test = module
+    section("功能：一键翻面（bmesh 原地翻面 + 单用户化）")
+    ops = module.ops
+    reset_scene()
+
+    # ---- 单个立方体：算符真的把面翻过来了（判据用纯函数）----
+    cube = add_cube("CubeFlip")
+    select_only([cube])
+    before = signed_volume_of(cube)
+    result = bpy.ops.hhz.flip_normals()
+    check(result == {'FINISHED'}, "算符返回 FINISHED", result)
+    check(before > 0, "翻面前是外向法线（体积为正）", before)
+    after = signed_volume_of(cube)
+    check(after < 0, "翻面后有符号体积变负（面整体翻转）", after)
+    check(abs(after + before) < 1e-6, "体积只是变了符号，几何没被改坏",
+          "{} -> {}".format(before, after))
+    check(len(cube.data.polygons) == 6, "面数不变（没有增删几何）", len(cube.data.polygons))
+    check(len(cube.data.vertices) == 8, "顶点数不变", len(cube.data.vertices))
+    check(ops._LAST_RUN.get("flipped") == 1, "汇总里的「翻面 N 个」= 1",
+          ops._LAST_RUN)
+    check(ops._LAST_RUN.get("skipped_non_mesh") == 0, "没有非网格物体被跳过",
+          ops._LAST_RUN)
+
+    # ---- UV 不被改坏（UV 是 per-loop 存的，面缠绕反转后逐个 loop 的顺序会跟着
+    #      重排，但**每个顶点的 UV 值仍然贴在同一个顶点上**，所以断言值的集合不变）----
+    uv_layer = cube.data.uv_layers.new(name="HHZFlipUV")
+    uv_layer.data[0].uv = (0.111, 0.222)
+    uv_before = sorted(tuple(round(float(component), 6) for component in item.uv)
+                       for item in cube.data.uv_layers["HHZFlipUV"].data)
+    check(len(uv_before) == 24, "立方体上有 24 个 UV loop 可供核对", len(uv_before))
+    select_only([cube])
+    bpy.ops.hhz.flip_normals()
+    uv_after = sorted(tuple(round(float(component), 6) for component in item.uv)
+                      for item in cube.data.uv_layers["HHZFlipUV"].data)
+    check(uv_after == uv_before,
+          "翻面后 UV 值一个不少、没有被重写成别的坐标（只是 loop 顺序跟着面重排）",
+          (uv_before[:2], uv_after[:2]))
+    check([layer.name for layer in cube.data.uv_layers] == ["UVMap", "HHZFlipUV"],
+          "翻面后 UV 图层本身还在",
+          [layer.name for layer in cube.data.uv_layers])
+
+    # ---- 顶点组不被动过 ----
+    group = cube.vertex_groups.new(name="HHZFlipGroup")
+    group.add([0, 1, 2], 0.5, 'REPLACE')
+    weights_before = sorted(
+        (vertex.index, element.group, element.weight)
+        for vertex in cube.data.vertices for element in vertex.groups)
+    select_only([cube])
+    bpy.ops.hhz.flip_normals()
+    weights_after = sorted(
+        (vertex.index, element.group, element.weight)
+        for vertex in cube.data.vertices for element in vertex.groups)
+    check(weights_before == weights_after, "翻面后顶点组权重不变", weights_after)
+
+    # ---- 翻面操作不切换模式 ----
+    check(bpy.context.mode == 'OBJECT', "翻面全程停在物体模式（不进编辑模式）", bpy.context.mode)
+
+    # ---- 往返：翻两次回到原样 ----
+    reset_scene()
+    twice = add_cube("CubeFlipTwice")
+    select_only([twice])
+    original = polygonal_key(twice.data)
+    bpy.ops.hhz.flip_normals()
+    bpy.ops.hhz.flip_normals()
+    check(polygonal_key(twice.data) == original, "连翻两次回到原来的面缠绕（成对性）")
+
+
+def test_flip_detect_roundtrip(module):
+    global module_under_test
+    module_under_test = module
+    section("关键：翻面 -> 检测 的往返（造一个法线朝内的立方体）")
+    ops = module.ops
+    reset_scene()
+
+    cube = add_cube("CubeRoundTrip")
+    reverse_winding_sample(cube.data)
+    coordinates, faces = cube_face_data(cube)
+    check(abs(ops._signed_volume(coordinates, faces) + 8.0) < 1e-6,
+          "样本确实是法线朝内的立方体（体积 = -8）",
+          ops._signed_volume(coordinates, faces))
+
+    # 1) 检测：应当报「整体翻面」
+    select_only([cube])
+    result = bpy.ops.hhz.detect_flipped()
+    check(result == {'FINISHED'}, "检测算符返回 FINISHED", result)
+    check(ops._LAST_RUN.get("detected") == 1, "检测了 1 个物体", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("flipped") == 1, "检测结果：整体翻面 1 个", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("normal") == 0, "没有物体被判为正常", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("skipped") == 0, "没有物体被跳过", ops._LAST_RUN)
+    first = pure_verdict(cube)
+    check(first["verdict"] == ops.FACE_ORIENTATION_FLIPPED,
+          "纯函数同步判定为整体翻面", first)
+
+    # 2) 翻面算符 -> 2b) 再检测：应当变成「正常」
+    select_only([cube])
+    bpy.ops.hhz.flip_normals()
+    check(signed_volume_of(cube) > 0, "翻面后体积转为正（法线朝外）",
+          signed_volume_of(cube))
+    select_only([cube])
+    result = bpy.ops.hhz.detect_flipped()
+    check(result == {'FINISHED'}, "翻面后检测算符返回 FINISHED", result)
+    check(ops._LAST_RUN.get("normal") == 1, "翻面后检测结果：正常 1 个", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("flipped") == 0, "翻面后不再有「整体翻面」", ops._LAST_RUN)
+    second = pure_verdict(cube)
+    check(second["verdict"] == ops.FACE_ORIENTATION_NORMAL,
+          "纯函数同步判定为正常", second)
+
+    # 3) 再翻一次：又变回「整体翻面」（成对性）
+    select_only([cube])
+    bpy.ops.hhz.flip_normals()
+    select_only([cube])
+    bpy.ops.hhz.detect_flipped()
+    check(ops._LAST_RUN.get("flipped") == 1, "再翻一次又变回「整体翻面」1 个",
+          ops._LAST_RUN)
+    check(pure_verdict(cube)["verdict"] == ops.FACE_ORIENTATION_FLIPPED,
+          "纯函数同步判定回「整体翻面」")
+
+
+def test_flip_detect_multi_object(module):
+    global module_under_test
+    module_under_test = module
+    section("功能：多物体（正常 + 翻面 + 非网格）")
+    ops = module.ops
+    reset_scene()
+
+    normal_cube = add_cube("CubeNormal")
+    inverted_cube = add_cube("CubeInverted")
+    reverse_winding_sample(inverted_cube.data)
+    empty = bpy.data.objects.new("EmptyTarget", None)
+    bpy.context.collection.objects.link(empty)
+    light = make_light("LightTarget")
+    curve = add_curve("CurveTarget")
+
+    targets = [normal_cube, inverted_cube, empty, light, curve]
+    select_only(targets)
+
+    # ---- 翻面：只改网格，非网格计数跳过 ----
+    result = bpy.ops.hhz.flip_normals()
+    check(result == {'FINISHED'}, "翻面算符返回 FINISHED", result)
+    check(ops._LAST_RUN.get("flipped") == 2, "翻面 2 个（两个网格）", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("skipped_non_mesh") == 3,
+          "跳过 3 个非网格物体（Empty / Light / Curve）", ops._LAST_RUN)
+    check(signed_volume_of(normal_cube) < 0, "正常立方体被翻成朝内",
+          signed_volume_of(normal_cube))
+    check(signed_volume_of(inverted_cube) > 0, "朝内立方体被翻成朝外",
+          signed_volume_of(inverted_cube))
+    check(len(empty.material_slots) == 0, "非网格物体没有报错中止其它物体")
+    check(empty.type == 'EMPTY' and light.type == 'LIGHT' and curve.type == 'CURVE',
+          "非网格物体的类型没被改动")
+
+    # ---- 检测：汇总数字正确（翻面后正好一内一外 → 1 整体翻面 + 1 正常）----
+    select_only(targets)
+    result = bpy.ops.hhz.detect_flipped()
+    check(result == {'FINISHED'}, "检测算符返回 FINISHED", result)
+    check(ops._LAST_RUN.get("detected") == 2, "检测了 2 个网格", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("flipped") == 1, "整体翻面 1 个（原来的正常体被翻成朝内）",
+          ops._LAST_RUN)
+    check(ops._LAST_RUN.get("normal") == 1, "正常 1 个（原来的朝内体被翻回朝外）",
+          ops._LAST_RUN)
+    check(ops._LAST_RUN.get("skipped") == 3, "跳过 3 个（非网格）", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("skipped_non_mesh") == 3, "跳过明细里非网格 = 3",
+          ops._LAST_RUN)
+    check(ops._LAST_RUN.get("flipped") + ops._LAST_RUN.get("normal")
+          + ops._LAST_RUN.get("suspect") == 2, "三类判定之和 == 检测到的网格数",
+          ops._LAST_RUN)
+
+    # ---- 只翻另一个：两边都对朝外，检测汇总应当变成 2 正常 ----
+    select_only([inverted_cube])
+    bpy.ops.hhz.flip_normals()
+    check(ops._LAST_RUN.get("flipped") == 1, "只翻选中那一个网格", ops._LAST_RUN)
+    check(ops._LAST_RUN.get("skipped_non_mesh") == 0,
+          "只选网格时没有非网格被跳过", ops._LAST_RUN)
+    check(signed_volume_of(inverted_cube) < 0, "它又被翻回朝内",
+          signed_volume_of(inverted_cube))
+
+    select_only(targets)
+    bpy.ops.hhz.detect_flipped()
+    check(ops._LAST_RUN.get("flipped") == 2 and ops._LAST_RUN.get("normal") == 0,
+          "检测汇总：整体翻面 2 个 / 正常 0 个（两个网格都朝内）", ops._LAST_RUN)
+
+    # ---- 检测必须只读 ----
+    fingerprints = {obj.name: polygonal_key(obj.data) for obj in (normal_cube, inverted_cube)}
+    select_only(targets)
+    selection = sorted(obj.name for obj in bpy.context.selected_objects)
+    bpy.ops.hhz.detect_flipped()
+    check(sorted(obj.name for obj in bpy.context.selected_objects) == selection,
+          "检测不改动选择", sorted(obj.name for obj in bpy.context.selected_objects))
+    check({obj.name: polygonal_key(obj.data) for obj in (normal_cube, inverted_cube)}
+          == fingerprints, "检测不改动任何网格的面缠绕（只读）")
+
+
+def test_flip_multiuser_mesh(module):
+    global module_under_test
+    module_under_test = module
+    section("功能：多用户网格（翻面只改目标物体，不连带另一个）")
+    reset_scene()
+
+    first = add_cube("CubeShared_A")
+    second = bpy.data.objects.new("CubeShared_B", first.data)
+    bpy.context.collection.objects.link(second)
+    second.location = (5.0, 0.0, 0.0)
+
+    check(first.data.users == 2, "两个物体共享同一份网格数据", first.data.users)
+    shared_data = first.data
+    fingerprint = polygonal_key(shared_data)
+
+    select_only([first])
+    bpy.ops.hhz.flip_normals()
+
+    check(first.data != shared_data,
+          "目标物体的网格已经换成新的单用户副本（没有原地改共享数据）")
+    check(second.data is shared_data, "另一个物体仍然用着原来那份网格数据")
+    check(polygonal_key(first.data) != fingerprint, "目标物体的面缠绕被翻过来了")
+    check(polygonal_key(second.data) == fingerprint,
+          "另一个物体的网格**没有被连带修改**（单用户化生效）")
+    check(signed_volume_of(first) < 0, "目标物体：体积变负（已翻面）",
+          signed_volume_of(first))
+    check(signed_volume_of(second) > 0, "另一个物体：体积仍为正（没被翻）",
+          signed_volume_of(second))
+
+    select_only([first, second])
+    result = bpy.ops.hhz.flip_normals()
+    check(result == {'FINISHED'}, "两个物体一起选中时算符返回 FINISHED", result)
+    check(second.data.users == 1, "第二个物体也已单用户化（users = 1）", second.data.users)
+    check(signed_volume_of(first) > 0 and signed_volume_of(second) < 0,
+          "各自翻了一次：A 回到朝外、B 变成朝内",
+          (signed_volume_of(first), signed_volume_of(second)))
+
+
+def test_flip_detect_sources(module):
+    section("源码级约定：翻面与检测的实现方式")
+    ops_source = source_of(module, "ops.py")
+
+    flip_source = function_source(ops_source, "_flip_object_mesh")
+    detect_source = function_source(ops_source, "detect_flip")
+    check("ensure_single_user_data" in flip_source,
+          "翻面复用既有的单用户 helper（compat.ensure_single_user_data）", flip_source[:60])
+
+    check("bmesh" in ops_source and "reverse_faces" in ops_source,
+          "翻面走 bmesh（bmesh.ops.reverse_faces）")
+    flip_class = class_source(ops_source, "HHZ_OT_flip_normals")
+    check("bpy.ops.mesh.flip_normals" not in flip_class
+          and "bpy.ops.mesh.flip_normals" not in flip_source,
+          "没有用进入编辑模式的 bpy.ops.mesh.flip_normals 写法")
+    check("bpy.ops.object.mode_set" not in flip_class,
+          "翻面全程不切换模式（源码里没有 mode_set）")
+
+    # 硬性禁令：新功能里不许引入这两样（既有代码里 ops.py 的启动布局兜底路径
+    # 本来就有 libraries.write，所以只在**本次新增的代码段**里查，不整文件扫）
+    check("bpy.data.libraries.write" not in flip_source
+          and "bpy.data.libraries.write" not in detect_source,
+          "本次新增代码里没有 bpy.data.libraries.write（4.5.14 段错误）")
+    check("batch_remove" not in flip_source and "batch_remove" not in detect_source,
+          "本次新增代码里没有 batch_remove（禁用于工作区）")
+    for name in ("HHZ_OT_flip_normals", "HHZ_OT_detect_flipped",
+                 "HHZ_OT_toggle_face_orientation"):
+        class_body = class_source(ops_source, name)
+        check(bool(class_body), "能按类边界取到 {} 的源码段".format(name))
+        check("libraries.write" not in class_body, "{} 没有写库调用".format(name))
+        check("batch_remove" not in class_body, "{} 没有 batch_remove".format(name))
+
+    check(callable(getattr(module.ops, "detect_flip", None)),
+          "检测判据是纯函数 detect_flip(coordinates, faces)")
+    check("_signed_volume" in detect_source, "纯函数内部用有符号体积做主判据")
+    check("_inward_face_ratio" in detect_source, "纯函数内部用质心朝外做启发式兜底")
+    check("疑似" in ops_source, "非闭合结果在文案里明确标注为「疑似」")
+
+    detect_execute = class_source(ops_source, "HHZ_OT_detect_flipped")
+    check(bool(detect_execute), "能按类边界取到检测算符的源码段")
+    for forbidden in ("select_set", "hide_set", "hide_viewport", "reverse_faces",
+                      "ensure_single_user_data"):
+        check(forbidden not in detect_execute,
+              "检测算符源码里没有写操作「{}」（只读）".format(forbidden), forbidden)
+
+
+def test_viewport_overlay_switch(module):
+    global module_under_test
+    module_under_test = module
+    section("功能：一键查看面朝向（3D 视口面朝向叠加层切换）")
+    ops = module.ops
+
+    # ---- 纯函数：切换决策（与 bpy 上下文完全解耦，无头也能全测）----
+    check(ops.next_face_orientation_state(()) is True, "空输入（元组）-> 要打开")
+    check(ops.next_face_orientation_state([]) is True, "空输入（列表）-> 要打开")
+    check(ops.next_face_orientation_state(None) is True, "None 输入 -> 要打开")
+    check(ops.next_face_orientation_state([False, False]) is True, "全部关着 -> 打开")
+    check(ops.next_face_orientation_state([True, True, True]) is False, "全部开着 -> 关闭")
+    check(ops.next_face_orientation_state([True, False, False]) is True,
+          "1 开 2 关 -> 打开")
+    check(ops.next_face_orientation_state([True, True, False]) is True,
+          "2 开 1 关 -> 打开")
+    check(ops.next_face_orientation_state([False]) is True, "单个关着 -> 打开")
+    check(ops.next_face_orientation_state([True]) is False, "单个开着 -> 关闭")
+    check(ops.FACE_ORIENTATION_PROPERTY == "show_face_orientation",
+          "切换的是 Blender 自带的叠加层属性", ops.FACE_ORIENTATION_PROPERTY)
+
+    # ---- 源码级：确实读写 overlay.show_face_orientation，且不上重手段 ----
+    ops_source = source_of(module, "ops.py")
+    read_source = function_source(ops_source, "_viewport_overlays")
+    check("VIEW_3D" in read_source, "扫描的是 3D 视口（VIEW_3D）")
+    check("overlay" in read_source, "取的是视口的 overlay 设置", read_source[:60])
+    check("screen" in read_source, "以 context.screen 为范围（当前屏幕的全部 3D 视口）")
+    class_body = class_source(ops_source, "HHZ_OT_toggle_face_orientation")
+    check(bool(class_body), "能按类边界取到算符源码段")
+    check("FACE_ORIENTATION_PROPERTY" in class_body,
+          "算符用的是模块里的面朝向属性常量（即 show_face_orientation）")
+    check("setattr" in class_body and "getattr" in class_body,
+          "先读当前状态、再写目标状态")
+    check("tag_redraw" in class_body, "切换后刷新界面区域")
+    for forbidden in ("mode_set", "view3d", "transform", "select_set", "hide_set"):
+        check(forbidden not in class_body,
+              "没有用「{}」这类重手段（只切叠加层开关）".format(forbidden), forbidden)
+
+    # ---- 运行时：无头环境要么没有屏幕、要么没有 3D 视口 ----
+    screen = getattr(bpy.context, "screen", None)
+    areas = []
+    if screen is not None:
+        try:
+            areas = [area for area in screen.areas
+                     if getattr(area, "type", "") == 'VIEW_3D']
+        except Exception:
+            areas = []
+    try:
+        overlays = ops._viewport_overlays(bpy.context)
+        scan_error = None
+    except Exception as error:
+        overlays = []
+        scan_error = "{}: {}".format(type(error).__name__, error)
+    check(scan_error is None, "_viewport_overlays 不抛异常", scan_error)
+    check(len(overlays) == len(areas),
+          "拿到的叠加层数量 == 当前屏幕里 3D 视口的数量", (len(overlays), len(areas)))
+
+    def state_sum():
+        return sum(1 for overlay in overlays
+                   if bool(getattr(overlay, ops.FACE_ORIENTATION_PROPERTY)))
+
+    before = state_sum()
+    try:
+        result = bpy.ops.hhz.toggle_face_orientation()
+        raised = None
+    except Exception as error:
+        result = None
+        raised = "{}: {}".format(type(error).__name__, error)
+    check(raised is None, "无头下调用算符不抛异常", raised)
+    check(result in ({'FINISHED'}, {'CANCELLED'}),
+          "算符返回 FINISHED 或 CANCELLED", result)
+
+    if not overlays:
+        check(result == {'CANCELLED'},
+              "无头环境（没有 3D 视口）下如实返回 CANCELLED，而不是假装成功", result)
+        after = before
+    else:
+        check(result == {'FINISHED'}, "有 3D 视口时返回 FINISHED", result)
+        after = state_sum()
+        expected = len(overlays) if before < len(overlays) else 0
+        check(after == expected, "所有视口被统一切到目标状态", (before, after, expected))
+    check(state_sum() == after, "状态没有被别的步骤意外改动", state_sum())
+
+    # 还原，别影响后面的用例
+    for overlay in overlays:
+        try:
+            setattr(overlay, ops.FACE_ORIENTATION_PROPERTY, bool(before))
+        except Exception:
+            pass
+
+    # 如实标注：无头环境看不到界面，「视口里真的变蓝/变红」这一条不在本套断言覆盖内
+    if screen is None:
+        skip("无头环境没有 window.screen：界面上的实际显示效果本次未验证")
+    elif not areas:
+        skip("当前屏幕里没有 3D 视口：界面上的实际显示效果本次未验证")
+
+
+def test_flip_bl_options(module):
+    section("算符 bl_options（可撤销）")
+    for idname in ("flip_normals", "detect_flipped"):
+        operator = operator_class(module, idname)
+        check(operator is not None, "hhz.{} 的类可以取到".format(idname))
+        if operator is None:
+            continue
+        options = set(operator.bl_options)
+        check('REGISTER' in options, "hhz.{} 含 REGISTER".format(idname), sorted(options))
+        check('UNDO' in options, "hhz.{} 含 UNDO（能 Ctrl+Z 撤销）".format(idname),
+              sorted(options))
+    check(set(module.ops.HHZ_OT_flip_normals.bl_idname.split(".")) == {"hhz", "flip_normals"},
+          "hhz.flip_normals 的 bl_idname 正确")
+    check(module.ops.HHZ_OT_detect_flipped.bl_idname == "hhz.detect_flipped",
+          "hhz.detect_flipped 的 bl_idname 正确",
+          module.ops.HHZ_OT_detect_flipped.bl_idname)
+    check(module.ops.HHZ_OT_toggle_face_orientation.bl_idname == "hhz.toggle_face_orientation",
+          "hhz.toggle_face_orientation 的 bl_idname 正确",
+          module.ops.HHZ_OT_toggle_face_orientation.bl_idname)
+    check(module.ops.HHZ_OT_toggle_face_orientation.bl_label == "一键查看面朝向",
+          "查看面朝向的按钮名字是「一键查看面朝向」",
+          module.ops.HHZ_OT_toggle_face_orientation.bl_label)
+
+
+def test_flip_and_detect_poll(module):
+    section("算符 poll（翻面 / 检测）")
+    reset_scene()
+    cube = add_cube("CubeFlipPoll")
+    select_only([cube])
+    check(bpy.ops.hhz.flip_normals.poll(), "物体模式下翻面 poll 为真")
+    check(bpy.ops.hhz.detect_flipped.poll(), "物体模式下检测 poll 为真")
+
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+    except Exception as error:
+        skip("无法进入编辑模式：{}".format(error))
+    else:
+        try:
+            check(not bpy.ops.hhz.flip_normals.poll(), "编辑模式下翻面 poll 为假")
+            check(not bpy.ops.hhz.detect_flipped.poll(), "编辑模式下检测 poll 为假")
+        finally:
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+    reset_scene()
+    check(not bpy.ops.hhz.flip_normals.poll(), "空场景下翻面 poll 为假")
+    check(not bpy.ops.hhz.detect_flipped.poll(), "空场景下检测 poll 为假")
+    reset_scene()
+    cube = add_cube("CubeFlipPollDone")
+    select_only([cube])
+    result = bpy.ops.hhz.flip_normals()
+    check(result == {'FINISHED'}, "poll 用例收尾正常", result)
+    reset_scene()
 
 
 def test_poll():
@@ -4616,28 +5168,53 @@ def panels_with_parent_id(source):
 
 
 def test_pie_unchanged(module):
-    section("饼菜单内容（需求：设置入口挪到 N 面板，主题功能不进饼菜单）")
+    section("饼菜单内容（原 4 项都在，2.16.0 新增「一键翻面」+「一键查看面朝向」= 6 项）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
         source = handle.read()
 
     found = pie_operator_idnames(source)
-    expected = {
+    expected_before = {
         "hhz.remove_all_materials",
         "hhz.apply_all_modifiers",
         "hhz.remove_all_modifiers",
         "hhz.stairs",
     }
-    check(found == expected, "饼菜单就是四个功能入口（设置已移出）",
-          sorted(found) if found else found)
+    added = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
+    expected = expected_before | added
+    check(len(found) == 6, "饼菜单正好 6 项", sorted(found))
+    check(found == expected, "饼菜单 = 原有 4 项 + 一键翻面 + 一键查看面朝向", sorted(found))
+    for idname in sorted(expected_before):
+        check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
+    for idname in sorted(added):
+        check(idname in found, "新增的 {} 在饼菜单里".format(idname), sorted(found))
+    check(len(found & expected_before) == 4, "原有 4 项一个不少", sorted(found & expected_before))
 
     in_modeling = class_operator_idnames(source, "HHZ_PT_main")
     check("hhz.stairs" in in_modeling, "一键楼梯也出现在建模页的主面板里", sorted(in_modeling))
+    check("hhz.flip_normals" in in_modeling, "一键翻面在建模页主面板里", sorted(in_modeling))
+    check("hhz.detect_flipped" in in_modeling,
+          "「检测是否有反面」在建模页主面板里（没有新增面板）", sorted(in_modeling))
+    check("hhz.toggle_face_orientation" in in_modeling,
+          "「一键查看面朝向」在建模页主面板里（与检测按钮相邻）", sorted(in_modeling))
 
     in_settings_panel = class_operator_idnames(source, "HHZ_PT_settings")
     check("hhz.open_preferences" in in_settings_panel,
           "设置入口出现在 N 面板的「插件设置」子面板里", sorted(in_settings_panel))
     check("hhz.open_preferences" not in found, "设置入口确实不在饼菜单里")
+    check("hhz.detect_flipped" not in found, "检测按钮不进饼菜单（按需求只在 N 面板）",
+          sorted(found))
+
+    main_class = class_source(source, "HHZ_PT_main")
+    check("hhz.flip_normals" in main_class and "hhz.detect_flipped" in main_class
+          and "hhz.toggle_face_orientation" in main_class,
+          "三个新按钮都在建模页主面板里")
+    flip_at = main_class.find("hhz.flip_normals")
+    detect_at = main_class.find("hhz.detect_flipped")
+    toggle_at = main_class.find("hhz.toggle_face_orientation")
+    check(flip_at < detect_at < toggle_at,
+          "翻面 / 检测反面 / 查看面朝向依次相邻（同一区域，没新增面板）",
+          (flip_at, detect_at, toggle_at))
 
 
 def test_panel_order(module):
@@ -5156,6 +5733,15 @@ def main():
     run("一键删除所有材质", test_materials)
     run("一键应用所有修改器", test_apply_modifiers, module)
     run("一键删除所有修改器", test_remove_modifiers)
+    run("纯函数：有符号体积与面朝向判定", test_flip_normals_pure, module)
+    run("一键翻面（bmesh 原地翻面 + 单用户化）", test_flip_normals, module)
+    run("关键往返：翻面 -> 检测", test_flip_detect_roundtrip, module)
+    run("多物体：正常 + 翻面 + 非网格", test_flip_detect_multi_object, module)
+    run("多用户网格不连带", test_flip_multiuser_mesh, module)
+    run("源码级约定：翻面与检测实现方式", test_flip_detect_sources, module)
+    run("一键查看面朝向（3D 视口叠加层切换）", test_viewport_overlay_switch, module)
+    run("算符 bl_options（翻面 / 检测可撤销）", test_flip_bl_options, module)
+    run("算符 poll（翻面 / 检测）", test_flip_and_detect_poll, module)
     run("检查并修复缺失文件", test_fix_missing_files, module)
     run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
