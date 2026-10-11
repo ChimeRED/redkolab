@@ -103,11 +103,30 @@ def target_from_drag(count, start_index, delta_pixels, row_height=20.0):
 
     拖动排序用相对位移而不是绝对坐标：面板里拿不到每行的屏幕位置，
     但鼠标位移是有的，按行高换算既简单又能跨主题/缩放工作。
+
+    约定：``delta_pixels`` **以屏幕向下为正**（往下拖 = 正值 = 往后挪）。
+    Blender 的 ``event.mouse_region_y`` 不是这个方向，用之前先过
+    :func:`target_from_screen_drag`，别直接把 ``mouse_region_y`` 的差值丢进来。
     """
     if count <= 0:
         return 0
     steps = int(round(float(delta_pixels) / max(1.0, float(row_height))))
     return max(0, min(start_index + steps, count - 1))
+
+
+def target_from_screen_drag(count, start_index, mouse_delta_y, row_height=20.0):
+    """把 ``event.mouse_region_y`` 的差值换算成目标槽位（向下拖 = 往后挪）。
+
+    实测（Blender 4.5.14）：事件 / 区域坐标**以左下角为原点、Y 向上** ——
+    3D 视图里画在最上面的 ``HEADER`` region.y 比 ``WINDOW`` 大
+    （HEADER y=1417 / WINDOW y=145）。所以鼠标往下拖时
+    ``event.mouse_region_y - start_y`` 是**负数**。
+
+    2.16.1 修的就是这里：以前直接把 ``mouse_region_y`` 的差值交给
+    :func:`target_from_drag`，于是往下拖会把那一行**往上**挪（方向反了），
+    小幅度拖动则看起来「毫无反应」。方向换算只放在这一个地方。
+    """
+    return target_from_drag(count, start_index, -float(mouse_delta_y), row_height)
 
 
 # ---------------------------------------------------------------- 分块顺序

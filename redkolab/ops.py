@@ -2638,7 +2638,9 @@ class _DragReorderBase(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
-            target = panels.target_from_drag(
+            # 走 target_from_screen_drag：mouse_region_y 以左下角为原点、Y 向上，
+            # 直接用它的差值会把拖动方向弄反（2.16.1 修的方向 bug）
+            target = panels.target_from_screen_drag(
                 len(self._items), self._start_index,
                 event.mouse_region_y - self._start_y, self.row_height)
             if target != self._current:

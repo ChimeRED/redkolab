@@ -359,14 +359,23 @@ class HHZ_MT_pie(bpy.types.Menu):
         layout = self.layout
         pie = layout.menu_pie()
 
-        # 六个方向：左 / 右 / 下 / 上 / 左上 / 右上 —— 插件设置已按需求挪到
-        # N 面板，不再占饼菜单
-        pie.operator("hhz.remove_all_materials", icon='MATERIAL')
-        pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')
-        pie.operator("hhz.remove_all_modifiers", icon='TRASH')
-        pie.operator("hhz.stairs", icon='MOD_ARRAY')
-        pie.operator("hhz.flip_normals", icon='NORMALS_FACE')
-        pie.operator("hhz.toggle_face_orientation", icon='OVERLAY')
+        # 饼菜单的方位只由「往 pie 里加东西的先后」决定，与坐标无关：
+        #   0=左(W)  1=右(E)  2=下(S)  3=上(N)
+        #   4=左上(NW)  5=右上(NE)  6=左下(SW)  7=右下(SE)
+        # 这张表来自 Blender 源码 ui_radial_dir_order[8]（4.5 实测同一顺序）。
+        # 所以要挪按钮只能改下面这段的行序，别去动算符本身。
+        # 空位必须用占位项顶住：pie.separator() 会占一个方位序号（源码
+        # ui_litem_layout_radial 里除纯文字标签外每项都让 itemnum 前进一格；
+        # 真机 introspect() 也确认 separator 进了 LAYOUT_RADIAL 的项列表）。
+        # 少顶一个，后面的按钮就会整体前移、跑到别的方位去。
+        pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')       # 0 左
+        pie.operator("hhz.flip_normals", icon='NORMALS_FACE')         # 1 右
+        pie.operator("hhz.remove_all_materials", icon='MATERIAL')     # 2 下
+        pie.operator("hhz.stairs", icon='MOD_ARRAY')                  # 3 上（需求：保持不动）
+        pie.separator()                                               # 4 左上 空位
+        pie.separator()                                               # 5 右上 空位
+        pie.operator("hhz.remove_all_modifiers", icon='TRASH')        # 6 左下
+        pie.operator("hhz.toggle_face_orientation", icon='OVERLAY')   # 7 右下
 
 
 # ------------------------------------------------------------------- N 面板
@@ -526,6 +535,7 @@ class HHZ_PT_order(bpy.types.Panel):
             if section_state.get("target") == index:
                 row.alert = True
         box.label(text="按住手柄上下拖动，松开确认", icon='INFO')
+        box.label(text="没跟手就移动鼠标换位，再点一下确认")
 
         # ---- 侧栏标签页：只做展示 ----
         box = layout.box()

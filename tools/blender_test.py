@@ -5134,6 +5134,57 @@ def pie_operator_idnames(source):
     return class_operator_idnames(source, "HHZ_MT_pie")
 
 
+# 2.16.1 饼菜单方位表：槽位顺序就是方位顺序
+#   0=左(W) 1=右(E) 2=下(S) 3=上(N) 4=左上(NW) 5=右上(NE) 6=左下(SW) 7=右下(SE)
+PIE_SLOT_DIRECTIONS = ("左", "右", "下", "上", "左上", "右上", "左下", "右下")
+PIE_PLACEHOLDER = "__placeholder__"
+PIE_EXPECTED_SLOTS = (
+    "hhz.apply_all_modifiers",       # 0 左
+    "hhz.flip_normals",              # 1 右
+    "hhz.remove_all_materials",      # 2 下
+    "hhz.stairs",                    # 3 上（保持不动）
+    PIE_PLACEHOLDER,                 # 4 左上 空位
+    PIE_PLACEHOLDER,                 # 5 右上 空位
+    "hhz.remove_all_modifiers",      # 6 左下
+    "hhz.toggle_face_orientation",   # 7 右下
+)
+
+
+def _pie_items_in_body(body):
+    """按源码顺序收集一段函数体里往 pie 里加的东西。"""
+    found = []
+    for statement in body:
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            call = statement.value
+            func = call.func
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if func.attr == "operator" and call.args and isinstance(call.args[0], ast.Constant):
+                    found.append(("operator", call.args[0].value))
+                elif func.attr == "separator":
+                    found.append(("separator", None))
+        elif isinstance(statement, ast.If):
+            found.extend(_pie_items_in_body(statement.body))
+            found.extend(_pie_items_in_body(statement.orelse))
+        elif isinstance(statement, (ast.For, ast.While)):
+            found.extend(_pie_items_in_body(statement.body))
+    return found
+
+
+def pie_item_sequence(source):
+    """按源码顺序列出 HHZ_MT_pie.draw() 加进饼菜单的每一项。
+
+    返回 ``[("operator", idname) | ("separator", None), ...]``，顺序就是
+    饼菜单的槽位顺序（也就是方位顺序）。
+    """
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.ClassDef) and node.name == "HHZ_MT_pie"):
+            continue
+        for statement in node.body:
+            if isinstance(statement, ast.FunctionDef) and statement.name == "draw":
+                return _pie_items_in_body(statement.body)
+    return []
+
+
 def class_operator_idnames(source, class_name):
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
@@ -5168,12 +5219,45 @@ def panels_with_parent_id(source):
 
 
 def test_pie_unchanged(module):
-    section("饼菜单内容（原 4 项都在，2.16.0 新增「一键翻面」+「一键查看面朝向」= 6 项）")
+    section("饼菜单方位（2.16.1：应用修改器=左、翻面=右、删除材质=下、楼梯=上、空位=左上/右上、"
+            "删除修改器=左下、查看面朝向=右下）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
         source = handle.read()
 
-    found = pie_operator_idnames(source)
+    # ---- 顺序断言：严格按 operator() 字符串常量的出现顺序 ----
+    # 无头模式画不出真正的饼菜单，方位只能靠真机截图核对；这里断言的是
+    # 「加进 pie 的顺序」，Blender 用它决定方位（0=左 … 7=右下）。
+    items = pie_item_sequence(source)
+    slots = [name if kind == "operator" else PIE_PLACEHOLDER for kind, name in items]
+    kinds = [kind for kind, _ in items]
+    operators_in_order = [name for kind, name in items if kind == "operator"]
+
+    check(operators_in_order == [name for name in PIE_EXPECTED_SLOTS
+                                 if name != PIE_PLACEHOLDER],
+          "算符顺序 == 2.16.1 目标方位顺序（左/右/下/上/左下/右下）",
+          operators_in_order)
+    check(len(items) == len(PIE_EXPECTED_SLOTS),
+          "饼菜单正好 {} 个槽位项（6 个算符 + 2 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
+          [kinds.count("operator"), kinds.count("separator")])
+
+    # ---- 空位占位项：第 5、6 个位置（左上 / 右上）----
+    check(len(items) >= 6, "饼菜单至少有 6 项才能谈空位", items)
+    if len(items) >= 6:
+        check(kinds[4] == "separator" and kinds[5] == "separator",
+              "第 5、6 个槽位是空位占位项 pie.separator()（对应「左上」「右上」）",
+              items[4:6])
+    # 逐槽核对放的东西，错位时一眼看出是哪个方位错了
+    for index, expected in enumerate(PIE_EXPECTED_SLOTS):
+        if index >= len(items):
+            break
+        actual = slots[index]
+        check(actual == expected,
+              "槽位 {}（{}）= {}".format(index, PIE_SLOT_DIRECTIONS[index], expected),
+              actual)
+
+    # ---- 数量与集合：与顺序断言分开写 ----
+    found = set(operators_in_order)
     expected_before = {
         "hhz.remove_all_materials",
         "hhz.apply_all_modifiers",
@@ -5181,14 +5265,17 @@ def test_pie_unchanged(module):
         "hhz.stairs",
     }
     added = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
-    expected = expected_before | added
-    check(len(found) == 6, "饼菜单正好 6 项", sorted(found))
-    check(found == expected, "饼菜单 = 原有 4 项 + 一键翻面 + 一键查看面朝向", sorted(found))
+    check(len(found) == 6, "饼菜单正好 6 个算符", sorted(found))
+    check(found == expected_before | added, "饼菜单 = 原有 4 项 + 一键翻面 + 一键查看面朝向", sorted(found))
     for idname in sorted(expected_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
     for idname in sorted(added):
         check(idname in found, "新增的 {} 在饼菜单里".format(idname), sorted(found))
     check(len(found & expected_before) == 4, "原有 4 项一个不少", sorted(found & expected_before))
+
+    # ---- 既有意图保持：检测反面不进饼菜单 ----
+    check("hhz.detect_flipped" not in found, "检测按钮不进饼菜单（按需求只在 N 面板）",
+          sorted(found))
 
     in_modeling = class_operator_idnames(source, "HHZ_PT_main")
     check("hhz.stairs" in in_modeling, "一键楼梯也出现在建模页的主面板里", sorted(in_modeling))
@@ -5202,8 +5289,6 @@ def test_pie_unchanged(module):
     check("hhz.open_preferences" in in_settings_panel,
           "设置入口出现在 N 面板的「插件设置」子面板里", sorted(in_settings_panel))
     check("hhz.open_preferences" not in found, "设置入口确实不在饼菜单里")
-    check("hhz.detect_flipped" not in found, "检测按钮不进饼菜单（按需求只在 N 面板）",
-          sorted(found))
 
     main_class = class_source(source, "HHZ_PT_main")
     check("hhz.flip_normals" in main_class and "hhz.detect_flipped" in main_class
@@ -5215,6 +5300,13 @@ def test_pie_unchanged(module):
     check(flip_at < detect_at < toggle_at,
           "翻面 / 检测反面 / 查看面朝向依次相邻（同一区域，没新增面板）",
           (flip_at, detect_at, toggle_at))
+
+    # ---- 方位映射注释必须留在 draw() 旁边（防止后人改错）----
+    pie_class = class_source(source, "HHZ_MT_pie")
+    check("0=左" in pie_class and "7=右下" in pie_class,
+          "draw() 附近写明了方位映射 0=左 … 7=右下")
+    check("占位" in pie_class or "空位" in pie_class,
+          "draw() 附近写明了空位要用占位项顶住")
 
 
 def test_panel_order(module):
@@ -5324,6 +5416,115 @@ def test_panel_order(module):
                    "theme_restore_default", "theme_save_preferences"):
         check(operator_class(module, idname) is not None,
               "算符 hhz.{} 已注册".format(idname))
+    check(not panels.DRAG_STATE, "拖动状态没有残留", panels.DRAG_STATE)
+
+
+def test_panel_order_drag_chain(module):
+    """拖动排序「整条链」的回归断言（2.16.1 修的是一处方向 bug）。
+
+    无头模式**不能**真跑 Blender 的模态事件循环（面板按钮的 invoke 需要真实
+    鼠标事件），所以这里断到「算符 -> 纯函数 -> 偏好设置 -> 面板重排」为止，
+    真模态留给真机手测；这一点在报告与 README 里如实标注。
+    """
+    section("功能：拖动排序整条链（注册 / 方向 / 持久化 / 应用）")
+    panels = module.panels
+    ops = module.ops
+    ui = module.ui
+    context = bpy.context
+
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
+    with open(ui_path, encoding="utf-8") as handle:
+        ui_source = handle.read()
+    ops_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ops.py")
+    with open(ops_path, encoding="utf-8") as handle:
+        ops_source = handle.read()
+    drag_class = class_source(ops_source, "_DragReorderBase")
+
+    # ---- 第 1 环：算符注册了，且面板里的调用名与 bl_idname 一致 ----
+    cls = operator_class(module, "section_drag")
+    check(cls is not None, "拖拽算符 hhz.section_drag 仍注册")
+    check(getattr(cls, "bl_idname", "") == "hhz.section_drag",
+          "hhz.section_drag 的 bl_idname 正确", getattr(cls, "bl_idname", None))
+    check('row.operator("hhz.section_drag"' in ui_source,
+          "面板里的手柄调用的就是 hhz.section_drag（名字没写错）")
+    check("handle.index = index" in ui_source,
+          "手柄把行号写进了算符的 index 属性")
+    check(hasattr(cls, "invoke") and hasattr(cls, "modal"),
+          "拖拽算符有 invoke + modal（模态流程还在）")
+    check("modal_handler_add" in drag_class,
+          "invoke 里确实注册了 modal 处理器")
+    check("target_from_screen_drag" in drag_class,
+          "modal 走的是做了 Y 轴换算的 target_from_screen_drag（方向不再反）")
+    check("LEFTMOUSE" in drag_class and "ESC" in drag_class and "RIGHTMOUSE" in drag_class,
+          "提交 / 取消的按键分支（LEFTMOUSE 提交，ESC 与右键取消）都还在")
+
+    # ---- 第 2 环：方向（本次的 bug 就在这一环）----
+    # Blender 区域坐标 Y 向上（实测 4.5.14：HEADER y=1417 > WINDOW y=145），
+    # 所以「鼠标往下拖」给进来的是负的 mouse_region_y 差值。
+    check(panels.target_from_screen_drag(4, 0, -40.0, 20.0) == 2,
+          "鼠标往下 40px（区域 Y 变小）= 往后挪 2 位",
+          panels.target_from_screen_drag(4, 0, -40.0, 20.0))
+    check(panels.target_from_screen_drag(4, 0, 40.0, 20.0) == 0,
+          "鼠标往上 40px（区域 Y 变大）= 往回挪到最前（夹到 0）",
+          panels.target_from_screen_drag(4, 0, 40.0, 20.0))
+    check(panels.target_from_screen_drag(4, 3, 40.0, 20.0) == 1,
+          "从最后一位往上拖两行 = 挪到第 2 位",
+          panels.target_from_screen_drag(4, 3, 40.0, 20.0))
+    check(panels.target_from_screen_drag(4, 1, -8.0, 20.0) == 1
+          and panels.target_from_screen_drag(4, 1, -12.0, 20.0) == 2,
+          "半行以内不换位、过半行才换位（来回抖不会乱跳）")
+    check(all(panels.target_from_screen_drag(4, i, d, 20.0)
+              == panels.target_from_drag(4, i, -d, 20.0)
+              for i in range(4) for d in (-60, -20, -1, 0, 1, 20, 60)),
+          "换算是纯取反，两层入口结果一致")
+
+    # ---- 第 3 环：纯函数往返（模拟一次拖拽移动）----
+    preferences = module.compat.get_preferences()
+    check(preferences is not None, "偏好设置可访问")
+    original = panels.read_section_order(preferences)
+    moved = panels.move_item(original, 0, 2)
+    check(moved == [original[1], original[2], original[0]] + list(original[3:]),
+          "move_item 把第 1 行挪到第 3 位", moved)
+    check(panels.parse_order(",".join(moved)) == moved,
+          "move_item 的结果能原样被 parse_order 读回（往返一致）", moved)
+    check(panels.move_item(moved, 2, 0) == original,
+          "反向再挪一次回到原顺序（可逆）")
+
+    # ---- 第 4 环：写进偏好设置并读回 ----
+    preferences.panel_order = ",".join(moved)
+    check(panels.read_section_order(preferences) == moved,
+          "顺序写进 preferences.panel_order 后能读回", panels.read_section_order(preferences))
+
+    # ---- 第 5 环：真的应用到了面板上（bl_order + 重排列表）----
+    applied = ui.apply_panel_order(context)
+    check(applied == moved, "apply_panel_order 返回的顺序就是刚拖出来的顺序", applied)
+    for index, section_id in enumerate(moved):
+        panel = getattr(bpy.types, panels.section_panel_idname(section_id), None)
+        check(panel is not None and panel.bl_order == index + 2,
+              "{} 的 bl_order 落到 {}".format(section_id, index + 2),
+              getattr(panel, "bl_order", None))
+    keys = panels.our_panel_keys(moved)
+    check(keys[:2] == ["HHZ_PT_pages", "HHZ_PT_main"] and keys[-1] == "HHZ_PT_order",
+          "重排列表首尾仍然是 分页标签条 / 顺序编辑器", keys)
+    check(keys[2:6] == [panels.section_panel_idname(item) for item in moved],
+          "重排列表中间四项的顺序 == 拖出来的顺序", keys)
+    registered, failures = panels.reregister_our_panels(moved)
+    check(registered == 7 and not failures,
+          "按拖出来的顺序重新注册本插件 7 个面板成功",
+          "{} 个 / {}".format(registered, failures))
+    check(all(getattr(bpy.types, key, None) is not None for key in keys),
+          "重排之后 7 个面板类一个没少")
+    # 只碰自己的面板：雷区（重注册别人的面板会让 4.0/4.2 段错误）
+    check(set(keys) == {"HHZ_PT_pages", "HHZ_PT_main", "HHZ_PT_order",
+                        "HHZ_PT_theme", "HHZ_PT_hotkey", "HHZ_PT_settings",
+                        "HHZ_PT_layout"},
+          "只重排本插件自己的 7 个面板（不含任何内置 / 其它插件面板）", sorted(keys))
+
+    # ---- 收尾：恢复默认顺序，保证不影响后面的用例 ----
+    preferences.panel_order = ",".join(panels.DEFAULT_SECTION_ORDER)
+    ui.apply_panel_order(context)
+    check(panels.read_section_order(preferences) == list(panels.DEFAULT_SECTION_ORDER),
+          "收尾恢复默认顺序")
     check(not panels.DRAG_STATE, "拖动状态没有残留", panels.DRAG_STATE)
 
 
@@ -5759,10 +5960,11 @@ def main():
     run("第 4 个预设「自定义预设」", test_custom_preset, module)
     run("颜色项两级短选择（可达性不变式）", test_target_selector, module)
     run("主题页 UI 约定（ZML_LAB）", test_theme_ui_conventions, module)
-    run("饼菜单内容未被改动", test_pie_unchanged, module)
+    run("饼菜单方位（2.16.1 重排）", test_pie_unchanged, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)
+    run("拖动排序整条链（注册 / 方向 / 持久化）", test_panel_order_drag_chain, module)
     run("算符 poll", test_poll)
     # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
     # 会清掉当前场景，所以后面只剩"卸载清理"这种不吃场景数据的用例
