@@ -66,10 +66,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { blender: "4.2.23", mode: "auto" }
-          - { blender: "4.5.14", mode: "auto" }
+          # 用户实际使用的版本（下限版本）：4.0.x 没有扩展安装入口，所以只跑插件页
+          - { blender: "4.0.2", mode: "auto" }
+          # 最新稳定版：插件页 + 扩展页两个安装入口都测
           - { blender: "5.2.2", mode: "auto" }
-          # 同一个包在最新版上再走一遍扩展页安装入口
           - { blender: "5.2.2", mode: "extensions" }
     steps:
       - uses: actions/checkout@v7
@@ -165,5 +165,5 @@ jobs:
             sha256sum -c SHA256SUMS.txt
             ```
 
-            本版本已通过 Blender 真机测试：包结构自检 + Blender 4.2 / 4.5 / 5.2 无头功能测试
+            本版本已通过 Blender 真机测试：包结构自检 + Blender 4.0 / 最新稳定版无头功能测试
             （每个版本 90+ 项断言，含多用户网格、形态键、被禁用修改器、隐藏物体等边界情况）。
