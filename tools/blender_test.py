@@ -504,7 +504,8 @@ def test_registration(module_name, module):
               "算符 hhz.{} 已注册".format(idname))
 
     # 2.16.0 新增的三个算符：已注册 + 可调用 + bl_idname 精确比对
-    for idname in ("flip_normals", "detect_flipped", "toggle_face_orientation"):
+    for idname in ("flip_normals", "detect_flipped", "toggle_face_orientation",
+                   "select_active_camera"):
         operator = operator_class(module, idname)
         check(operator is not None, "算符 hhz.{} 已注册".format(idname))
         if operator is None:
@@ -5136,14 +5137,16 @@ def pie_operator_idnames(source):
 
 # 2.16.1 饼菜单方位表：槽位顺序就是方位顺序
 #   0=左(W) 1=右(E) 2=下(S) 3=上(N) 4=左上(NW) 5=右上(NE) 6=左下(SW) 7=右下(SE)
+# 2.17.0：左上（4）由空位改成「一键选中当前相机」，只剩右上（5）一个空位。
 PIE_SLOT_DIRECTIONS = ("左", "右", "下", "上", "左上", "右上", "左下", "右下")
 PIE_PLACEHOLDER = "__placeholder__"
+PIE_EMPTY_SLOTS = (5,)
 PIE_EXPECTED_SLOTS = (
     "hhz.apply_all_modifiers",       # 0 左
     "hhz.flip_normals",              # 1 右
     "hhz.remove_all_materials",      # 2 下
     "hhz.stairs",                    # 3 上（保持不动）
-    PIE_PLACEHOLDER,                 # 4 左上 空位
+    "hhz.select_active_camera",      # 4 左上（2.17.0 新增，原来这里是空位）
     PIE_PLACEHOLDER,                 # 5 右上 空位
     "hhz.remove_all_modifiers",      # 6 左下
     "hhz.toggle_face_orientation",   # 7 右下
@@ -5219,8 +5222,8 @@ def panels_with_parent_id(source):
 
 
 def test_pie_unchanged(module):
-    section("饼菜单方位（2.16.1：应用修改器=左、翻面=右、删除材质=下、楼梯=上、空位=左上/右上、"
-            "删除修改器=左下、查看面朝向=右下）")
+    section("饼菜单方位（2.17.0：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
+            "选中当前相机=左上、空位=右上、删除修改器=左下、查看面朝向=右下）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
         source = handle.read()
@@ -5235,18 +5238,24 @@ def test_pie_unchanged(module):
 
     check(operators_in_order == [name for name in PIE_EXPECTED_SLOTS
                                  if name != PIE_PLACEHOLDER],
-          "算符顺序 == 2.16.1 目标方位顺序（左/右/下/上/左下/右下）",
+          "算符顺序 == 2.17.0 目标方位顺序（左/右/下/上/左上/左下/右下）",
           operators_in_order)
     check(len(items) == len(PIE_EXPECTED_SLOTS),
-          "饼菜单正好 {} 个槽位项（6 个算符 + 2 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
+          "饼菜单正好 {} 个槽位项（7 个算符 + 1 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
+          [kinds.count("operator"), kinds.count("separator")])
+    check(kinds.count("operator") == 7 and kinds.count("separator") == 1,
+          "饼菜单 = 7 个算符 + 1 个占位项（只剩右上一个空位）",
           [kinds.count("operator"), kinds.count("separator")])
 
-    # ---- 空位占位项：第 5、6 个位置（左上 / 右上）----
+    # ---- 空位占位项：只剩第 6 个位置（右上）----
     check(len(items) >= 6, "饼菜单至少有 6 项才能谈空位", items)
     if len(items) >= 6:
-        check(kinds[4] == "separator" and kinds[5] == "separator",
-              "第 5、6 个槽位是空位占位项 pie.separator()（对应「左上」「右上」）",
-              items[4:6])
+        empty_slots = [index for index, kind in enumerate(kinds) if kind == "separator"]
+        check(empty_slots == list(PIE_EMPTY_SLOTS),
+              "空位占位项只剩第 6 个槽位 pie.separator()（对应「右上」）",
+              empty_slots)
+        check(kinds[4] != "separator",
+              "左上（第 5 个槽位）不再是空位，已被 2.17.0 的按钮占住", items[4])
     # 逐槽核对放的东西，错位时一眼看出是哪个方位错了
     for index, expected in enumerate(PIE_EXPECTED_SLOTS):
         if index >= len(items):
@@ -5255,6 +5264,9 @@ def test_pie_unchanged(module):
         check(actual == expected,
               "槽位 {}（{}）= {}".format(index, PIE_SLOT_DIRECTIONS[index], expected),
               actual)
+    check(len(slots) >= 5 and slots[4] == "hhz.select_active_camera",
+          "「一键选中当前相机」在槽位 4（左上）",
+          slots[4] if len(slots) > 4 else slots)
 
     # ---- 数量与集合：与顺序断言分开写 ----
     found = set(operators_in_order)
@@ -5264,14 +5276,19 @@ def test_pie_unchanged(module):
         "hhz.remove_all_modifiers",
         "hhz.stairs",
     }
-    added = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
-    check(len(found) == 6, "饼菜单正好 6 个算符", sorted(found))
-    check(found == expected_before | added, "饼菜单 = 原有 4 项 + 一键翻面 + 一键查看面朝向", sorted(found))
+    added_before = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
+    check(len(found) == 7, "饼菜单正好 7 个算符", sorted(found))
+    check(found == expected_before | added_before | {"hhz.select_active_camera"},
+          "饼菜单 = 原有 4 项 + 一键翻面 + 一键查看面朝向 + 一键选中当前相机", sorted(found))
     for idname in sorted(expected_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
-    for idname in sorted(added):
-        check(idname in found, "新增的 {} 在饼菜单里".format(idname), sorted(found))
+    for idname in sorted(added_before):
+        check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
+    check("hhz.select_active_camera" in found,
+          "新增的 hhz.select_active_camera 在饼菜单里", sorted(found))
     check(len(found & expected_before) == 4, "原有 4 项一个不少", sorted(found & expected_before))
+    check(expected_before | added_before <= found, "原有 6 项一个不少（位置与集合都没丢）",
+          sorted(found))
 
     # ---- 既有意图保持：检测反面不进饼菜单 ----
     check("hhz.detect_flipped" not in found, "检测按钮不进饼菜单（按需求只在 N 面板）",
@@ -5307,6 +5324,192 @@ def test_pie_unchanged(module):
           "draw() 附近写明了方位映射 0=左 … 7=右下")
     check("占位" in pie_class or "空位" in pie_class,
           "draw() 附近写明了空位要用占位项顶住")
+
+
+def test_view_camera_resolution(module):
+    section("纯函数：当前视角相机解析（视口相机优先于场景活动相机）")
+    resolve = getattr(module.ops, "resolve_view_camera", None)
+    check(resolve is not None, "ops.resolve_view_camera 纯函数存在")
+    if resolve is None:
+        return
+
+    viewport_camera = object()
+    scene_camera = object()
+
+    # ---- 1. 视口处于相机视角 + 视口相机有效 -> 视口相机 ----
+    result = resolve(viewport_camera, 'CAMERA', scene_camera)
+    check(result[0] is viewport_camera, "视口相机视角下返回视口相机", result)
+    check(result[1] == "viewport", "来源标记为 viewport", result)
+
+    # ---- 2. 本次澄清的核心：视口相机 != 场景相机时必须返回视口相机 ----
+    result = resolve(viewport_camera, 'CAMERA', scene_camera)
+    check(result[0] is not scene_camera and result[0] is viewport_camera,
+          "视口相机与场景活动相机是两台时，返回视口相机（本次澄清的核心）", result)
+    check(result[0] is viewport_camera,
+          "视口相机与场景相机不同 -> 选视口相机，不是 scene.camera", result)
+
+    # ---- 3. 相机视角但视口相机为 None -> 回退场景相机 ----
+    result = resolve(None, 'CAMERA', scene_camera)
+    check(result[0] is scene_camera, "视口处于相机视角但视口相机为空时回退场景相机", result)
+    check(result[1] == "scene", "回退时来源标记为 scene", result)
+
+    # ---- 4. 非相机视角（自由 / 用户视角）-> 场景相机，哪怕视口相机有效 ----
+    for perspective in ('PERSP', 'ORTHO', '', None):
+        result = resolve(viewport_camera, perspective, scene_camera)
+        check(result[0] is scene_camera,
+              "视角是 {!r} 时用场景活动相机（不用视口相机）".format(perspective), result)
+        check(result[1] == "scene", "非相机视角的来源标记是 scene", result)
+
+    # ---- 5. 两者都没有 -> None（算符据此 CANCELLED）----
+    result = resolve(None, 'CAMERA', None)
+    check(result[0] is None, "两者都没有时返回 None（算符据此返回 CANCELLED）", result)
+    result = resolve(None, 'PERSP', None)
+    check(result[0] is None, "非相机视角且场景也没有相机时返回 None", result)
+    result = resolve(viewport_camera, '', None)
+    check(result[0] is None,
+          "非相机视角 + 场景无相机时，视口相机有效也不选中它（按解析顺序回退）", result)
+
+    # ---- 6. 源码级：解析顺序（先看视角、再看视口相机、最后回退场景相机）写进了注释 ----
+    body = function_source(source_of(module, "ops.py"), "resolve_view_camera")
+    check("view_perspective == 'CAMERA'" in body,
+          "判定依据是 region_3d.view_perspective == 'CAMERA'", body[:200])
+    check("space_camera is not None" in body, "先看视角，再看视口相机是否有效")
+    check("scene_camera is not None" in body, "视口相机不可用时才回退场景活动相机")
+    comment_start = body.find('"""')
+    comment_end = body.find('"""', comment_start + 3)
+    docstring = body[comment_start:comment_end + 3] if comment_end > 0 else ""
+    check("解析顺序" in docstring, "docstring 里写明了三条解析顺序")
+
+    # ---- 7. 报告文案必须能区分来源（用户据此判断对不对）----
+    class_body = class_source(source_of(module, "ops.py"), "HHZ_OT_select_active_camera")
+    check("视口相机" in class_body and "场景活动相机" in class_body,
+          "成功报告里能看出相机来自视口还是场景活动相机")
+    check("select_get()" in class_body, "报告成功前仍然做 select_get() 校验")
+    check("已选中当前视角使用的相机" in class_body,
+          "成功文案是「已选中当前视角使用的相机：<名字>（来源）」")
+
+
+def test_select_active_camera(module):
+    section("功能：一键选中当前相机（2.17.0 饼菜单左上）")
+
+    # ---- 1. 算符已注册、bl_idname 精确、bl_options 含 UNDO ----
+    operator = operator_class(module, "select_active_camera")
+    check(operator is not None, "算符 hhz.select_active_camera 存在")
+    if operator is None:
+        reset_scene()
+        return
+    check(operator.bl_idname == "hhz.select_active_camera",
+          "bl_idname 精确等于 hhz.select_active_camera", operator.bl_idname)
+    check(operator.bl_label == "一键选中当前相机",
+          "算符中文名是「一键选中当前相机」", operator.bl_label)
+    options = set(operator.bl_options)
+    check('UNDO' in options, "bl_options 含 UNDO（能 Ctrl+Z 撤销）", sorted(options))
+    check('REGISTER' in options, "bl_options 含 REGISTER", sorted(options))
+    check(getattr(bpy.types, "HHZ_OT_select_active_camera", None) is not None,
+          "算符类已注册到 bpy.types")
+
+    # ---- 2. 实现方式：必须用数据 API，不能用需要上下文的 bpy.ops.object.select_all ----
+    source = source_of(module, "ops.py")
+    class_body = class_source(source, "HHZ_OT_select_active_camera")
+    # 只看代码行：注释里为了说明「不能用 select_all」必然会出现这个名字，
+    # 不能把说明文字当成真实调用（断言本身踩过一次，记在这里）。
+    code_lines = [line for line in class_body.splitlines()
+                  if not line.strip().startswith("#")]
+    code_text = "\n".join(code_lines)
+    check("bpy.ops.object.select_all" not in code_text
+          and "object.select_all" not in code_text,
+          "实现里没有用 bpy.ops.object.select_all（那需要界面上下文）",
+          [line.strip() for line in code_lines if "select_all" in line])
+    check("select_set(" in code_text, "用 select_set() 数据 API 改选择")
+    check("resolve_view_camera(" in class_body,
+          "相机来源统一走纯函数 resolve_view_camera 解析")
+    check("getattr(space, \"camera\", None)" in class_body
+          or "space.camera" in class_body,
+          "视口分支取的是 space_data.camera")
+
+    # ---- 3. 运行时（无头）：没有 VIEW_3D 相机视角 -> 走回退分支 ----
+    reset_scene()
+    camera = bpy.data.objects.new("CameraSelectTest", bpy.data.cameras.new("CameraSelectData"))
+    bpy.context.scene.collection.objects.link(camera)
+    cube = add_cube("CubeSelectTest")
+    bpy.context.scene.camera = camera
+    select_only([cube])
+    check(bpy.context.view_layer.objects.active == cube,
+          "前置状态：活动物体是立方体", getattr(bpy.context.view_layer.objects.active, "name", None))
+    check(cube.select_get() and not camera.select_get(),
+          "前置状态：只有立方体被选中")
+
+    result = bpy.ops.hhz.select_active_camera()
+    check(result == {'FINISHED'}, "有相机时返回 FINISHED", result)
+    check(camera.select_get(), "跑完算符后相机被选中")
+    check(not cube.select_get(), "跑完算符后立方体不再被选中")
+    selected = [obj.name for obj in bpy.context.view_layer.objects if obj.select_get()]
+    check(selected == [camera.name], "只有相机被选中（选中集合只有它一个）", selected)
+    check(bpy.context.view_layer.objects.active == camera,
+          "view_layer.objects.active 是相机",
+          getattr(bpy.context.view_layer.objects.active, "name", None))
+
+    # ---- 4. 无相机：CANCELLED、不抛异常、不改动原有选择 ----
+    bpy.context.scene.camera = None
+    select_only([cube])
+    before_names = sorted(obj.name for obj in bpy.context.view_layer.objects if obj.select_get())
+    before_active = getattr(bpy.context.view_layer.objects.active, "name", None)
+    try:
+        result = bpy.ops.hhz.select_active_camera()
+        crashed = False
+    except Exception as error:
+        result = None
+        crashed = True
+        check(False, "没有活动相机时算符不抛异常", repr(error))
+    if not crashed:
+        check(result == {'CANCELLED'}, "没有活动相机时返回 CANCELLED", result)
+    after_names = sorted(obj.name for obj in bpy.context.view_layer.objects if obj.select_get())
+    after_active = getattr(bpy.context.view_layer.objects.active, "name", None)
+    check(after_names == before_names, "没有活动相机时不改动原有选择",
+          (before_names, after_names))
+    check(after_active == before_active, "没有活动相机时不改动活动物体",
+          (before_active, after_active))
+
+    # ---- 5. 相机不可见（hide_viewport）：如实报告，绝不谎报成功 ----
+    bpy.context.scene.camera = camera
+    select_only([cube])
+    camera.hide_viewport = True
+    result = bpy.ops.hhz.select_active_camera()
+    if result == {'FINISHED'}:
+        check(camera.select_get() and bpy.context.view_layer.objects.active == camera,
+              "相机隐藏却报告 FINISHED 时，必须真的选中了相机并设为活动物体",
+              (camera.select_get(), getattr(bpy.context.view_layer.objects.active, "name", None)))
+    else:
+        check(result == {'CANCELLED'},
+              "相机被隐藏时返回 CANCELLED（没有谎报成功）", result)
+        check(not camera.select_get(),
+              "相机被隐藏时确实没有被选中（报告与实际一致）")
+    camera.hide_viewport = False
+
+    # ---- 6. 相机可见且已选中时再跑一次：幂等，仍然只选中相机 ----
+    camera.hide_viewport = False
+    select_only([cube])
+    result = bpy.ops.hhz.select_active_camera()
+    check(result == {'FINISHED'}, "相机恢复可见后返回 FINISHED", result)
+    selected = [obj.name for obj in bpy.context.view_layer.objects if obj.select_get()]
+    check(selected == [camera.name], "恢复可见后只有相机被选中", selected)
+    check(bpy.context.view_layer.objects.active == camera,
+          "恢复可见后活动物体是相机",
+          getattr(bpy.context.view_layer.objects.active, "name", None))
+
+    # 无头环境构造不出「视口相机 != 场景相机」的 GUI 状态，这一分支只由上面的
+    # 纯函数断言覆盖，如实标注，不假装做过真机验证。
+    space = getattr(bpy.context, "space_data", None)
+    if space is not None and getattr(space, "type", "") == 'VIEW_3D':
+        check(True, "当前上下文有 3D 视口（视口分支在本环境可测）")
+    else:
+        skip("无头环境没有 VIEW_3D 视口的相机视角：GUI 下的视口相机分支未做真机验证（纯函数已覆盖）")
+
+    # ---- 收尾：清掉本用例造的相机与立方体，不污染其它用例 ----
+    reset_scene()
+    leftover = [obj.name for obj in bpy.data.objects]
+    check(not leftover, "收尾后测试造出来的物体都清掉了", leftover)
+    check(bpy.context.scene.camera is None, "收尾后场景活动相机回到空")
 
 
 def test_panel_order(module):
@@ -5960,7 +6163,9 @@ def main():
     run("第 4 个预设「自定义预设」", test_custom_preset, module)
     run("颜色项两级短选择（可达性不变式）", test_target_selector, module)
     run("主题页 UI 约定（ZML_LAB）", test_theme_ui_conventions, module)
-    run("饼菜单方位（2.16.1 重排）", test_pie_unchanged, module)
+    run("饼菜单方位（2.17.0 左上换成选中当前相机）", test_pie_unchanged, module)
+    run("纯函数：当前视角相机解析", test_view_camera_resolution, module)
+    run("一键选中当前相机（饼菜单左上）", test_select_active_camera, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)

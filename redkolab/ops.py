@@ -9,6 +9,7 @@
 * :class:`HHZ_OT_remove_all_modifiers`  一键删除所有修改器
 * :class:`HHZ_OT_flip_normals`          一键翻面（整体翻转网格所有面的朝向）
 * :class:`HHZ_OT_detect_flipped`        检测是否有物体整体翻面（只读，不改任何数据）
+* :class:`HHZ_OT_select_active_camera`  一键选中当前相机（当前视角使用的相机，只改选择不改数据）
 
 另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键、
 检查并修复缺失文件，以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
@@ -890,6 +891,150 @@ class HHZ_OT_toggle_face_orientation(bpy.types.Operator):
             self.report({'INFO'}, "已打开 {} 个视口的面朝向".format(changed))
         else:
             self.report({'INFO'}, "已关闭 {} 个视口的面朝向".format(changed))
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------- 一键选中当前相机
+
+
+def _view_layer_objects(context):
+    """当前视图层里能被遍历到的物体。
+
+    用 ``context.view_layer.objects``（视图层 + 当前集合可见范围），
+    而不是 ``bpy.data.objects`` —— 被排除出视图层的物体本来就不该被这一步碰到。
+    ``--background`` 下同样能取到，所以这条路径无头可测。
+    """
+    view_layer = getattr(context, "view_layer", None)
+    if view_layer is None:
+        return []
+    try:
+        return list(view_layer.objects)
+    except Exception:
+        return []
+
+
+def resolve_view_camera(space_camera, view_perspective, scene_camera):
+    """算出「我现在正在用它看场景的那台相机」—— **纯函数**，不碰 bpy。
+
+    用户要的语义是「选中的相机 = 当前正在使用的相机视角的相机」，不是简单的
+    ``scene.camera``：3D 视口可以有**独立的相机覆盖**，这时那个视口看的是
+    ``space_data.camera``，与场景活动相机不是同一台。
+
+    解析顺序（判定依据必须按这个顺序，先看视角、再看视口相机是否有效、最后回退）：
+
+    1. 视口**正处于相机视角**（``region_3d.view_perspective == 'CAMERA'``）
+       且该视口的相机**有效**（``space_data.camera`` 不是 None）
+       → 返回**视口相机**（哪怕它和场景活动相机不是同一台）。
+    2. 否则（自由 / 用户视角、不在 3D 视口、无头环境，或视口相机为 None）
+       → 回退返回**场景活动相机**（``scene.camera``，也就是按 Numpad 0 会进入的那台）。
+    3. 两者都没有 → 返回 ``None``，由调用方给出友好提示并 ``CANCELLED``。
+
+    返回值是 ``(相机, 来源)``；来源取值 ``"viewport"`` / ``"scene"``，
+    调用方据此在报告里说清是哪一种，用户才能判断对不对。
+    逻辑与 bpy 完全解耦，所以无头环境能逐条穷举测试。
+    """
+    if view_perspective == 'CAMERA' and space_camera is not None:
+        return space_camera, "viewport"
+    if scene_camera is not None:
+        return scene_camera, "scene"
+    return None, ""
+
+
+class HHZ_OT_select_active_camera(bpy.types.Operator):
+    """一键选中当前相机：把当前视角使用的相机选成唯一选中物体并设为活动物体。"""
+
+    bl_idname = "hhz.select_active_camera"
+    bl_label = "一键选中当前相机"
+    bl_description = (
+        "选中当前正在使用的相机视角的那台相机：在相机视角下取该视口的相机，"
+        "否则取场景活动相机；取消其它物体选择，只留它并设为活动物体；"
+        "相机被隐藏或不可见时如实报告，不假装选中"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def _view_camera_arguments(self, context):
+        """把上下文里与「当前视角相机」有关的三个值取出来，交给纯函数解析。"""
+        space_camera = None
+        view_perspective = ""
+        space = getattr(context, "space_data", None)
+        if space is not None and getattr(space, "type", "") == 'VIEW_3D':
+            space_camera = getattr(space, "camera", None)
+            region_3d = getattr(context, "region_data", None)
+            if region_3d is None:
+                region_3d = getattr(space, "region_3d", None)
+            view_perspective = getattr(region_3d, "view_perspective", "") or ""
+        scene = getattr(context, "scene", None)
+        return space_camera, view_perspective, getattr(scene, "camera", None)
+
+    def execute(self, context):
+        space_camera, view_perspective, scene_camera = self._view_camera_arguments(context)
+        camera, origin = resolve_view_camera(space_camera, view_perspective, scene_camera)
+
+        # 两者都没有：友好提示 + CANCELLED，不抛异常
+        if camera is None:
+            self.report({'WARNING'}, "当前没有可用的相机（场景没有设置活动相机）")
+            return {'CANCELLED'}
+
+        view_layer = getattr(context, "view_layer", None)
+        if view_layer is None:
+            self.report({'WARNING'}, "当前上下文没有视图层，无法选中相机")
+            return {'CANCELLED'}
+
+        # 数据 API 选物体：不能用 bpy.ops.object.select_all（那需要界面上下文）
+        members = _view_layer_objects(context)
+        skipped_names = []
+        for obj in members:
+            if obj == camera:
+                continue
+            try:
+                if obj.select_get():
+                    obj.select_set(False)
+            except Exception:
+                # 个别物体改不动（隐藏 / 特殊状态）不影响主流程，只记录
+                skipped_names.append(obj.name)
+
+        error = None
+        try:
+            camera.select_set(True)
+            context.view_layer.objects.active = camera
+        except Exception as trouble:
+            error = str(trouble)
+
+        # 如实校验：选不上就报原因，绝不谎报成功
+        selected = False
+        try:
+            selected = bool(camera.select_get())
+        except Exception:
+            selected = False
+
+        if not selected or error:
+            in_view_layer = any(obj == camera for obj in members)
+            if bool(getattr(camera, "hide_viewport", False)):
+                reason = "当前相机被隐藏，无法选中"
+            elif not in_view_layer:
+                reason = "当前相机不在当前视图层的可见集合里，无法选中"
+            else:
+                reason = "当前相机无法被选中（Blender 拒绝了选择）"
+            self.report({'WARNING'}, reason)
+            return {'CANCELLED'}
+
+        active = getattr(view_layer.objects, "active", None)
+        if active != camera:
+            self.report({'WARNING'}, "当前相机无法设为活动物体")
+            return {'CANCELLED'}
+
+        # 报告里必须能看出相机来自哪种来源，用户才能判断选对了没有
+        if origin == "viewport":
+            source_text = "视口相机"
+        else:
+            source_text = "场景活动相机"
+        if skipped_names:
+            self.report({'WARNING'},
+                        "已选中当前视角使用的相机：{}（{}，{} 个隐藏物体改不动）".format(
+                            camera.name, source_text, len(skipped_names)))
+        else:
+            self.report({'INFO'}, "已选中当前视角使用的相机：{}（{}）".format(
+                camera.name, source_text))
         return {'FINISHED'}
 
 
