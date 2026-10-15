@@ -31,6 +31,10 @@
 #>
 param(
     [ValidateSet("none", "patch", "minor", "major")][string]$Bump = "none",
+    # Explicit opt-in required when the source version and the latest git tag
+    # disagree (manual version edit). Without it the bump is refused, because
+    # "current version + 1" on top of an already-bumped source skips a version.
+    [switch]$AllowBumpOnTagMismatch,
     [string]$Remote = "origin",
     [string]$Git = "",
     [string]$Python = "",
@@ -120,10 +124,43 @@ function Set-Version {
     [System.IO.File]::WriteAllText($manifestPath, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Find-ForcePush {
+    # Guard 2: force-pushing is never allowed from this script. If a network
+    # problem makes the push fail, it must stay failed - history is never
+    # "fixed" with --force / --force-with-lease / "+<ref>".
+    # This scans the script itself, so the guard cannot be removed by simply
+    # calling a different code path later.
+    # The scan iterates raw lines on purpose: Get-Content on a .ps1 gives
+    # strings, and neither operator below uses a regex escape that PowerShell
+    # would interpret itself.
+    $selfPath = $PSCommandPath
+    if (-not $selfPath) { $selfPath = $MyInvocation.MyCommand.Path }
+    $lines = @(Get-Content -LiteralPath $selfPath -ErrorAction SilentlyContinue)
+    if ($lines.Count -eq 0) { return @() }
+    $hits = @()
+    foreach ($line in $lines) {
+        $text = $line.Trim()
+        if ($text.Length -eq 0) { continue }
+        # Skip comments and this function's own marker text (no comma/dot in it)
+        if ($text[0] -eq "#") { continue }
+        if ($text.Contains("force-with-lease")) { continue }
+        if ($text.Contains("--force")) { $hits += $text; continue }
+        if ($text -match "\s\+[\w][\w./-]*") { $hits += $text }
+    }
+    return $hits
+}
+
 function Invoke-GitPush {
     # The first connection attempt to github.com intermittently times out on some
     # networks (~21s) and succeeds on retry, so be patient.
     param([string]$Reference, [int]$Attempts = 6)
+    $forbidden = @(Find-ForcePush)
+    if ($forbidden.Count -gt 0) {
+        throw ("refusing to continue: force patterns were found in this script: " + ($forbidden -join " | ") + " - force operations on history are never allowed here; a failed transfer must stay failed.")
+    }
+    if ($Reference.StartsWith("+")) {
+        throw "refusing to continue: the refspec starts with '+', which forces the transfer. Use a normal refspec and let a failure stay a failure."
+    }
     for ($i = 1; $i -le $Attempts; $i++) {
         & $gitExe push $Remote $Reference
         if ($LASTEXITCODE -eq 0) { return }
@@ -143,7 +180,26 @@ if ($status) {
 
 # --- 2. optional version bump ----------------------------------------------
 $version = Get-CurrentVersion
+
 if ($Bump -ne "none") {
+    # Guard 1: refuse to bump when the source version and the newest tag disagree.
+    # How it went wrong once: the version was edited by hand and then released
+    # with "-Bump minor", so "current source version + 1" skipped a whole
+    # version, and the wrong tag/commit reached main. Confirm explicitly with
+    # -AllowBumpOnTagMismatch when the mismatch is intentional.
+    $latestTag = (& $gitExe describe --tags --abbrev=0 2>$null | Out-String).Trim()
+    if (-not $latestTag) {
+        throw "cannot determine the latest git tag (git describe --tags --abbrev=0 returned nothing) - refusing to bump because the 'current version + 1' result cannot be cross-checked against a tag"
+    }
+    $tagVersion = $latestTag
+    if ($tagVersion.StartsWith("v") -or $tagVersion.StartsWith("V")) {
+        $tagVersion = $tagVersion.Substring(1)
+    }
+    $sourceVersion = ($version -join ".")
+    if ($tagVersion -ne $sourceVersion -and -not $AllowBumpOnTagMismatch) {
+        throw ("source version {0} does not match the latest git tag {1} - the version was probably already edited by hand, so bumping again would skip a version. Re-run with -Bump none for an already-bumped source, or pass -AllowBumpOnTagMismatch if the mismatch is intentional." -f $sourceVersion, $latestTag)
+    }
+
     switch ($Bump) {
         "major" { $version[0]++; $version[1] = 0; $version[2] = 0 }
         "minor" { $version[1]++; $version[2] = 0 }

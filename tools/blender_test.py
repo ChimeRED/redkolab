@@ -505,7 +505,7 @@ def test_registration(module_name, module):
 
     # 2.16.0 新增的三个算符：已注册 + 可调用 + bl_idname 精确比对
     for idname in ("flip_normals", "detect_flipped", "toggle_face_orientation",
-                   "select_active_camera"):
+                   "select_active_camera", "grayscale_filter"):
         operator = operator_class(module, idname)
         check(operator is not None, "算符 hhz.{} 已注册".format(idname))
         if operator is None:
@@ -5137,19 +5137,29 @@ def pie_operator_idnames(source):
 
 # 2.16.1 饼菜单方位表：槽位顺序就是方位顺序
 #   0=左(W) 1=右(E) 2=下(S) 3=上(N) 4=左上(NW) 5=右上(NE) 6=左下(SW) 7=右下(SE)
-# 2.17.0：左上（4）由空位改成「一键选中当前相机」，只剩右上（5）一个空位。
+# 2.18.0：右上（5）由空位改成「灰度滤镜」，8 个槽位全部填满，0 个空位。
 PIE_SLOT_DIRECTIONS = ("左", "右", "下", "上", "左上", "右上", "左下", "右下")
 PIE_PLACEHOLDER = "__placeholder__"
-PIE_EMPTY_SLOTS = (5,)
+PIE_EMPTY_SLOTS = ()
 PIE_EXPECTED_SLOTS = (
     "hhz.apply_all_modifiers",       # 0 左
     "hhz.flip_normals",              # 1 右
     "hhz.remove_all_materials",      # 2 下
     "hhz.stairs",                    # 3 上（保持不动）
-    "hhz.select_active_camera",      # 4 左上（2.17.0 新增，原来这里是空位）
-    PIE_PLACEHOLDER,                 # 5 右上 空位
+    "hhz.select_active_camera",      # 4 左上（2.17.0 新增）
+    "hhz.grayscale_filter",          # 5 右上（2.18.0 新增，原来这里是空位）
     "hhz.remove_all_modifiers",      # 6 左下
     "hhz.toggle_face_orientation",   # 7 右下
+)
+#: 2.18.0 之前就在饼菜单里的 7 个算符，一个都不许少
+PIE_OPERATORS_BEFORE_2180 = (
+    "hhz.apply_all_modifiers",
+    "hhz.flip_normals",
+    "hhz.remove_all_materials",
+    "hhz.stairs",
+    "hhz.select_active_camera",
+    "hhz.remove_all_modifiers",
+    "hhz.toggle_face_orientation",
 )
 
 
@@ -5222,8 +5232,8 @@ def panels_with_parent_id(source):
 
 
 def test_pie_unchanged(module):
-    section("饼菜单方位（2.17.0：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
-            "选中当前相机=左上、空位=右上、删除修改器=左下、查看面朝向=右下）")
+    section("饼菜单方位（2.18.0：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
+            "选中当前相机=左上、灰度滤镜=右上、删除修改器=左下、查看面朝向=右下）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
         source = handle.read()
@@ -5238,24 +5248,23 @@ def test_pie_unchanged(module):
 
     check(operators_in_order == [name for name in PIE_EXPECTED_SLOTS
                                  if name != PIE_PLACEHOLDER],
-          "算符顺序 == 2.17.0 目标方位顺序（左/右/下/上/左上/左下/右下）",
+          "算符顺序 == 2.18.0 目标方位顺序（左/右/下/上/左上/右上/左下/右下）",
           operators_in_order)
     check(len(items) == len(PIE_EXPECTED_SLOTS),
-          "饼菜单正好 {} 个槽位项（7 个算符 + 1 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
+          "饼菜单正好 {} 个槽位项（8 个算符 + 0 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
           [kinds.count("operator"), kinds.count("separator")])
-    check(kinds.count("operator") == 7 and kinds.count("separator") == 1,
-          "饼菜单 = 7 个算符 + 1 个占位项（只剩右上一个空位）",
+    check(kinds.count("operator") == 8 and kinds.count("separator") == 0,
+          "饼菜单 = 8 个算符 + 0 个占位项（8 个方位全部填满，没有空位）",
           [kinds.count("operator"), kinds.count("separator")])
 
-    # ---- 空位占位项：只剩第 6 个位置（右上）----
-    check(len(items) >= 6, "饼菜单至少有 6 项才能谈空位", items)
-    if len(items) >= 6:
-        empty_slots = [index for index, kind in enumerate(kinds) if kind == "separator"]
-        check(empty_slots == list(PIE_EMPTY_SLOTS),
-              "空位占位项只剩第 6 个槽位 pie.separator()（对应「右上」）",
-              empty_slots)
-        check(kinds[4] != "separator",
-              "左上（第 5 个槽位）不再是空位，已被 2.17.0 的按钮占住", items[4])
+    # ---- 空位占位项：2.18.0 起一个都不剩 ----
+    empty_slots = [index for index, kind in enumerate(kinds) if kind == "separator"]
+    check(empty_slots == list(PIE_EMPTY_SLOTS),
+          "饼菜单里不再有任何 pie.separator() 占位项（8 个方位全满）",
+          empty_slots)
+    check(len(items) == 8,
+          "饼菜单项数正好等于 8（饼菜单只有 8 个方位，多一个就会挤掉别的）",
+          len(items))
     # 逐槽核对放的东西，错位时一眼看出是哪个方位错了
     for index, expected in enumerate(PIE_EXPECTED_SLOTS):
         if index >= len(items):
@@ -5267,6 +5276,9 @@ def test_pie_unchanged(module):
     check(len(slots) >= 5 and slots[4] == "hhz.select_active_camera",
           "「一键选中当前相机」在槽位 4（左上）",
           slots[4] if len(slots) > 4 else slots)
+    check(len(slots) >= 6 and slots[5] == "hhz.grayscale_filter",
+          "「灰度滤镜」在槽位 5（右上），原来是这里的空位",
+          slots[5] if len(slots) > 5 else slots)
 
     # ---- 数量与集合：与顺序断言分开写 ----
     found = set(operators_in_order)
@@ -5277,17 +5289,28 @@ def test_pie_unchanged(module):
         "hhz.stairs",
     }
     added_before = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
-    check(len(found) == 7, "饼菜单正好 7 个算符", sorted(found))
-    check(found == expected_before | added_before | {"hhz.select_active_camera"},
-          "饼菜单 = 原有 4 项 + 一键翻面 + 一键查看面朝向 + 一键选中当前相机", sorted(found))
+    check(len(found) == 8, "饼菜单正好 8 个算符", sorted(found))
+    check(found == expected_before | added_before
+          | {"hhz.select_active_camera", "hhz.grayscale_filter"},
+          "饼菜单 = 原有 6 项 + 一键选中当前相机 + 灰度滤镜", sorted(found))
     for idname in sorted(expected_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
     for idname in sorted(added_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
     check("hhz.select_active_camera" in found,
-          "新增的 hhz.select_active_camera 在饼菜单里", sorted(found))
+          "原有的 hhz.select_active_camera 在饼菜单里", sorted(found))
+    check("hhz.grayscale_filter" in found,
+          "新增的 hhz.grayscale_filter 在饼菜单里", sorted(found))
     check(len(found & expected_before) == 4, "原有 4 项一个不少", sorted(found & expected_before))
     check(expected_before | added_before <= found, "原有 6 项一个不少（位置与集合都没丢）",
+          sorted(found))
+    # 2.18.0 的「其余 7 项一字不动」：单独断言新表与原 7 项完全一致
+    before_counts = [name for name in operators_in_order
+                     if name != "hhz.grayscale_filter"]
+    check(tuple(before_counts) == PIE_OPERATORS_BEFORE_2180,
+          "2.18.0 之前就在饼菜单里的 7 项位置与顺序一字未动",
+          before_counts)
+    check(set(PIE_OPERATORS_BEFORE_2180) <= found, "原有 7 项一个不少（含重复算符）",
           sorted(found))
 
     # ---- 既有意图保持：检测反面不进饼菜单 ----
@@ -5322,8 +5345,8 @@ def test_pie_unchanged(module):
     pie_class = class_source(source, "HHZ_MT_pie")
     check("0=左" in pie_class and "7=右下" in pie_class,
           "draw() 附近写明了方位映射 0=左 … 7=右下")
-    check("占位" in pie_class or "空位" in pie_class,
-          "draw() 附近写明了空位要用占位项顶住")
+    check("空位" in pie_class or "占位" in pie_class,
+          "draw() 附近写明了空位要用占位项顶住（2.18.0 起 8 个方位已填满）")
 
 
 def test_view_camera_resolution(module):
@@ -5505,11 +5528,180 @@ def test_select_active_camera(module):
     else:
         skip("无头环境没有 VIEW_3D 视口的相机视角：GUI 下的视口相机分支未做真机验证（纯函数已覆盖）")
 
-    # ---- 收尾：清掉本用例造的相机与立方体，不污染其它用例 ----
-    reset_scene()
-    leftover = [obj.name for obj in bpy.data.objects]
-    check(not leftover, "收尾后测试造出来的物体都清掉了", leftover)
-    check(bpy.context.scene.camera is None, "收尾后场景活动相机回到空")
+
+#: 2.18.0 测得的灰度 Look 名（OCIO 配置里两版 Blender 都有；真灰度、R=G=B）
+GRAYSCALE_LOOK = "AgX - Greyscale"
+
+
+def test_grayscale_filter(module):
+    section("灰度滤镜（2.18.0：切换语义 + 无损还原 + 明确告知影响渲染）")
+
+    # ---- 1. 注册 / bl_idname / bl_label / bl_options ----
+    operator = operator_class(module, "grayscale_filter")
+    check(operator is not None, "算符 hhz.grayscale_filter 存在")
+    if operator is None:
+        return
+    check(operator.bl_idname == "hhz.grayscale_filter",
+          "bl_idname 精确等于 hhz.grayscale_filter", operator.bl_idname)
+    check(operator.bl_label == "灰度滤镜",
+          "bl_label 精确等于「灰度滤镜」（用户要的功能名）", operator.bl_label)
+    check(getattr(operator, "__doc__", "") and "灰度" in operator.__doc__,
+          "算符有中文说明文档字符串", getattr(operator, "__doc__", None))
+    options = set(operator.bl_options)
+    check('UNDO' in options, "bl_options 含 UNDO（能 Ctrl+Z 撤销）", sorted(options))
+    check('REGISTER' in options, "bl_options 含 REGISTER", sorted(options))
+    check(getattr(bpy.types, "HHZ_OT_grayscale_filter", None) is not None,
+          "算符类已注册到 bpy.types")
+    check(getattr(getattr(bpy.ops, "hhz", None), "grayscale_filter", None) is not None,
+          "bpy.ops.hhz.grayscale_filter 可调用")
+
+    # ---- 2. 实现声明与该算符的实测结论一致（静态读源码）----
+    body = class_source(source_of(module, "ops.py"), "HHZ_OT_grayscale_filter")
+    check("AgX - Greyscale" in body,
+          "实现用的是内置灰度 Look 'AgX - Greyscale'（实测两版都有）")
+    check("use_curve_mapping" not in body,
+          "实现没有去动色彩管理曲线（实测只有 C/R/G/B 4 条、没有 S 通道，慎改用户曲线）")
+    check("RGBToBW" not in body,
+          "实现没有走合成器 RGBToBW（实测那会改用户的 scene.use_nodes 与合成树）")
+
+    # ---- 3. 切换语义：开 -> 断言已改 -> 再点 -> 逐项回到初始值 ----
+    scene = bpy.context.scene
+    settings = scene.view_settings
+    state_prop = getattr(module.ops, "GRAYSCALE_STATE_PROPERTY", None)
+    prev_prop = getattr(module.ops, "GRAYSCALE_PREVIOUS_LOOK_PROPERTY", None)
+    check(state_prop is not None and prev_prop is not None,
+          "ops 里定义了记录原状态用的场景属性名", (state_prop, prev_prop))
+    if state_prop is None or prev_prop is None:
+        return
+
+    initial_look = settings.look
+    initial_use_curve_mapping = bool(settings.use_curve_mapping)
+    initial_curves = [[(p.location[0], p.location[1]) for p in curve.points]
+                      for curve in settings.curve_mapping.curves]
+    initial_use_nodes = bool(scene.use_nodes)
+    initial_film_transparent = bool(scene.render.film_transparent)
+    # 让基线可判定：清掉可能残留的旧状态（上一个用例可能开过）
+    for key in (state_prop, prev_prop):
+        if key in scene.keys():
+            del scene[key]
+
+    result = bpy.ops.hhz.grayscale_filter()
+    check(result == {'FINISHED'}, "第一次调用返回 FINISHED", result)
+    check(settings.look == GRAYSCALE_LOOK,
+          "开：view_settings.look == '{}'".format(GRAYSCALE_LOOK), settings.look)
+    enabled, previous, recorded = module.ops.grayscale_preview_state(scene)
+    check(enabled is True, "开：场景上记录了「已开灰度」", enabled)
+    check(recorded is True, "开：场景上记录了原始 Look 值", recorded)
+    check(previous == initial_look,
+          "开：记录的原始 Look == 开之前的真实值", (previous, initial_look))
+    check(bool(scene.get(state_prop, False)) is True,
+          "开：记录的标志位读回为 True", scene.get(state_prop, False))
+
+    result = bpy.ops.hhz.grayscale_filter()
+    check(result == {'FINISHED'}, "第二次调用返回 FINISHED（切换成关）", result)
+    # 逐项比对真实读回值，不用「约等于」
+    check(settings.look == initial_look,
+          "关：view_settings.look 回到初始值", (settings.look, initial_look))
+    check(bool(settings.use_curve_mapping) == initial_use_curve_mapping,
+          "关：use_curve_mapping 回到初始值",
+          (bool(settings.use_curve_mapping), initial_use_curve_mapping))
+    check(bool(scene.use_nodes) == initial_use_nodes,
+          "关：scene.use_nodes 回到初始值（本算符不该碰合成器）",
+          (bool(scene.use_nodes), initial_use_nodes))
+    check(bool(scene.render.film_transparent) == initial_film_transparent,
+          "关：film_transparent 回到初始值",
+          (bool(scene.render.film_transparent), initial_film_transparent))
+    now_curves = [[(p.location[0], p.location[1]) for p in curve.points]
+                  for curve in settings.curve_mapping.curves]
+    check(now_curves == initial_curves,
+          "关：色彩管理曲线逐点回到初始值（本算符不该碰曲线）", now_curves)
+    check(not scene.get(state_prop, False),
+          "关：状态标志位被清掉", scene.get(state_prop, False))
+    check(prev_prop not in scene.keys(),
+          "关：记录的原值属性被清掉（不留下垃圾自定义属性）", list(scene.keys()))
+    check(module.ops.grayscale_preview_state(scene)[0] is False,
+          "关：grayscale_preview_state 报告未开灰度")
+
+    # ---- 4. 「原本就开着」的情况：必须还原成原本那个 Look，不是无脑置 None ----
+    for key in (state_prop, prev_prop):
+        if key in scene.keys():
+            del scene[key]
+    settings.look = "AgX - Punchy"
+    try:
+        result = bpy.ops.hhz.grayscale_filter()
+        check(result == {'FINISHED'}, "原 Look 非 None 时第一次调用返回 FINISHED", result)
+        check(settings.look == GRAYSCALE_LOOK, "原 Look 非 None 时也能切成灰度", settings.look)
+        result = bpy.ops.hhz.grayscale_filter()
+        check(result == {'FINISHED'}, "原 Look 非 None 时第二次调用返回 FINISHED", result)
+        check(settings.look == "AgX - Punchy",
+              "关：还原成「开之前的那一个」Look，而不是无脑置 None", settings.look)
+    except Exception as error:
+        check(False, "原 Look 非 None 的往返不该抛异常", repr(error))
+
+    # ---- 5. 状态属性丢失的旧文件：关闭时回退到 None，不抛异常 ----
+    settings.look = "None"
+    result = bpy.ops.hhz.grayscale_filter()
+    check(result == {'FINISHED'}, "再开一次返回 FINISHED", result)
+    try:
+        del scene[state_prop]
+        del scene[prev_prop]
+    except Exception as error:
+        check(False, "清掉状态属性不该抛异常", repr(error))
+    try:
+        result = bpy.ops.hhz.grayscale_filter()
+        crashed = False
+    except Exception as error:
+        result = None
+        crashed = True
+        check(False, "状态属性丢失时关闭不抛异常", repr(error))
+    if not crashed:
+        check(result == {'FINISHED'}, "状态属性丢失但 Look 是灰度时仍能关闭", result)
+        check(settings.look == "None", "状态属性丢失时回退还原成 None", settings.look)
+
+    # ---- 6. 幂等：关着的时候再点只应是「开」，不会误判成关 ----
+    settings.look = "None"
+    for key in (state_prop, prev_prop):
+        if key in scene.keys():
+            del scene[key]
+    result = bpy.ops.hhz.grayscale_filter()
+    check(result == {'FINISHED'} and settings.look == GRAYSCALE_LOOK,
+          "关着的时候点一下 = 开（不会误判成关）", (result, settings.look))
+    bpy.ops.hhz.grayscale_filter()
+
+    # ---- 7. 报告必须明确告知「会影响最终渲染输出」 ----
+    # 开与关两条路径都在 ops.py 里各写一次，源码断言是最可靠的防线
+    check(body.count("影响最终渲染输出") >= 2,
+          "开灰度的报告文案里写明了「会影响最终渲染输出」（两条路径都写了一次）",
+          body.count("影响最终渲染输出"))
+    check("原始 Look 已还原" in body or "还原" in body,
+          "关灰度的报告文案里写明了已还原")
+
+    # 再用「实跑」核对报告话术：报告文案由 C 层直接落到 Blender 控制台，
+    # Python 里既不能实例化算符（bpy_struct.__new__(type): expected a single
+    # argument），也不能可靠替换 bpy.types.Operator.report，所以这里
+    # 用源码断言 + 真机控制台实际输出（本条用例每次运行都会打印那两行）双重核对。
+    check("已开启灰度滤镜" in body and "已关闭灰度滤镜" in body,
+          "开/关两条报告文案都在实现里（实跑控制台会各打印一行）")
+    check("GRAYSCALE_LOOK_ID" in body,
+          "实现里用常量 GRAYSCALE_LOOK_ID 持有灰度 Look 名，没有散落在文案里")
+    check(getattr(module.ops, "GRAYSCALE_LOOK_ID", None) == GRAYSCALE_LOOK,
+          "ops.GRAYSCALE_LOOK_ID 实测值就是那个内置灰度 Look",
+          getattr(module.ops, "GRAYSCALE_LOOK_ID", None))
+    # 报告文案里不许出现中点号（U+00B7）——用户自定义界面字体画不出来会变乱码
+    check("\u00b7" not in body, "灰度滤镜实现的文案里没有中点号 U+00B7")
+
+    # ---- 8. 收尾：把场景恢复到本用例开始时的样子 ----
+    settings.look = initial_look
+    for key in (state_prop, prev_prop):
+        if key in scene.keys():
+            del scene[key]
+    check(settings.look == initial_look, "收尾：Look 已恢复", settings.look)
+
+    # 无头环境没有真实 3D 视口，"视口里画面真的变灰了" 这一条无法在无头下验证，
+    # 如实标注；能验证到的是「显示 Look 已被切换」（4.0.2 / 5.2.2 的 F12 渲染
+    # 像素实测都是 spread=0 的真灰度，读数见 README 第四节）。
+    skip("无头环境画不出 3D 视口：'视口里肉眼看到的画面变灰' 未做无头验证"
+         "（已验证的是显示 Look 已切换，且实测 F12 像素为真灰度）")
 
 
 def test_panel_order(module):
@@ -6163,9 +6355,10 @@ def main():
     run("第 4 个预设「自定义预设」", test_custom_preset, module)
     run("颜色项两级短选择（可达性不变式）", test_target_selector, module)
     run("主题页 UI 约定（ZML_LAB）", test_theme_ui_conventions, module)
-    run("饼菜单方位（2.17.0 左上换成选中当前相机）", test_pie_unchanged, module)
+    run("饼菜单方位（2.18.0 右上换成灰度滤镜）", test_pie_unchanged, module)
     run("纯函数：当前视角相机解析", test_view_camera_resolution, module)
     run("一键选中当前相机（饼菜单左上）", test_select_active_camera, module)
+    run("灰度滤镜（饼菜单右上）", test_grayscale_filter, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)

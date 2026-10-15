@@ -66,6 +66,7 @@ _classes = (
     ops.HHZ_OT_detect_flipped,
     ops.HHZ_OT_toggle_face_orientation,
     ops.HHZ_OT_select_active_camera,
+    ops.HHZ_OT_grayscale_filter,
     ops.HHZ_OT_stairs,
     ops.HHZ_OT_open_preferences,
     ops.HHZ_OT_capture_hotkey,

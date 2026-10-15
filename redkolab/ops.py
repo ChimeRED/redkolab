@@ -10,6 +10,7 @@
 * :class:`HHZ_OT_flip_normals`          一键翻面（整体翻转网格所有面的朝向）
 * :class:`HHZ_OT_detect_flipped`        检测是否有物体整体翻面（只读，不改任何数据）
 * :class:`HHZ_OT_select_active_camera`  一键选中当前相机（当前视角使用的相机，只改选择不改数据）
+* :class:`HHZ_OT_grayscale_filter`      灰度滤镜（切换色彩管理 Look，会一起影响最终渲染输出）
 
 另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键、
 检查并修复缺失文件，以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
@@ -891,6 +892,219 @@ class HHZ_OT_toggle_face_orientation(bpy.types.Operator):
             self.report({'INFO'}, "已打开 {} 个视口的面朝向".format(changed))
         else:
             self.report({'INFO'}, "已关闭 {} 个视口的面朝向".format(changed))
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------- 灰度滤镜
+#
+# 2.18.0 实测结论（4.0.2 与 5.2.2 各跑一遍，读数见 README 第四节）：
+#
+# * 色彩管理曲线 ``view_settings.curve_mapping`` 的 ``curves`` **只有 4 条**
+#   （Composite / R / G / B，通道名读不到、``curves`` 也不支持 ``new()``），
+#   **没有 Saturation(S) 通道**，所以「把 S 曲线输出设成 0」这条路不存在。
+# * ``ColorManagedViewSettings`` 上**也没有** ``saturation`` 标量
+#   （4.0.2 与 5.2.2 的 RNA 属性列表里都没有）。
+# * 合成器 ``CompositorNodeRGBToBW`` 存在，但它必须改用户的 ``scene.use_nodes``
+#   与合成树（5.x 的树还搬到了 ``scene.compositing_node_group``），
+#   代价远大于收益，不采用。
+# * **Blender 没有「只作用于视口」的灰度开关**（``View3DShading`` /
+#   ``View3DOverlay`` 里没有任何 gray/bw/mono/desatur 属性）。
+#
+# 最终采用现成的色彩管理 Look ``AgX - Greyscale``：它是 OCIO 配置里的
+# 真灰度（Rec.709 亮度权重矩阵，R=G=B），两个版本都存在。
+#
+# **重要：它作用在显示变换（display transform）上，所以会一起改变最终渲染
+# 输出**，不是视口专属开关。因此本算符每次执行都会在报告里明确告知用户，
+# 绝不偷偷影响渲染。
+
+#: 两版 Blender 内置 OCIO 配置里都存在的灰度 Look（实测可写、可读回）
+GRAYSCALE_LOOK_ID = "AgX - Greyscale"
+
+#: 场景自定义属性：本算符开灰度前记录的原值，以及「当前是否已开灰度」。
+#: 这两个值必须能随 .blend 保存并参与撤销，才谈得上「关闭后完全恢复原状态」。
+GRAYSCALE_STATE_PROPERTY = "hhz_grayscale_filter"
+GRAYSCALE_PREVIOUS_LOOK_PROPERTY = "hhz_grayscale_filter_previous_look"
+
+
+def _scene_view_settings(scene):
+    """场景的色彩管理视图设置；拿不到就返回 None（不抛异常）。"""
+    try:
+        return getattr(scene, "view_settings", None)
+    except Exception:
+        return None
+
+
+def _current_look(view_settings):
+    """当前 Look 名；读不到返回 None。"""
+    try:
+        return getattr(view_settings, "look", None)
+    except Exception:
+        return None
+
+
+def _iter_scenes():
+    """当前文件里的所有场景（灰度是场景级设置，每个场景各记各的原值）。"""
+    try:
+        return list(bpy.data.scenes)
+    except Exception:
+        return []
+
+
+def grayscale_preview_state(scene):
+    """返回 ``(是否已开灰度, 记录的原 Look)``。
+
+    已开灰度时原值可能是 ``None``（原本 Look 为空也属于「原本就关着」），
+    所以用第二个布尔一起回传，调用方才分得清「没记录」和「记录的是空值」。
+    """
+    if scene is None:
+        return False, None, False
+    try:
+        enabled = bool(scene.get(GRAYSCALE_STATE_PROPERTY, False))
+    except Exception:
+        enabled = False
+    recorded = False
+    try:
+        recorded = GRAYSCALE_PREVIOUS_LOOK_PROPERTY in scene.keys()
+    except Exception:
+        recorded = False
+    previous = None
+    try:
+        previous = scene.get(GRAYSCALE_PREVIOUS_LOOK_PROPERTY, None)
+    except Exception:
+        previous = None
+    return enabled, previous, recorded
+
+
+class HHZ_OT_grayscale_filter(bpy.types.Operator):
+    """一键相机视角灰度滤镜：在 3D 视口里把画面切换成黑白。"""
+
+    bl_idname = "hhz.grayscale_filter"
+    bl_label = "灰度滤镜"
+    bl_description = (
+        "把画面切换成黑白（用色彩管理内的 AgX - Greyscale 显示 Look）；"
+        "再按一次完全恢复原状态（原 Look 值逐个场景记录后还原）；"
+        "注意：这是显示变换，会同时影响最终渲染输出，不是视口专属开关"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        # 没有场景时优雅禁用（不抛异常）；真正执行时还会再兜一层友好提示
+        try:
+            return context.scene is not None
+        except Exception:
+            return False
+
+    def _targets(self):
+        """可改的场景：拿得到 ``view_settings`` 的那些。"""
+        usable = []
+        for scene in _iter_scenes():
+            if _scene_view_settings(scene) is not None:
+                usable.append(scene)
+        return usable
+
+    def execute(self, context):
+        try:
+            scenes = self._targets()
+        except Exception as trouble:
+            self.report({'WARNING'}, "读取场景失败：{}".format(trouble))
+            return {'CANCELLED'}
+        if not scenes:
+            self.report({'WARNING'}, "当前文件里没有可用场景，无法切换灰度滤镜")
+            return {'CANCELLED'}
+
+        # 用第一个场景的状态代表整个文件的开关状态（本算符统一开、统一关）
+        current = _current_look(_scene_view_settings(scenes[0]))
+        was_enabled = grayscale_preview_state(scenes[0])[0]
+
+        if was_enabled or current == GRAYSCALE_LOOK_ID:
+            return self._turn_off(scenes)
+
+        # 明确告知：这一步会连同最终渲染输出一起变灰，绝不静默改渲染
+        self._enable(scenes)
+        return {'FINISHED'}
+
+    def _enable(self, scenes):
+        changed = 0
+        failures = []
+        for scene in scenes:
+            settings = _scene_view_settings(scene)
+            if settings is None:
+                continue
+            try:
+                scene[GRAYSCALE_PREVIOUS_LOOK_PROPERTY] = _current_look(settings)
+                settings.look = GRAYSCALE_LOOK_ID
+                read_back = _current_look(settings)
+            except Exception as trouble:
+                failures.append("{}（{}）".format(scene.name, trouble))
+                continue
+            if read_back != GRAYSCALE_LOOK_ID:
+                failures.append("{}（Blender 拒绝了灰度 Look）".format(scene.name))
+                continue
+            try:
+                scene[GRAYSCALE_STATE_PROPERTY] = True
+            except Exception:
+                pass
+            changed += 1
+
+        if changed == 0:
+            self.report({'WARNING'},
+                        "未能打开灰度滤镜：{}".format("；".join(failures) or "当前文件里没有可改的场景"))
+            return {'CANCELLED'}
+
+        if failures:
+            self.report({'WARNING'},
+                        "已开启灰度滤镜（{} 个场景）；注意：这也会影响最终渲染输出；"
+                        "{} 个场景没能改（{}）".format(
+                            changed, len(failures), "；".join(failures[:2])))
+        else:
+            self.report({'INFO'},
+                        "已开启灰度滤镜（{} 个场景）；注意：这也会影响最终渲染输出".format(changed))
+        return {'FINISHED'}
+
+    def _turn_off(self, scenes):
+        restored = 0
+        missing = []
+        for scene in scenes:
+            settings = _scene_view_settings(scene)
+            if settings is None:
+                continue
+            enabled, previous, recorded = grayscale_preview_state(scene)
+            try:
+                if recorded:
+                    settings.look = previous
+                elif enabled or _current_look(settings) == GRAYSCALE_LOOK_ID:
+                    # 状态属性丢失（例如场景是从旧文件合并进来的）：退回 None
+                    settings.look = "None"
+                else:
+                    continue
+            except Exception as trouble:
+                missing.append("{}（{}）".format(scene.name, trouble))
+                continue
+            for key in (GRAYSCALE_STATE_PROPERTY, GRAYSCALE_PREVIOUS_LOOK_PROPERTY):
+                try:
+                    if key in scene.keys():
+                        del scene[key]
+                except Exception:
+                    pass
+            restored += 1
+
+        if restored == 0:
+            if missing:
+                self.report({'WARNING'},
+                            "没能还原灰度滤镜：{}".format("；".join(missing[:2])))
+            else:
+                self.report({'WARNING'}, "灰度滤镜并没有开着，无需关闭")
+            return {'CANCELLED'}
+
+        if missing:
+            self.report({'WARNING'},
+                        "已关闭灰度滤镜，{} 个场景的原始 Look 已还原；"
+                        "{} 个场景没能还原（{}）".format(
+                            restored, len(missing), "；".join(missing[:2])))
+        else:
+            self.report({'INFO'},
+                        "已关闭灰度滤镜，{} 个场景的原始 Look 已还原".format(restored))
         return {'FINISHED'}
 
 

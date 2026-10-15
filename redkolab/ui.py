@@ -364,17 +364,15 @@ class HHZ_MT_pie(bpy.types.Menu):
         #   4=左上(NW)  5=右上(NE)  6=左下(SW)  7=右下(SE)
         # 这张表来自 Blender 源码 ui_radial_dir_order[8]（4.5 实测同一顺序）。
         # 所以要挪按钮只能改下面这段的行序，别去动算符本身。
-        # 空位必须用占位项顶住：pie.separator() 会占一个方位序号（源码
-        # ui_litem_layout_radial 里除纯文字标签外每项都让 itemnum 前进一格；
-        # 真机 introspect() 也确认 separator 进了 LAYOUT_RADIAL 的项列表）。
-        # 少顶一个，后面的按钮就会整体前移、跑到别的方位去。
-        # 2.17.0：左上（4）原来的空位换成了「一键选中当前相机」，只剩右上（5）一个空位。
+        # 2.18.0：右上（5）原来是空位占位项 pie.separator()，现在换成「灰度滤镜」，
+        # **8 个方位全部填满，0 个空位**。以后要加东西就得先腾一个槽位出来
+        # （饼菜单只有 8 个方位）；少顶一个占位项会让后面的按钮整体前移、跑位。
         pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')       # 0 左
         pie.operator("hhz.flip_normals", icon='NORMALS_FACE')         # 1 右
         pie.operator("hhz.remove_all_materials", icon='MATERIAL')     # 2 下
         pie.operator("hhz.stairs", icon='MOD_ARRAY')                  # 3 上（需求：保持不动）
         pie.operator("hhz.select_active_camera", icon='CAMERA_DATA')  # 4 左上
-        pie.separator()                                               # 5 右上 空位
+        pie.operator("hhz.grayscale_filter", icon='COLOR')            # 5 右上（2.18.0 新增，原为空位）
         pie.operator("hhz.remove_all_modifiers", icon='TRASH')        # 6 左下
         pie.operator("hhz.toggle_face_orientation", icon='OVERLAY')   # 7 右下
 
