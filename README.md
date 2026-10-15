@@ -909,7 +909,7 @@ python tools/build_zips.py --variant all  # 打所有候选布局，用于对比
 ### 自己跑测试
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\run_tests.ps1 -Blender "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
+powershell -ExecutionPolicy Bypass -File tools\run_tests.ps1 -Blender "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
 ```
 
 会自动判断安装方式（4.2+ 走扩展、4.0/4.1 走传统），并把 Blender 配置目录指到临时目录，

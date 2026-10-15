@@ -4,9 +4,9 @@
 
 .DESCRIPTION
     Pushing the tag triggers .github/workflows/release.yml, which builds the
-    package, self-checks its structure, runs the real Blender test suite on
-    Blender 4.2 / 4.5 / 5.2, then publishes and archives the zip in GitHub
-    Releases.
+    package, self-checks its structure, runs the real Blender test suite on the
+    3-combo matrix (4.0.2 auto / 5.2.2 auto / 5.2.2 extensions), then publishes
+    and archives the zip in GitHub Releases.
 
     Steps performed here (before anything is pushed):
       1. git working tree must be clean
@@ -17,7 +17,9 @@
       6. real-Blender gate (tools/run_tests.ps1, default 4.0.2 / auto) - the
          release is aborted here if the add-on cannot be installed, enabled and
          pass its assertions, so a broken package can never reach a tag
-      7. commit, tag and push (with retries)
+      7. commit, tag and push (with retries). The transfer uses -ProxyUrl only
+         when that switch is given, and even then the proxy is passed per
+         invocation - nothing is ever written to .git/config.
 
     NOTE: this file is intentionally ASCII-only. Windows PowerShell 5.1 reads
     .ps1 files using the system code page, which mangles non-ASCII text and can
@@ -28,6 +30,7 @@
     powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
     powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump minor -DryRun
     powershell -ExecutionPolicy Bypass -File tools\release.ps1 -SkipRealTest
+    powershell -ExecutionPolicy Bypass -File tools\release.ps1 -ProxyUrl http://127.0.0.1:7890
 #>
 param(
     [ValidateSet("none", "patch", "minor", "major")][string]$Bump = "none",
@@ -36,6 +39,13 @@ param(
     # "current version + 1" on top of an already-bumped source skips a version.
     [switch]$AllowBumpOnTagMismatch,
     [string]$Remote = "origin",
+    # Optional proxy for the push step ONLY. Git on Windows does not read the
+    # system (WinINET) proxy, so on a machine where every browser works the push
+    # can still fail; this passes the proxy explicitly as
+    # "-c http.proxy=<url> -c https.proxy=<url>" on the push invocation.
+    # Nothing is written to .git/config. Left empty (the default) the push
+    # command is byte-for-byte the one used before this parameter existed.
+    [string]$ProxyUrl = "",
     [string]$Git = "",
     [string]$Python = "",
     # Local add-on zip library: every release is copied there, replacing older versions
@@ -179,6 +189,56 @@ function Find-ForcePush {
 }
 # --- GUARD2-END ---
 
+function Get-ProxyArgs {
+    # Proxy settings, when requested, are applied to a single git invocation with
+    # -c. Writing them into .git/config is deliberately NOT done: a release
+    # script must not leave the repository permanently reconfigured, and a
+    # one-off proxy should disappear together with the command that needed it.
+    if (-not $ProxyUrl) { return @() }
+    return @("-c", ("http.proxy=" + $ProxyUrl), "-c", ("https.proxy=" + $ProxyUrl))
+}
+
+function Format-ProxyPrefix {
+    # Renders the very same per-invocation flags for the -DryRun preview, so the
+    # printed command line is what would really run.
+    if (-not $ProxyUrl) { return "" }
+    return ("-c http.proxy=" + $ProxyUrl + " -c https.proxy=" + $ProxyUrl + " ")
+}
+
+function Get-SystemProxyHint {
+    # Windows keeps its proxy in the registry and git never consults it, so a
+    # transfer can fail on a machine where every browser works. Read the value
+    # and only *report* it - it is never applied automatically: silently routing
+    # a release transfer through an unexpected proxy is worse than a slow one.
+    try {
+        $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        $enabled = (Get-ItemProperty -Path $key -Name ProxyEnable -ErrorAction Stop).ProxyEnable
+        if (-not $enabled) { return "" }
+        $server = (Get-ItemProperty -Path $key -Name ProxyServer -ErrorAction Stop).ProxyServer
+        if (-not $server) { return "" }
+        $candidate = ""
+        if ($server -match "=") {
+            # Per-protocol form: "http=host:port;https=host:port;ftp=..."
+            foreach ($piece in $server.Split(";")) {
+                $eq = $piece.IndexOf("=")
+                if ($eq -gt 0 -and $piece.Substring(0, $eq).Trim().ToLowerInvariant() -eq "http") {
+                    $candidate = $piece.Substring($eq + 1).Trim()
+                }
+            }
+        } else {
+            # Single form: "host:port" applies to every protocol.
+            $candidate = $server.Trim()
+        }
+        if (-not $candidate) { return "" }
+        if ($candidate -notmatch "^(https?|socks[45]?)://") { $candidate = "http://" + $candidate }
+        # Only report something git can actually parse: scheme://host:port.
+        if ($candidate -notmatch "^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s]+:[0-9]+$") { return "" }
+        return $candidate
+    } catch {
+        return ""
+    }
+}
+
 function Invoke-GitPush {
     # The first connection attempt to github.com intermittently times out on some
     # networks (~21s) and succeeds on retry, so be patient.
@@ -190,8 +250,9 @@ function Invoke-GitPush {
     if ($Reference.StartsWith("+")) {
         throw "refusing to continue: the refspec argument starts with '+', which overwrites the remote side. Use a normal refspec and let a failure stay a failure."
     }
+    $proxyArgs = @(Get-ProxyArgs)
     for ($i = 1; $i -le $Attempts; $i++) {
-        & $gitExe push $Remote $Reference
+        & $gitExe @proxyArgs push $Remote $Reference
         if ($LASTEXITCODE -eq 0) { return }
         Write-Host "push $Reference failed (attempt $i/$Attempts), retrying in 15s ..." -ForegroundColor Yellow
         Start-Sleep -Seconds 15
@@ -299,6 +360,17 @@ if ($DryRun) {
 # --- 6. commit / tag / push -------------------------------------------------
 $branch = (& $gitExe rev-parse --abbrev-ref HEAD).Trim()
 
+# The proxy is used for the transfer only. Say which one (if any) up front so a
+# -DryRun preview shows exactly what the real run would use.
+if ($ProxyUrl) {
+    Write-Host "proxy for the transfer: $ProxyUrl" -ForegroundColor Cyan
+} else {
+    $proxyHint = Get-SystemProxyHint
+    if ($proxyHint) {
+        Write-Host ("hint: the Windows system proxy is {0} and git does not read it; if the upload times out, re-run with -ProxyUrl {0}" -f $proxyHint) -ForegroundColor Yellow
+    }
+}
+
 if ($DryRun) {
     Write-Host ""
     Write-Host "DryRun: all checks passed, nothing was committed or pushed." -ForegroundColor Yellow
@@ -306,8 +378,9 @@ if ($DryRun) {
     Write-Host "  git add -A"
     Write-Host "  git commit -m `"release: $tag`""
     Write-Host "  git tag -a $tag"
-    Write-Host "  git push $Remote $branch"
-    Write-Host "  git push $Remote $tag"
+    $proxyPrefix = Format-ProxyPrefix
+    Write-Host ("  git {0}push {1} {2}" -f $proxyPrefix, $Remote, $branch)
+    Write-Host ("  git {0}push {1} {2}" -f $proxyPrefix, $Remote, $tag)
     exit 0
 }
 
@@ -328,5 +401,5 @@ Invoke-GitPush $tag
 
 Write-Host ""
 Write-Host "pushed $tag" -ForegroundColor Green
-Write-Host "GitHub Actions will now: build -> self-check -> Blender 4.2/4.5/5.2 tests -> publish and archive to Releases"
+Write-Host "GitHub Actions will now: build -> self-check -> Blender 4.0.2 auto / 5.2.2 auto / 5.2.2 extensions tests -> publish and archive to Releases"
 Write-Host "watch it: gh run watch  (or the Actions tab on the repository page)"
