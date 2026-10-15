@@ -17,7 +17,7 @@
     using the system code page, which mangles non-ASCII text without a BOM.
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File tools\run_tests.ps1 -Blender "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
+    powershell -ExecutionPolicy Bypass -File tools\run_tests.ps1 -Blender "D:\build\Blender\5.0\blender.exe"
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools\run_tests.ps1 -Blender "D:\Steam\steamapps\common\Blender\blender.exe" -Mode addon_install -Zip dist\redkolab-1.1.0-hybrid.zip
