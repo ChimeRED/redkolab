@@ -124,31 +124,60 @@ function Set-Version {
     [System.IO.File]::WriteAllText($manifestPath, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 }
 
+# --- GUARD2-BEGIN ---
 function Find-ForcePush {
-    # Guard 2: force-pushing is never allowed from this script. If a network
-    # problem makes the push fail, it must stay failed - history is never
-    # "fixed" with --force / --force-with-lease / "+<ref>".
-    # This scans the script itself, so the guard cannot be removed by simply
-    # calling a different code path later.
-    # The scan iterates raw lines on purpose: Get-Content on a .ps1 gives
-    # strings, and neither operator below uses a regex escape that PowerShell
-    # would interpret itself.
+    # Guard 2: an operation that overwrites history is never allowed from this
+    # script. If a network problem makes the transfer fail, it must stay failed.
+    #
+    # This is a self-scan: the guard reads this very file and looks at the
+    # arguments of the actual push invocation. It cannot be bypassed by calling
+    # a differently named helper later, because it does not care which function
+    # issues the command.
+    #
+    # The forbidden marker is assembled at runtime on purpose: if it appeared
+    # literally in this file, the guard would flag its own source code (that
+    # really happened during development of this guard). The GUARD2 markers let
+    # the scan skip this block for the same reason.
+    $markerStart = "GUARD2" + "-BEGIN"
+    $markerEnd = "GUARD2" + "-END"
+    $dangerTokens = @(("--" + "force"), ("--" + "force" + "-with-lease"))
+
     $selfPath = $PSCommandPath
     if (-not $selfPath) { $selfPath = $MyInvocation.MyCommand.Path }
     $lines = @(Get-Content -LiteralPath $selfPath -ErrorAction SilentlyContinue)
     if ($lines.Count -eq 0) { return @() }
+
     $hits = @()
+    $insideGuard = $false
     foreach ($line in $lines) {
         $text = $line.Trim()
+        if ($text.Contains($markerStart)) { $insideGuard = $true; continue }
+        if ($text.Contains($markerEnd)) { $insideGuard = $false; continue }
+        if ($insideGuard) { continue }
         if ($text.Length -eq 0) { continue }
-        # Skip comments and this function's own marker text (no comma/dot in it)
         if ($text[0] -eq "#") { continue }
-        if ($text.Contains("force-with-lease")) { continue }
-        if ($text.Contains("--force")) { $hits += $text; continue }
-        if ($text -match "\s\+[\w][\w./-]*") { $hits += $text }
+        if ($text -notmatch '(^|\s)push(\s|$)') { continue }
+
+        $parts = $text.Split(" ")
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            if ($parts[$i] -eq "push") {
+                $arguments = @()
+                if ($i + 1 -lt $parts.Count) { $arguments = $parts[($i + 1)..($parts.Count - 1)] }
+                foreach ($token in $arguments) {
+                    # Token-prefix match: "flag=value" style is caught too, while a
+                    # branch name that merely contains the word is not a false hit.
+                    foreach ($banned in $dangerTokens) {
+                        if ($token -eq $banned) { $hits += $text }
+                        elseif ($token.StartsWith($banned + "=")) { $hits += $text }
+                    }
+                    if ($token.StartsWith("+")) { $hits += $text }
+                }
+            }
+        }
     }
     return $hits
 }
+# --- GUARD2-END ---
 
 function Invoke-GitPush {
     # The first connection attempt to github.com intermittently times out on some
@@ -156,10 +185,10 @@ function Invoke-GitPush {
     param([string]$Reference, [int]$Attempts = 6)
     $forbidden = @(Find-ForcePush)
     if ($forbidden.Count -gt 0) {
-        throw ("refusing to continue: force patterns were found in this script: " + ($forbidden -join " | ") + " - force operations on history are never allowed here; a failed transfer must stay failed.")
+        throw ("refusing to continue: history-overwriting arguments were found in this script: " + ($forbidden -join " | ") + " - such arguments are never allowed here; a failed transfer must stay failed.")
     }
     if ($Reference.StartsWith("+")) {
-        throw "refusing to continue: the refspec starts with '+', which forces the transfer. Use a normal refspec and let a failure stay a failure."
+        throw "refusing to continue: the refspec argument starts with '+', which overwrites the remote side. Use a normal refspec and let a failure stay a failure."
     }
     for ($i = 1; $i -le $Attempts; $i++) {
         & $gitExe push $Remote $Reference
