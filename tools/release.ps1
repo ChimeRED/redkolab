@@ -17,7 +17,10 @@
       6. real-Blender gate (tools/run_tests.ps1, default 4.0.2 / auto) - the
          release is aborted here if the add-on cannot be installed, enabled and
          pass its assertions, so a broken package can never reach a tag
-      7. commit, tag and push (with retries). The transfer uses -ProxyUrl only
+      7. commit, tag and push. Only 2 push attempts per ref, and an authentication
+         failure stops immediately (it is not retried): every attempt can pop a
+         GitHub "select an account" window, so blind retrying used to spam the
+         desktop with authorization prompts. The transfer uses -ProxyUrl only
          when that switch is given, and even then the proxy is passed per
          invocation - nothing is ever written to .git/config.
 
@@ -240,10 +243,32 @@ function Get-SystemProxyHint {
     }
 }
 
+# Authentication failures are NOT retried. When the credential helper (GCM) has a
+# stale entry, every push attempt pops a GitHub "select an account" window; blind
+# retrying turns a single failure into a popup storm. Match the usual messages and
+# stop after the first one.
+$AuthFailureMarkers = @(
+    "Authentication failed",
+    "could not read Username",
+    "Invalid username or password",
+    "terminal prompts disabled",
+    "fatal: could not read"
+)
+
+function Test-AuthFailure {
+    param([string]$Text)
+    if (-not $Text) { return $false }
+    foreach ($marker in $AuthFailureMarkers) {
+        if ($Text.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+    }
+    return $false
+}
+
 function Invoke-GitPush {
-    # The first connection attempt to github.com intermittently times out on some
-    # networks (~21s) and succeeds on retry, so be patient.
-    param([string]$Reference, [int]$Attempts = 6)
+    # Attempts: 2 (not 6). Each attempt can trigger an authorization window, so the
+    # retry budget is deliberately tiny and every attempt reports its exit code and
+    # the first stderr line instead of one vague "failed".
+    param([string]$Reference, [int]$Attempts = 2)
     $forbidden = @(Find-ForcePush)
     if ($forbidden.Count -gt 0) {
         throw ("refusing to continue: history-overwriting arguments were found in this script: " + ($forbidden -join " | ") + " - such arguments are never allowed here; a failed transfer must stay failed.")
@@ -253,12 +278,26 @@ function Invoke-GitPush {
     }
     $proxyArgs = @(Get-ProxyArgs)
     for ($i = 1; $i -le $Attempts; $i++) {
-        & $gitExe @proxyArgs push $Remote $Reference
-        if ($LASTEXITCODE -eq 0) { return }
-        Write-Host "push $Reference failed (attempt $i/$Attempts), retrying in 15s ..." -ForegroundColor Yellow
-        Start-Sleep -Seconds 15
+        $ErrorActionPreference = "Continue"
+        $lines = @(& $gitExe @proxyArgs push $Remote $Reference 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+        foreach ($line in $lines) { Write-Host ("  push: " + $line) }
+        if ($code -eq 0) { return }
+        $first = ""
+        foreach ($line in $lines) {
+            if ($line -and $line.Trim()) { $first = $line.Trim(); break }
+        }
+        Write-Host ("push {0} failed (attempt {1}/{2}, exit={3}): {4}" -f $Reference, $i, $Attempts, $code, $first) -ForegroundColor Yellow
+        if (Test-AuthFailure ($lines -join "`n")) {
+            throw ("GitHub authentication failed (exit={0}) on 'git push {1}'. Not retrying: every attempt pops another authorization window. How to fix: (1) if a window asks you to select an account, pick the right one; (2) or push through the local proxy: powershell -ExecutionPolicy Bypass -File tools\release.ps1 -ProxyUrl http://127.0.0.1:7890 (add -Bump none if the version is already bumped); (3) stale cached credential: cmdkey /delete:git:https://github.com then retry. Nothing was forced and the remote was left as it was." -f $code, $Reference)
+        }
+        if ($i -lt $Attempts) {
+            Write-Host ("retrying in 3s ({0} attempt(s) total: every attempt may trigger an auth prompt)" -f $Attempts) -ForegroundColor Yellow
+            Start-Sleep -Seconds 3
+        }
     }
-    throw "git push $Reference failed after $Attempts attempts"
+    throw ("git push {0} failed after {1} attempts. Nothing was forced and the remote was left as it was. If it is a network problem, retry with -ProxyUrl http://127.0.0.1:7890" -f $Reference, $Attempts)
 }
 
 # --- 1. clean tree ----------------------------------------------------------
