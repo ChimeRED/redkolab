@@ -44,7 +44,7 @@
 bl_info = {
     "name": "红红子lab (REDKO_LAB)",
     "author": "Red04",
-    "version": (2, 20, 0),
+    "version": (2, 21, 0),
     "blender": (4, 0, 0),
     "location": "3D 视图 ▸ 侧栏(N) ▸ 红红子lab（建模 / 工具 / 主题 三页）；饼菜单默认快捷键 Ctrl+E",
     "description": "一键删材质、应用/删除修改器、一键楼梯、一键翻面、反面检测、查看面朝向；主题控件配色与字体、页面布局、面板顺序（REDKO_LAB）",
