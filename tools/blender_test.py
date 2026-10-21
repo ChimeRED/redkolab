@@ -31,6 +31,7 @@ import tempfile
 import traceback
 import zipfile
 
+import addon_utils
 import bpy
 
 ARGS = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
@@ -6284,17 +6285,67 @@ def test_layout(module):
 
 
 
-def _make_test_zip(path, folder, version=(1, 2, 3)):
+def _make_test_zip(path, folder, version=(1, 2, 3), marker=""):
     """在临时目录里造一个「像 ZML_LAB 包」的 zip（只写临时目录，不碰真实 addons）。"""
-    body = (
-        "bl_info = {{\n"
-        "    \"name\": \"{folder}\",\n"
-        "    \"version\": ({version}),\n"
-        "    \"blender\": (4, 0, 0),\n"
-        "}}\n"
-    ).format(folder=folder, version=", ".join(str(part) for part in version))
+    body = "bl_info = {\n"
+    body += '    "name": "{}",\n'.format(folder)
+    body += '    "version": ({}),\n'.format(", ".join(str(part) for part in version))
+    body += '    "blender": (4, 0, 0),\n'
+    body += "}\n"
+    if marker:
+        body += 'MARKER = "{}"\n'.format(marker)
+    body += "def register():\n    pass\n\ndef unregister():\n    pass\n"
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("{}/__init__.py".format(folder), body)
+    return path
+
+
+def _isolated_addons_dir():
+    """隔离沙箱里的 addons 目录；不在沙箱时返回 ``None``。
+
+    端到端用例会真的调用 ``preferences.addon_install``（它会写 ``addons`` 目录），
+    所以必须先证明这个目录**不是**用户真实的那一个：配置目录在沙箱里、而且
+    addons 目录确实落在沙箱目录树下面（``<workdir>\\blender_x_y\\scripts\\addons``）。
+    """
+    config = _isolated_config_dir()
+    if config is None:
+        return None
+    addons = bpy.utils.user_resource('SCRIPTS', path='addons')
+    if not addons:
+        return None
+    addons = os.path.abspath(addons)
+    if not os.path.isdir(addons):
+        return None
+    sandbox_root = os.path.abspath(os.path.dirname(config))
+    prefix = os.path.normcase(sandbox_root) + os.sep
+    if not os.path.normcase(addons).startswith(prefix):
+        return None
+    return addons
+
+
+def _write_fake_addon(folder, marker, version=(1, 0)):
+    """在沙箱 addons 目录里写一个最小的假插件（只有 bl_info + 空 register）。"""
+    os.makedirs(folder, exist_ok=True)
+    body = "bl_info = {\n"
+    body += '    "name": "{}",\n'.format(os.path.basename(folder))
+    body += '    "version": ({}),\n'.format(", ".join(str(part) for part in version))
+    body += '    "blender": (4, 0, 0),\n'
+    body += "}\n"
+    body += 'MARKER = "{}"\n'.format(marker)
+    body += "def register():\n    pass\n\ndef unregister():\n    pass\n"
+    with open(os.path.join(folder, "__init__.py"), "w", encoding="utf-8") as handle:
+        handle.write(body)
+    return folder
+
+
+def _make_broken_zip(path, folder):
+    """造一个「装得上但启用就炸」的包，用来真的走一遍回滚。"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "{}/__init__.py".format(folder),
+            "bl_info = {\"name\": \"broken\", \"version\": (9, 9), \"blender\": (4, 0, 0)}\n"
+            "raise RuntimeError('故意坏掉：用于测试回滚')\n",
+        )
     return path
 
 
@@ -6459,8 +6510,8 @@ def test_zml_lab_update(module):
         result, message = _run_zml_operator(
             source_dir=source, library_dir=library, candidate=good, addons_dir=fake_addons)
         check(result == {'CANCELLED'}, "模块名不一致时算符拒绝执行（CANCELLED）", result)
-        check("模块名不一致" in message,
-              "拒绝时报告里点明是模块名不一致（不是别的失败）", message[:120])
+        check("同族" in message,
+              "拒绝时报告里点明找不到可继承的同族模块（不是别的失败）", message[:160])
         check(os.path.isfile(good), "拒绝后源压缩包还在原处（没有被剪切走）")
         check(not os.path.exists(library), "拒绝后连库目录都没有创建")
         check(os.path.isfile(os.path.join(old_module_dir, "__init__.py")),
@@ -6596,6 +6647,257 @@ def test_zml_lab_update(module):
               "{} -> {}".format(before_mtime, after_mtime))
 
 
+def test_zml_family_update(module):
+    """2.20.0：同族判定 + 目标模块选择 + 顶层文件夹改名重写 + 端到端（沙箱）。
+
+    端到端部分会**真的**调用 ``preferences.addon_install`` 与
+    ``addon_utils.enable`` —— 但它先证明自己落在隔离沙箱的 addons 目录里
+    （``_isolated_addons_dir``），用户真实的 addons 目录绝不会被写；不在沙箱就
+    ``skip`` 整段，绝不硬写。
+    """
+    section("功能：ZML_LAB 同族改名更新（2.20.0）")
+    ops_module = module.ops
+    context = bpy.context
+    temp_root = tempfile.mkdtemp(prefix="hhz_zml_family_")
+    addons_dir = _isolated_addons_dir()
+    created_modules = []
+    config_dir = bpy.utils.user_resource('CONFIG') or ""
+    userpref = os.path.join(config_dir, "userpref.blend") if config_dir else ""
+    before_mtime = os.path.getmtime(userpref) if userpref and os.path.isfile(userpref) else None
+    before_temp = set(name for name in os.listdir(tempfile.gettempdir())
+                      if name.startswith("hhz_zml_install_"))
+    try:
+        # ---- 1. 同族判定表（机械可查）----
+        family = ops_module.zml_module_family
+        table = (
+            ("ZML_LAB_Ultimate_Max_V100", "ZML_LAB_Ultimate_Max_V107", True),
+            ("ZML_LAB_Ultimate_Max_V100", "ZML_LAB_Ultimate_Max", True),
+            ("ZML_LAB_Ultimate_Max_V100", "zml_lab_ultimate_max_v083", True),
+            ("ZML_LAB_Ultimate_Max_V100", "ZML-LAB_Ultimate_Max-V076", True),
+            ("ZML_LAB_Ultimate_Max_V100", "Other_Addon", False),
+            ("ZML_LAB_Ultimate_Max_V100", "ZML_LAB_Ultimate_Max_V107beta", False),
+            ("ZML_LAB_Ultimate_Max_V100", "ZML_LAB_V100", False),
+        )
+        for left, right, same in table:
+            got = family(left) == family(right)
+            check(got is same,
+                  "同族判定 {} vs {} -> {}".format(left, right, "同族" if same else "不同族"),
+                  (family(left), family(right)))
+        check(family("ZML_LAB_Ultimate_Max_V100") == "zml_lab_ultimate_max",
+              "同族键就是去掉尾部版本后缀的名字", family("ZML_LAB_Ultimate_Max_V100"))
+        check(family("redkolab") is None, "非 ZML_LAB 名字没有同族键")
+        check(ops_module.zml_module_ordinal("ZML_LAB_Ultimate_Max_V107") == 107,
+              "版本序号 V107 -> 107", ops_module.zml_module_ordinal("ZML_LAB_Ultimate_Max_V107"))
+        check(ops_module.zml_module_ordinal("ZML_LAB_Ultimate_Max_V076") == 76,
+              "版本序号 V076 -> 76（按数字比，不是按字符串比）",
+              ops_module.zml_module_ordinal("ZML_LAB_Ultimate_Max_V076"))
+        check(ops_module.zml_module_ordinal("ZML_LAB_Ultimate_Max_V107beta") == -1
+              and ops_module.zml_module_ordinal("ZML_LAB_Ultimate_Max") == -1,
+              "尾部不是纯数字时没有版本序号（-1，不猜）")
+
+        # ---- 2. 目标模块选择 ----
+        pick = ops_module.zml_target_module
+        decision = pick(["ZML_LAB_Ultimate_Max_V100"], [], "ZML_LAB_Ultimate_Max_V100")
+        check(decision["allowed"] and decision["exact"]
+              and decision["target"] == "ZML_LAB_Ultimate_Max_V100",
+              "候选模块名已安装 -> 原样用它（exact）", decision)
+
+        decision = pick(["ZML_LAB_Ultimate_Max_V083", "ZML_LAB_Ultimate_Max_V100"],
+                        ["ZML_LAB_Ultimate_Max_V083"], "ZML_LAB_Ultimate_Max_V107")
+        check(decision["allowed"] and decision["target"] == "ZML_LAB_Ultimate_Max_V083",
+              "同族多个、其中 V083 已启用 -> 必须选已启用的 V083（不是版本最高的 V100）",
+              decision)
+
+        decision = pick(["ZML_LAB_Ultimate_Max_V083", "ZML_LAB_Ultimate_Max_V100"],
+                        [], "ZML_LAB_Ultimate_Max_V107")
+        check(decision["target"] == "ZML_LAB_Ultimate_Max_V100",
+              "同族都未启用 -> 选版本序号最高的 V100", decision)
+
+        decision = pick(["ZML_LAB_Ultimate_Max_V083"], ["zml_lab_ultimate_max_v083"],
+                        "zml_lab_ultimate_max_v107")
+        check(decision["target"] == "ZML_LAB_Ultimate_Max_V083",
+              "大小写不同也能认出「已启用」的那个", decision)
+
+        decision = pick(["ZML_LAB_Ultimate_Max_V100"], [], "ZML_LAB_Other_V107")
+        check(not decision["allowed"], "没有同族 -> 拒绝", decision)
+        check("同族" in decision["reason"] and "快捷键" in decision["reason"],
+              "拒绝理由写明会丢设置与快捷键（同族无法继承）", decision["reason"][:120])
+
+        decision = pick([], [], "ZML_LAB_Ultimate_Max_V107")
+        check(decision["allowed"] and decision["target"] == "ZML_LAB_Ultimate_Max_V107",
+              "没装过时按首次安装处理（不留旧名字）", decision)
+
+        allowed, message = ops_module.zml_module_guard(
+            "ZML_LAB_Ultimate_Max_V107", ["ZML_LAB_Ultimate_Max_V100"])
+        check(allowed and "V100" in message,
+              "守卫入口对同族新版放行，并说明要装进 V100", message[:160])
+
+        # ---- 3. 改名重写（只改顶层文件夹，不动内容）----
+        source = os.path.join(temp_root, "source")
+        os.makedirs(source)
+        candidate = _make_test_zip(os.path.join(source, "ZML_LAB_Re_V107.zip"),
+                                   "ZML_LAB_Re_V107", (1, 7), marker="MARK_V107")
+        with zipfile.ZipFile(candidate) as archive:
+            original_names = archive.namelist()
+            original_bytes = archive.read("ZML_LAB_Re_V107/__init__.py")
+        rewrite_target = os.path.join(temp_root, "rewrite", "ZML_LAB_Re_V100.zip")
+        os.makedirs(os.path.dirname(rewrite_target))
+        rewritten = ops_module.zml_rewrite_module(candidate, "ZML_LAB_Re_V100", rewrite_target)
+        check(rewritten["path"] and os.path.isfile(rewritten["path"]),
+              "能写出改名后的 zip", rewritten["path"])
+        check(rewritten["module"] == "ZML_LAB_Re_V100",
+              "改名后能回读到目标模块名", rewritten["module"])
+        check(rewritten["version"] == "1.7",
+              "改名不改内容：bl_info 版本仍是 1.7", rewritten["version"])
+        with zipfile.ZipFile(rewrite_target) as archive:
+            new_names = archive.namelist()
+            new_bytes = archive.read("ZML_LAB_Re_V100/__init__.py")
+        check(len(new_names) == len(original_names),
+              "条目数与原包一致", (len(original_names), len(new_names)))
+        check(all(name.startswith("ZML_LAB_Re_V100/") for name in new_names),
+              "所有条目都换到了新的顶层文件夹下", new_names[:3])
+        check(not any(name.startswith("ZML_LAB_Re_V107/") for name in new_names),
+              "没有残留旧的顶层文件夹名")
+        check(new_bytes == original_bytes, "__init__.py 的内容一个字节都没变")
+        check("MARK_V107" in new_bytes.decode("utf-8"), "包里的内容仍是新版（MARK_V107）")
+        check(ops_module.zml_rewrite_module(candidate, "redkolab", rewrite_target)["path"] == "",
+              "目标名不是 ZML_LAB 名字时拒绝改名")
+        check(ops_module.zml_rewrite_module(candidate, "ZML_LAB_Re_V100",
+                                           os.path.join(source, "no_dir", "x.zip"))["path"] == "",
+              "输出路径写不了时返回空（不会假装成功）")
+
+        # ---- 4. 确认文案必须写明改名 ----
+        lines = ops_module.zml_confirm_lines(
+            candidate, "ZML_LAB_Re_V107", "1.7", "C:\\lib",
+            ["ZML_LAB_Re_V100"], "ZML_LAB_Re_V100")
+        text = "\n".join(lines)
+        check("改名为 ZML_LAB_Re_V100" in text,
+              "确认文案写明「把新版顶层文件夹改名为旧模块名」", text)
+        check("以沿用同名插件" in text and "设置与快捷键" in text,
+              "确认文案写明这样做的目的（沿用同名插件、保住设置与快捷键）")
+        check("模块名仍是 ZML_LAB_Re_V100" in text,
+              "确认文案如实说明「模块名仍是 V100」，不暗示版本号也改了")
+        check("\u00b7" not in text, "改名版确认文案里也没有中点号")
+
+        # ---- 5. 端到端：真的安装 / 真的启用（只在沙箱里跑）----
+        if addons_dir is None:
+            skip("不在隔离沙箱里，跳过端到端用例（真实 addons 目录绝不被测试写入）")
+        else:
+            fake_name = "ZML_LAB_E2E_V100"
+            fake_dir = _write_fake_addon(os.path.join(addons_dir, fake_name),
+                                         "OLD_CODE_V100", (1, 0))
+            created_modules.append(fake_name)
+            try:
+                addon_utils.enable(fake_name, default_set=True)
+            except Exception as error:
+                print("  启用假插件失败：{}".format(error))
+            check(bool(addon_utils.check(fake_name)[1]),
+                  "沙箱里能先启用一个假的 ZML_LAB 同族模块 {}".format(fake_name))
+            check(fake_name in ops_module.zml_installed_modules(addons_dir),
+                  "它被算作已安装的 ZML_LAB 模块")
+            check(fake_name in ops_module.zml_enabled_modules(context),
+                  "它出现在已启用列表里（改名时会优先选它）")
+
+            e2e_source = os.path.join(temp_root, "source_e2e")
+            os.makedirs(e2e_source)
+            e2e_zip = _make_test_zip(os.path.join(e2e_source, "ZML_LAB_E2E_V107.zip"),
+                                     "ZML_LAB_E2E_V107", (1, 7), marker="NEW_CODE_V107")
+            library = os.path.join(temp_root, "library_e2e")
+            result, message = _run_zml_operator(
+                source_dir=e2e_source, library_dir=library, candidate=e2e_zip,
+                addons_dir=addons_dir)
+            check(result == {'FINISHED'},
+                  "同族候选能真的走完整个更新流程（FINISHED）", (result, message[:200]))
+            check(not os.path.isfile(e2e_zip), "源压缩包已从源目录剪切走")
+            kept_zip = os.path.join(library, "ZML_LAB_E2E_V107.zip")
+            check(os.path.isfile(kept_zip),
+                  "库目录里放的是原始包（文件名没改）",
+                  os.listdir(library) if os.path.isdir(library) else None)
+            check(ops_module.zml_zip_module(kept_zip)[0] == "ZML_LAB_E2E_V107",
+                  "库里原始包仍可追溯（模块名还是 V107）")
+            installed_init = os.path.join(fake_dir, "__init__.py")
+            installed_text = ""
+            if os.path.isfile(installed_init):
+                with open(installed_init, encoding="utf-8") as handle:
+                    installed_text = handle.read()
+            check("NEW_CODE_V107" in installed_text,
+                  "新代码真的装进了旧模块文件夹（模块名仍是 V100）", installed_text[:160])
+            check(not os.path.isdir(os.path.join(addons_dir, "ZML_LAB_E2E_V107")),
+                  "没有多出一个 V107 模块文件夹（模块名没变，设置与快捷键仍归在这个模块名下）")
+            check(bool(addon_utils.check(fake_name)[1]),
+                  "更新后该模块仍处于启用状态（快捷键会重新注册）")
+            backup_root = os.path.join(addons_dir, "_zml_backup")
+            backups = sorted(os.listdir(backup_root)) if os.path.isdir(backup_root) else []
+            mine = [name for name in backups if name.startswith(fake_name + "-")]
+            check(bool(mine), "备份目录是 _zml_backup/<模块名>-<时间戳>", backups[:3])
+            saved_ok = False
+            if mine:
+                saved = os.path.join(backup_root, mine[0], fake_name, "__init__.py")
+                if os.path.isfile(saved):
+                    with open(saved, encoding="utf-8") as handle:
+                        saved_ok = "OLD_CODE_V100" in handle.read()
+            check(saved_ok, "备份里是旧代码（需要时能回滚）")
+            after_temp = set(name for name in os.listdir(tempfile.gettempdir())
+                             if name.startswith("hhz_zml_install_"))
+            check(not (after_temp - before_temp),
+                  "改名用的临时目录已删除（装完即删）", sorted(after_temp - before_temp))
+
+            # ---- 6. 回滚：装一个「装得上但启用就炸」的包 ----
+            break_name = "ZML_LAB_Break_V100"
+            break_dir = _write_fake_addon(os.path.join(addons_dir, break_name),
+                                          "OLD_CODE_BREAK", (1, 0))
+            created_modules.append(break_name)
+            try:
+                addon_utils.enable(break_name, default_set=True)
+            except Exception as error:
+                print("  启用回滚用假插件失败：{}".format(error))
+            broken_zip = _make_broken_zip(
+                os.path.join(temp_root, "ZML_LAB_Break_V107.zip"), "ZML_LAB_Break_V107")
+            result, message = _run_zml_operator(
+                source_dir=temp_root, library_dir=library, candidate=broken_zip,
+                addons_dir=addons_dir)
+            check(result == {'CANCELLED'}, "装不上的包 -> 失败并回滚（CANCELLED）",
+                  (result, message[:160]))
+            check("已回滚" in message, "报告里写明已经回滚", message[:200])
+            check(os.path.isfile(broken_zip), "回滚把源压缩包还回了原处")
+            check(not os.path.isfile(os.path.join(library, os.path.basename(broken_zip))),
+                  "库目录里没有留下失败的包")
+            restored = ""
+            if os.path.isfile(os.path.join(break_dir, "__init__.py")):
+                with open(os.path.join(break_dir, "__init__.py"), encoding="utf-8") as handle:
+                    restored = handle.read()
+            check("OLD_CODE_BREAK" in restored,
+                  "回滚把旧代码放回了模块文件夹", restored[:160])
+    finally:
+        for name in created_modules:
+            try:
+                addon_utils.disable(name, default_set=True)
+            except Exception:
+                pass
+            try:
+                bpy.ops.preferences.addon_disable(module=name)
+            except Exception:
+                pass
+            if addons_dir:
+                shutil.rmtree(os.path.join(addons_dir, name), ignore_errors=True)
+        if addons_dir:
+            shutil.rmtree(os.path.join(addons_dir, "_zml_backup"), ignore_errors=True)
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    check(not os.path.isdir(temp_root), "同族用例的临时目录已清理干净")
+    if addons_dir is not None:
+        leftovers = [name for name in created_modules
+                     if os.path.isdir(os.path.join(addons_dir, name))]
+        check(not leftovers, "沙箱 addons 目录里没留下假插件", leftovers)
+    if before_mtime is None:
+        skip("这个测试环境还没有 userpref.blend，无法比对 mtime（不算失败）")
+    else:
+        after_mtime = os.path.getmtime(userpref) if os.path.isfile(userpref) else None
+        check(after_mtime == before_mtime,
+              "本节（含真实安装 / 启用）没有写过 userpref.blend（mtime 未变）",
+              "{} -> {}".format(before_mtime, after_mtime))
+
+
 def test_unregister(module_name, module):
     section("卸载清理")
     keyconfig = module.compat.addon_keyconfig()
@@ -6677,6 +6979,7 @@ def main():
     run("N 面板顺序（拖动排序）", test_panel_order, module)
     run("拖动排序整条链（注册 / 方向 / 持久化）", test_panel_order_drag_chain, module)
     run("一键更新ZML_LAB（扫描 / 校验 / 守卫 / 计划）", test_zml_lab_update, module)
+    run("ZML_LAB 同族改名更新（2.20.0）", test_zml_family_update, module)
     run("算符 poll", test_poll)
     # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
     # 会清掉当前场景，所以后面只剩"卸载清理"这种不吃场景数据的用例

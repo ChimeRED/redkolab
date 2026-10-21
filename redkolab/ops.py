@@ -21,6 +21,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import time
 import zipfile
 
@@ -3300,27 +3301,165 @@ def zml_installed_modules(addons_dir):
     return found
 
 
-def zml_module_guard(candidate_module, installed_modules):
-    """模块名守卫：返回 ``(是否放行, 说明)``。
+def zml_module_family(name):
+    """模块名的「同族键」：把尾部的版本后缀去掉之后的归一化名字。
 
-    这是"快捷键不丢"的核心防线：候选包的模块名与已安装的 ZML_LAB 模块名不一致时
-    **拒绝执行**（调用方必须什么都不动），因为模块名一变，Blender 就把它当成另一个
-    插件，原有设置与快捷键就归不到它名下了。
+    为什么需要它（2.20.0 的核心）：ZML_LAB 每次发版都换顶层文件夹名
+    （``..._V100`` → ``..._V107``），而 Blender 是按**模块名（= 顶层文件夹名）**
+    归属插件设置与快捷键的。所以"新版的文件夹名不等于已安装的文件夹名"并不代表
+    它是另一个插件 —— 去掉版本后缀后它们是**同一个家族**，把新代码装进旧文件夹
+    才能既升级又保住设置与快捷键。
+
+    机械规则（可断言）：
+      * 先按 ZML_LAB 身份规则归一化（大小写、连字符、空格、下划线都不敏感）；
+      * 只有尾部是 ``v`` + **纯数字**（可带一个前置下划线）才算版本后缀，去掉它；
+      * ``..._V107beta`` 这种尾部不是纯数字的**不算**版本后缀，因此与 ``..._V100``
+        不同族（宁可不认，也不要猜）。
+    """
+    key = zml_lab_identity(name)
+    if key is None:
+        return None
+    stripped = re.sub(r"v\d+$", "", key).strip("_")
+    return stripped or None
+
+
+def zml_module_ordinal(name):
+    """模块名里的版本序号（``..._V107`` → 107）；没有版本后缀时返回 ``-1``。"""
+    key = zml_lab_identity(name)
+    if key is None:
+        return -1
+    found = re.search(r"v(\d+)$", key)
+    return int(found.group(1)) if found else -1
+
+
+def zml_target_module(installed_modules, enabled_modules, candidate_module):
+    """算出「该装进哪个旧模块名」，返回 dict。
+
+    键：``allowed`` / ``target`` / ``exact`` / ``family`` / ``reason``。
+
+    选择顺序（按需求）：
+      1. 候选模块名**已在**已安装列表里 → 直接用它（原样覆盖，``exact=True``）；
+      2. 否则找**同族**（``zml_module_family`` 相同）的已安装模块：
+         * 其中**当前已启用**的优先（用户实际在用的那个）；
+         * 都没有启用就选**版本序号最高**的（序号相同再按名字排，保证结果确定）；
+      3. 没有同族 → 拒绝（``allowed=False``）：装下去会成为新插件，
+         原有设置与快捷键无法继承。
     """
     candidate = str(candidate_module or "").strip()
-    if not candidate:
-        return (False, "候选包读不出模块名，无法判断会不会丢设置与快捷键，已停止")
     installed = [name for name in (installed_modules or []) if name]
+    enabled = [name for name in (enabled_modules or []) if name]
+    result = {"allowed": False, "target": "", "exact": False, "family": "", "reason": ""}
+
+    if zml_lab_identity(candidate) is None:
+        result["reason"] = ("候选包读不出 ZML_LAB 模块名，无法判断能不能继承设置与快捷键，"
+                            "已停止，没有移动或删除任何文件")
+        return result
     if not installed:
-        return (True, "本机还没装过 ZML_LAB，这将是首次安装（模块名 {}）".format(candidate))
+        result.update(allowed=True, target=candidate, exact=True,
+                      reason="本机还没装过 ZML_LAB，这将是首次安装（模块名 {}）".format(candidate))
+        return result
+
     for name in installed:
         if zml_same_module(name, candidate):
-            return (True, "模块名与已安装的 {} 一致，设置与快捷键归在同一个模块名下".format(name))
-    return (False, (
-        "模块名不一致：候选包的模块名是 {}，本机已安装的是 {}。"
-        "模块名一变，Blender 就会把它当成另一个插件，原有设置与快捷键"
-        "归不到它名下，所以已经停止，没有移动或删除任何文件"
-    ).format(candidate, " / ".join(installed)))
+            result.update(
+                allowed=True, target=name, exact=True, family=zml_module_family(name) or "",
+                reason="模块名与已安装的 {} 一致，直接覆盖它（设置与快捷键归在同一个模块名下）".format(name))
+            return result
+
+    family = zml_module_family(candidate)
+    same_family = [name for name in installed if zml_module_family(name) == family]
+    result["family"] = family or ""
+    if same_family:
+        chosen = ""
+        for name in same_family:
+            if any(zml_same_module(name, item) for item in enabled):
+                chosen = name
+                break
+        if chosen:
+            by = "当前已启用"
+        else:
+            chosen = sorted(same_family,
+                            key=lambda item: (-zml_module_ordinal(item), item))[0]
+            by = "版本序号最高"
+        result.update(
+            allowed=True, target=chosen,
+            reason=("候选包的模块名是 {}，与已安装的 {} 同族（去掉版本后缀后相同），"
+                    "按「{}」选用 {}：安装时会把新版顶层文件夹改名为 {}，"
+                    "从而沿用同名插件，保住原有的设置与快捷键").format(
+                        candidate, " / ".join(same_family), by, chosen, chosen))
+        return result
+
+    result["reason"] = (
+        "找不到可继承的同族模块：候选包的模块名是 {}，本机已安装的是 {}，"
+        "去掉版本后缀后不是同一个插件名，装下去会成为新插件，原有设置与快捷键"
+        "无法继承，所以已经停止，没有移动或删除任何文件"
+    ).format(candidate, " / ".join(installed))
+    return result
+
+
+def zml_module_guard(candidate_module, installed_modules, enabled_modules=None):
+    """模块名守卫的入口：返回 ``(是否放行, 说明)``（内部走 ``zml_target_module``）。"""
+    decision = zml_target_module(installed_modules, enabled_modules, candidate_module)
+    return (bool(decision["allowed"]), decision["reason"])
+
+
+def zml_enabled_modules(context=None):
+    """当前**已启用**的插件模块名（只读；后台 / 未启用时返回空列表）。"""
+    ctx = context if context is not None else bpy.context
+    try:
+        addons = ctx.preferences.addons
+    except Exception:
+        return []
+    try:
+        return [key for key in addons.keys()]
+    except Exception:
+        return []
+
+
+def zml_rewrite_module(zip_path, target_module, out_path):
+    """把候选 zip 的**顶层文件夹改名**后另存，返回 dict（只读原包、只写 ``out_path``）。
+
+    为什么改名：Blender 按模块名（顶层文件夹名）归属插件设置与快捷键。新版包的
+    文件夹名变了，直接装会变成另一个插件、设置全丢；所以把它的顶层文件夹改成
+    已安装的那个名字再装 —— **代码是新的**（bl_info 版本仍是新版的），
+    模块名不变，设置与快捷键就能继承。
+
+    返回 ``{"path", "module", "entries", "version"}``：
+    ``module`` / ``version`` 是从新 zip **回读**出来的值（读不回来就说明改名失败）。
+    """
+    target = str(target_module or "").strip()
+    empty = {"path": "", "module": None, "entries": 0, "version": ""}
+    if zml_lab_identity(target) is None:
+        return empty
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            infos = archive.infolist()
+            folders = []
+            for info in infos:
+                parts = info.filename.split("/")
+                if len(parts) == 2 and parts[1] == "__init__.py" \
+                        and zml_lab_identity(parts[0]) is not None:
+                    folders.append(parts[0])
+            if not folders:
+                return empty
+            source = sorted(set(folders))[0]
+            prefix = source + "/"
+            with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as out:
+                for info in infos:
+                    name = info.filename
+                    if name == prefix:
+                        out.writestr(target + "/", b"")
+                        continue
+                    data = archive.read(info)
+                    if name.startswith(prefix):
+                        out.writestr(target + "/" + name[len(prefix):], data)
+                    else:
+                        # 包内其它顶层条目（例如 __MACOSX）原样保留，不动
+                        out.writestr(name, data)
+    except Exception:
+        return empty
+    module, version = zml_zip_module(out_path)
+    return {"path": out_path, "module": module, "entries": len(infos), "version": version}
 
 
 def zml_library_entries(library_dir):
@@ -3397,20 +3536,31 @@ def zml_library_plan(library_dir, candidate_zip, candidate_module, entries=None)
     }
 
 
-def zml_confirm_lines(candidate_zip, module, version, library_dir, installed=None):
+def zml_confirm_lines(candidate_zip, module, version, library_dir, installed=None,
+                      target_module=""):
     """二次确认的文案（纯函数，方便测试）。
 
     按需求必须列出：源包名 / 模块名 / 版本 / 目标库目录 / 会移动（剪切）源文件 /
-    会重新启用。文案里**不用中点号**（用户换过界面字体时缺字会变乱码）。
+    会重新启用；同族改名时还要**明确写出**「把新版顶层文件夹 X 改名为 Y，
+    以沿用同名插件，从而保留设置与快捷键」。
+    文案里**不用中点号**（用户换过界面字体时缺字会变乱码）。
     """
+    target = str(target_module or "").strip()
     lines = [
         "源压缩包：{}".format(os.path.basename(str(candidate_zip or "")) or "（没有选择）"),
         "模块名：{}".format(module or "（读不出）"),
         "版本：{}".format(version or "（读不出）"),
         "目标库目录：{}".format(library_dir or "（没有设置）"),
-        "会把源压缩包剪切（移动）到库目录，源目录里不再保留",
-        "会停用再重新启用该模块，让插件自己的快捷键重新注册",
     ]
+    if target and not zml_same_module(target, module):
+        lines.append("将把新版顶层文件夹 {} 改名为 {}，以沿用同名插件，"
+                     "从而保留设置与快捷键".format(module or "（读不出）", target))
+        lines.append("模块名仍是 {}，里面装的是{}版的代码".format(
+            target, " {} ".format(version) if version else "新"))
+    elif target:
+        lines.append("模块名与已安装的 {} 一致，直接覆盖它".format(target))
+    lines.append("会把源压缩包剪切（移动）到库目录，源目录里不再保留")
+    lines.append("会停用再重新启用该模块，让插件自己的快捷键重新注册")
     installed = [name for name in (installed or []) if name]
     if installed:
         lines.append("本机已安装：{}".format(" / ".join(installed)))
@@ -3424,14 +3574,21 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
 
     执行顺序（每一步失败都回滚并如实报告）：
 
-    a. 校验候选包与模块名（模块名不一致直接拒绝）+ 库目录不存在就创建
+    a. 校验候选包；解析要**沿用**的旧模块名（同族改名，见 ``zml_target_module``）；
+       没有同族就拒绝；库目录不存在就创建
     b. 备份：已安装的旧模块文件夹 → ``<addons>/_zml_backup/<模块名>-<时间戳>/``
        （库里被替换的旧 ZML 包也一起备份）
-    c. 剪切源 zip 到库目录（``shutil.move``），并清理库里同模块的旧包
-    d. 安装：``bpy.ops.preferences.addon_install(overwrite=True)``，只替换同名模块
-    e. 重新启用：``addon_utils.disable`` → ``enable(default_set=True)``，
+    c. 剪切源 zip 到库目录（``shutil.move``，库里放的是**原始包**），并清理库里
+       同模块的旧包
+    d. 安装：包内顶层文件夹**改名为旧模块名**后写到临时目录，
+       再 ``bpy.ops.preferences.addon_install(overwrite=True)``（只替换同名模块），
+       装完**立刻删掉临时 zip**
+    e. 重新启用：对**旧模块名**做 ``addon_utils.disable`` → ``enable(default_set=True)``，
        并核对它确实处于启用状态
-    f. 报告：模块名、版本、源 zip → 库路径、备份路径、是否重新启用
+    f. 报告：模块名、其中的代码版本、源 zip → 库路径、备份路径、是否重新启用
+
+    关键语义：**模块名保留旧名字，里面换的是新版代码**（所以 bl_info 的版本是新版，
+    但模块名不变），这样 Blender 认为还是同一个插件，设置与快捷键才不丢。
 
     **不写** ``userpref.blend``（绝不调用 ``wm.save_userpref``）、
     **不改** keymap、**不删**用户的其它插件。
@@ -3441,8 +3598,9 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
     bl_label = "一键更新ZML_LAB"
     bl_description = (
         "把源目录里选中的 ZML_LAB 压缩包剪切到插件库，并用它替换已安装的 ZML_LAB："
-        "先备份旧版本，装完自动禁用再重新启用（快捷键重新注册），"
-        "最后核对一遍。模块名与已安装版本不一致时会直接拒绝，不会动任何文件"
+        "新版顶层文件夹会改成已安装的那个模块名（沿用同名插件，保住设置与快捷键），"
+        "先备份旧版本，装完自动禁用再重新启用（快捷键重新注册），最后核对一遍。"
+        "找不到可继承的同族模块时会直接拒绝，不会动任何文件"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -3473,16 +3631,27 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
 
     # -- 二次确认 --------------------------------------------------------
 
-    def _confirm_text(self):
+    def _resolve(self, context):
+        """解析候选包与「要沿用的旧模块名」。
+
+        返回 ``(module, version, installed, decision)``；``decision`` 是
+        ``zml_target_module`` 的结果（确认文案与执行都用它，避免两处判断不一致）。
+        """
         module, version = zml_zip_module(self.candidate or "")
         installed = zml_installed_modules(str(self.addons_dir or "").strip() or zml_addons_dir())
-        return module, version, installed, "\n".join(zml_confirm_lines(
-            self.candidate, module, version, self.library_dir, installed))
+        decision = zml_target_module(installed, zml_enabled_modules(context), module)
+        return module, version, installed, decision
+
+    def _confirm_text(self, context=None):
+        module, version, installed, decision = self._resolve(context)
+        return module, version, installed, decision, "\n".join(zml_confirm_lines(
+            self.candidate, module, version, self.library_dir, installed,
+            decision.get("target") or ""))
 
     def draw(self, context):
         """确认弹窗的内容（属性弹窗与确认弹窗共用这段文案）。"""
         layout = self.layout
-        _module, _version, _installed, text = self._confirm_text()
+        _module, _version, _installed, _decision, text = self._confirm_text(context)
         for line in text.split("\n"):
             layout.label(text=line)
 
@@ -3490,7 +3659,7 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         window_manager = getattr(context, "window_manager", None)
         if window_manager is None:
             return self.execute(context)
-        _module, _version, _installed, text = self._confirm_text()
+        _module, _version, _installed, _decision, text = self._confirm_text(context)
         try:
             # 5.x 的 invoke_confirm 支持 message：确认框里能列出全部细节
             return window_manager.invoke_confirm(
@@ -3522,15 +3691,18 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         if not addons_dir:
             return self._cancel("读不到 Blender 的插件目录，无法判断已安装的 ZML_LAB 模块名")
         installed = zml_installed_modules(addons_dir)
-        # ---- a. 核心守卫：模块名不一致就绝不继续（否则原有设置与快捷键会归不到新模块）
-        allowed, guard_message = zml_module_guard(module, installed)
-        if not allowed:
-            return self._cancel(guard_message)
+        # ---- a. 解析要沿用的旧模块名（同族改名）；没有同族就绝不继续 ----
+        decision = zml_target_module(installed, zml_enabled_modules(context), module)
+        if not decision["allowed"]:
+            return self._cancel(decision["reason"])
+        target_module = decision["target"] or module
+        renamed = not zml_same_module(target_module, module)
         try:
             os.makedirs(library_dir, exist_ok=True)
         except OSError as error:
             return self._cancel("创建库目录失败：{}（{}）".format(library_dir, error))
 
+        # 库目录里放的是**原始包**，所以按候选自己的模块名识别库里同模块的旧包
         plan = zml_library_plan(library_dir, candidate, module,
                                 zml_library_entries(library_dir))
         if plan["conflict"]:
@@ -3541,12 +3713,9 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         # ---- b. 备份（已安装的旧模块文件夹 + 库里被替换的旧包）----
         stamp = time.strftime("%Y%m%d-%H%M%S")
         backup_dir = os.path.join(addons_dir, ZML_BACKUP_DIRNAME,
-                                  "{}-{}".format(module, stamp))
-        installed_old = ""
-        for name in installed:
-            if zml_same_module(name, module):
-                installed_old = os.path.join(addons_dir, name)
-                break
+                                  "{}-{}".format(target_module, stamp))
+        installed_old = os.path.join(addons_dir, target_module) \
+            if any(zml_same_module(name, target_module) for name in installed) else ""
         carried = []
         try:
             os.makedirs(backup_dir, exist_ok=True)
@@ -3560,7 +3729,7 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         except (OSError, shutil.Error) as error:
             return self._cancel("备份失败，没有移动或删除任何文件：{}".format(error))
 
-        # ---- c. 剪切源 zip 到库目录 ----
+        # ---- c. 剪切源 zip 到库目录（库里保留原始包）----
         moved_to = plan["move_to"]
         try:
             if os.path.exists(moved_to):
@@ -3568,8 +3737,8 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
                 os.remove(moved_to)
             shutil.move(candidate, moved_to)
         except (OSError, shutil.Error) as error:
-            return self._rollback(backup_dir, "", module, installed_old, False, (),
-                                  "把压缩包移动到库目录失败：{}".format(error))
+            return self._rollback(backup_dir, "", target_module, installed_old, False, (),
+                                  "", "把压缩包移动到库目录失败：{}".format(error))
         deleted = []
         for path in plan["delete"]:
             try:
@@ -3579,42 +3748,66 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
                 self.report({'WARNING'}, "旧包 {} 没能删掉：{}".format(
                     os.path.basename(path), error))
 
-        # ---- d. 安装（只替换同名模块；不写 userpref.blend）----
+        # ---- d. 安装（同族时把顶层文件夹改名；只用临时目录，装完即删）----
+        temp_dir = ""
+        install_path = moved_to
+        install_source = moved_to
+        if renamed:
+            try:
+                temp_dir = tempfile.mkdtemp(prefix="hhz_zml_install_")
+                install_source = os.path.join(temp_dir, os.path.basename(moved_to))
+                rewritten = zml_rewrite_module(moved_to, target_module, install_source)
+            except Exception as error:
+                rewritten = {"path": "", "module": None, "version": ""}
+                self.report({'WARNING'}, "改名临时包写入失败：{}".format(error))
+            if not rewritten.get("path") or not zml_same_module(
+                    rewritten.get("module"), target_module):
+                return self._rollback(
+                    backup_dir, moved_to, target_module, installed_old, False, deleted,
+                    temp_dir,
+                    "把新版包的顶层文件夹改名为 {} 失败，没有安装".format(target_module))
+            install_path = rewritten["path"]
         try:
-            result = bpy.ops.preferences.addon_install(filepath=moved_to, overwrite=True)
+            result = bpy.ops.preferences.addon_install(filepath=install_path, overwrite=True)
         except Exception as error:
-            return self._rollback(backup_dir, moved_to, module, installed_old, False,
-                                  deleted, "安装插件失败：{}".format(error))
+            return self._rollback(backup_dir, moved_to, target_module, installed_old, True,
+                                  deleted, temp_dir, "安装插件失败：{}".format(error))
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
         if 'FINISHED' not in result:
-            return self._rollback(backup_dir, moved_to, module, installed_old, False,
-                                  deleted, "安装插件没有完成（{}）".format(sorted(result)))
+            return self._rollback(backup_dir, moved_to, target_module, installed_old, True,
+                                  deleted, "", "安装插件没有完成（{}）".format(sorted(result)))
 
-        # ---- e. 重新启用（让插件自己的快捷键重新注册）----
+        # ---- e. 重新启用**旧模块名**（让插件自己的快捷键重新注册）----
         notes = []
         try:
-            addon_utils.disable(module)
+            addon_utils.disable(target_module)
         except Exception as error:
             notes.append("停用旧版本时报错：{}".format(error))
         try:
-            addon_utils.enable(module, default_set=True)
+            addon_utils.enable(target_module, default_set=True)
         except Exception as error:
             notes.append("启用时报错：{}".format(error))
         try:
-            _loaded_default, loaded_state = addon_utils.check(module)
+            _loaded_default, loaded_state = addon_utils.check(target_module)
         except Exception:
             loaded_state = False
-        in_preferences = self._in_preferences(context, module)
+        in_preferences = self._in_preferences(context, target_module)
         if not (loaded_state and in_preferences):
             return self._rollback(
-                backup_dir, moved_to, module, installed_old, True, deleted,
+                backup_dir, moved_to, target_module, installed_old, True, deleted, "",
                 "启用后核对失败（启用状态 {}，偏好设置里 {}）".format(
                     loaded_state, in_preferences))
 
-        # ---- f. 报告 ----
-        parts = ["ZML_LAB 已更新：模块 {}".format(module)]
-        if version:
+        # ---- f. 报告（不谎报；模块名与代码版本分别说清）----
+        parts = ["ZML_LAB 已更新：模块 {}".format(target_module)]
+        if renamed:
+            parts.append("已把新版顶层文件夹 {} 改名为 {} 装入（模块名仍是 {}，里面是 {} 版的代码）".format(
+                module, target_module, target_module, version or "新版"))
+        elif version:
             parts.append("版本 {}".format(version))
-        parts.append("压缩包 {} -> {}".format(source_name, moved_to))
+        parts.append("压缩包 {} -> {}（库目录里保留原始包）".format(source_name, moved_to))
         if deleted:
             parts.append("清理旧包 {}".format(" / ".join(
                 sorted(os.path.basename(path) for path in deleted))))
@@ -3622,7 +3815,7 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
             parts.append("旧版本已备份到 {}".format(backup_dir))
         if not installed:
             parts.append("首次安装")
-        parts.append("已停用并重新启用，插件自己的快捷键已重新注册")
+        parts.append("已停用并重新启用 {}，插件自己的快捷键已重新注册".format(target_module))
         parts.extend(notes)
         self.report({'INFO'}, "；".join(part for part in parts if part))
         return {'FINISHED'}
@@ -3651,34 +3844,50 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
             return False
         return False
 
-    def _rollback(self, backup_dir, moved_to, module, installed_old, installed_new,
-                  deleted_library, reason):
+    def _rollback(self, backup_dir, moved_to, target_module, installed_old, installed_new,
+                  deleted_library, temp_dir, reason):
         """回滚备份并把**具体失败原因**写进报告（绝不谎报成功）。"""
         problems = []
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
         # 1) 库目录里的新包挪回原处（等于撤销"剪切"）
         if moved_to and os.path.isfile(moved_to) and self.candidate:
             try:
                 shutil.move(moved_to, self.candidate)
             except Exception as error:
                 problems.append("压缩包没能移动回原处（{}）".format(error))
-        # 2) 新装进去的模块删掉，把备份的旧模块文件夹放回去
-        if installed_new and installed_old and os.path.isdir(backup_dir):
-            saved = os.path.join(backup_dir, os.path.basename(installed_old))
-            if os.path.isdir(saved):
+        # 2) 已经动过模块文件夹：把备份的旧版本放回去（首次安装则删掉新装的那份）
+        addons_dir = os.path.dirname(os.path.dirname(backup_dir)) if backup_dir else ""
+        if installed_new:
+            try:
                 try:
+                    addon_utils.disable(target_module)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            if installed_old and os.path.isdir(backup_dir):
+                saved = os.path.join(backup_dir, os.path.basename(installed_old))
+                if os.path.isdir(saved):
                     try:
-                        addon_utils.disable(module)
-                    except Exception:
-                        pass
-                    if os.path.isdir(installed_old):
-                        shutil.rmtree(installed_old, ignore_errors=True)
-                    shutil.copytree(saved, installed_old)
+                        if os.path.isdir(installed_old):
+                            shutil.rmtree(installed_old, ignore_errors=True)
+                        shutil.copytree(saved, installed_old)
+                        try:
+                            addon_utils.enable(target_module, default_set=True)
+                        except Exception as restore_error:
+                            problems.append("旧版本放回去了但没能重新启用（{}）".format(
+                                restore_error))
+                    except Exception as error:
+                        problems.append("旧版本文件夹没能还原（{}）".format(error))
+            elif addons_dir and target_module:
+                # 首次安装：没有旧版本可还原，把这次装进去的新模块清掉
+                fresh = os.path.join(addons_dir, target_module)
+                if os.path.isdir(fresh):
                     try:
-                        addon_utils.enable(module, default_set=True)
-                    except Exception as restore_error:
-                        problems.append("旧版本放回去了但没能重新启用（{}）".format(restore_error))
-                except Exception as error:
-                    problems.append("旧版本文件夹没能还原（{}）".format(error))
+                        shutil.rmtree(fresh, ignore_errors=True)
+                    except Exception as error:
+                        problems.append("新装的模块文件夹没能删掉（{}）".format(error))
         # 3) 被清掉的旧库包从备份放回
         for path in (deleted_library or []):
             saved = os.path.join(backup_dir, os.path.basename(path))
