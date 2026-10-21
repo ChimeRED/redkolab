@@ -11,6 +11,8 @@
 （4.0 ~ 5.x 都支持），卸载插件时会被自动清掉。
 """
 
+import os
+
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
 
@@ -18,6 +20,14 @@ from . import compat, layout, pages, panels, theme
 
 #: 饼菜单的 bl_idname（必须以 _MT_ 命名，Menu 才能注册成功）
 PIE_IDNAME = "OBJECT_MT_hhz_pie"
+
+#: ZML_LAB 一键更新：默认扫描源目录（放插件压缩包的那个目录）
+ZML_DEFAULT_SOURCE_DIR = r"D:\日常软件\qq"
+
+#: ZML_LAB 一键更新：默认插件 zip 库。
+#: 这是**真实物理路径**；`D:\build\Blender` 只是指向 `C:\build\Blender` 的 Junction
+#: 别名，两条写法指向同一个目录，新默认值一律写 C:。
+ZML_DEFAULT_LIBRARY_DIR = r"C:\build\Blender\4.0\4.0chajian"
 
 #: 键位挂在 3D 视图上
 KEYMAP_NAME = "3D View"
@@ -313,6 +323,33 @@ def layout_items(self, context):
     return [(name, name, "使用或删除「{}」".format(name)) for name in names]
 
 
+def zml_candidate_items(self, context):
+    """ZML_LAB 候选包的下拉项（动态，跟着源目录里通过校验的包走）。
+
+    条目来自 ``ops.zml_scan``（纯逻辑，可无头测试）：只有包内存在模块名匹配
+    ZML_LAB 的顶层文件夹、且有 ``__init__.py`` 的 zip 才算候选，按 mtime 倒序。
+    一个都没有时给一项占位说明，不会出现空下拉框。
+
+    ``from . import ops`` 放在函数里是**故意的**：``ops`` 在导入期依赖本模块，
+    模块级互相导入会成环。
+    """
+    from . import ops
+
+    source = getattr(self, "zml_source_dir", "") or ""
+    candidates = ops.zml_scan(source) if source else []
+    if not candidates:
+        return [("__none__", "（没有找到 ZML_LAB 压缩包）",
+                 "源目录里没有通过校验的 ZML_LAB 压缩包")]
+    items = []
+    for path, module, version, _mtime in candidates:
+        label = os.path.basename(path)
+        if version:
+            label += "  版本 {}".format(version)
+        items.append((path, label, "模块名 {}，版本 {}；更新会移动这个压缩包并替换已安装版本".format(
+            module, version or "（读不出）")))
+    return items
+
+
 def _on_theme_color_update(self, context):
     """选择器一变就写进主题 —— 实时预览的那一步。"""
     theme.write_from_preferences(context, self)
@@ -492,6 +529,24 @@ class HHZ_PT_settings(bpy.types.Panel):
         layout.separator()
         layout.operator("hhz.fix_missing_files", icon='FILE_REFRESH')
         layout.label(text="清理指向已删除文件的图像引用，并在必要时关闭自动打包")
+
+        # ---- ZML_LAB 一键更新（2.19.0，需求：加在这一段里，不新增面板）----
+        preferences = compat.get_preferences(context)
+        box = layout.box()
+        box.label(text="ZML_LAB 一键更新")
+        if preferences is None:
+            box.label(text="读不到插件偏好设置", icon='ERROR')
+        else:
+            box.prop(preferences, "zml_source_dir", text="源目录")
+            box.prop(preferences, "zml_library_dir", text="库目录")
+            box.prop(preferences, "zml_candidate", text="压缩包")
+            box.label(text="扫描源目录里的 ZML_LAB 压缩包；更新会移动该压缩包"
+                           "并替换已安装版本，插件设置与快捷键不受影响", icon='INFO')
+            operation = box.operator("hhz.zml_lab_update", text="一键更新ZML_LAB",
+                                     icon='FILE_REFRESH')
+            operation.source_dir = preferences.zml_source_dir
+            operation.library_dir = preferences.zml_library_dir
+            operation.candidate = preferences.zml_candidate
 
         column = layout.column(align=True)
         column.label(text="{} {}".format(compat.ADDON_NAME, compat.ADDON_NAME_EN))
@@ -1068,6 +1123,28 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         name="布局数据",
         description="已保存的页面布局（JSON，别手改）",
         default="",
+    )
+    # ---- ZML_LAB 一键更新（2.19.0）----
+    #
+    # 只有这两项是用户要填的路径，外加一个候选包下拉；「装完自动重新启用」按需求
+    # 固定为开启，**不**单列开关。
+    zml_source_dir: StringProperty(
+        name="ZML_LAB 源目录",
+        description="自动扫描 ZML_LAB 压缩包的目录（默认 D:\\日常软件\\qq）",
+        subtype='DIR_PATH',
+        default=ZML_DEFAULT_SOURCE_DIR,
+    )
+    zml_library_dir: StringProperty(
+        name="ZML_LAB 插件库目录",
+        description="更新的 ZML_LAB 压缩包会被剪切到这里；目录不存在时会自动创建。"
+                    "默认 C:\\build\\Blender\\4.0\\4.0chajian",
+        subtype='DIR_PATH',
+        default=ZML_DEFAULT_LIBRARY_DIR,
+    )
+    zml_candidate: EnumProperty(
+        name="ZML_LAB 压缩包",
+        description="源目录里通过校验的 ZML_LAB 压缩包（按文件修改时间从新到旧）",
+        items=zml_candidate_items,
     )
 
     def hotkey_label(self):

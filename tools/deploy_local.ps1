@@ -5,7 +5,7 @@
 .DESCRIPTION
     Two independent targets:
 
-      1. Zip library (-Target, default D:\build\Blender\4.0\4.0chajian)
+      1. Zip library (-Target, default C:\build\Blender\4.0\4.0chajian)
          Copies dist/redkolab-<version>.zip there and deletes older redkolab-*.zip
          from it, so the library always holds exactly one current version.
 
@@ -15,10 +15,17 @@
          add-on re-enabled) to pick up the new files.
 
     Safety rules (this script touches files outside the repository):
-      * the target / addons folder must already exist - paths are never guessed into existence
+      * the zip library folder is created when missing - and ONLY that folder;
+        nothing else is ever created or deleted
+      * the addons folder must already exist - it is never guessed into existence
       * only files matching redkolab-*.zip are deleted from the zip library
       * the installed folder is only replaced when it resolves to <addons>\redkolab
       * -KeepOld keeps previous zip versions around
+
+    Path note: the default library path is the REAL physical path
+    C:\build\Blender\4.0\4.0chajian. D:\build\Blender is a junction pointing at
+    C:\build\Blender, i.e. the same directory under a second name - never treat
+    the two spellings as two different folders.
 
     ASCII-only on purpose: Windows PowerShell 5.1 reads .ps1 files with the system
     code page and would mangle non-ASCII text.
@@ -32,7 +39,7 @@
 #>
 param(
     [string]$Zip = "",
-    [string]$Target = "D:\build\Blender\4.0\4.0chajian",
+    [string]$Target = "C:\build\Blender\4.0\4.0chajian",
     [string]$InstallTo = "",
     [switch]$KeepOld,
     [switch]$Quiet
@@ -64,7 +71,9 @@ Write-Info "package : $($package.FullName)"
 # --- 1. zip library ---------------------------------------------------------
 if (-not [string]::IsNullOrWhiteSpace($Target)) {
     if (-not (Test-Path -LiteralPath $Target)) {
-        throw "zip library folder not found: $Target (create it first or pass -Target '')"
+        # Create the zip library folder only. Nothing else is ever created here.
+        New-Item -ItemType Directory -Force -Path $Target | Out-Null
+        Write-Info "created : $Target" "Yellow"
     }
     $targetFull = (Resolve-Path -LiteralPath $Target).Path
     Write-Info "library : $targetFull"

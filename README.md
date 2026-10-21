@@ -18,6 +18,7 @@
 | 🔤 字体设置 | 界面缩放、DPI、自定义界面字体 / 等宽字体、抗锯齿、hinting、线条宽度（写进 Blender 偏好设置） |
 | 🖥 页面布局 | 把工作区 + 区域划分存成快照，在新文件里一键还原；也能直接存成启动布局 |
 | ↕ 面板顺序 | 拖动调整**本插件自己的面板**在 N 面板里的上下顺序（并列出侧栏现有标签页） |
+| 📦 ZML_LAB 一键更新 | 自动扫描源目录里的 **ZML_LAB 压缩包**，把它**剪切**到插件库并替换已安装版本；先备份、装完自动重新启用，**插件设置与快捷键不变**（模块名不一致时直接拒绝） |
 
 三种呼出方式：
 
@@ -655,7 +656,41 @@ N 面板 ▸ `红红子lab` ▸ 顶部切到 **工具** 页 ▸ **「面板顺�
   `event.mouse_region_y - 起始值` 当成"往下拖"的正位移用。现在统一走
   `panels.target_from_screen_drag()` 做换算，方向换算只在那一个地方，测试也盯着它
 
-### 改快捷键
+### ZML_LAB 一键更新（N 面板 ▸ 工具 页 ▸ 插件设置）
+
+给 ZML_LAB 用的一段小工具：把新下载的 ZML_LAB 压缩包**剪切**进插件库，再用它**替换已安装的
+ZML_LAB**，并且保证**插件设置与快捷键不变**。
+
+| 项 | 说明 |
+| --- | --- |
+| 源目录 | 自动扫描 ZML_LAB 压缩包的目录，默认 `D:\日常软件\qq` |
+| 库目录 | 压缩包要剪切过去的插件 zip 库，默认 `C:\build\Blender\4.0\4.0chajian`（不存在会自动创建） |
+| 压缩包 | 源目录里**通过校验**的候选项（包内必须有 `ZML_LAB…/__init__.py`），按文件修改时间从新到旧 |
+| **一键更新ZML_LAB** | 点一下弹确认（列出源包名 / 模块名 / 版本 / 目标库目录 / 会移动源文件 / 会重新启用），确认后执行 |
+
+点下去之后依次做：
+
+1. **校验**候选包，并核对**模块名**（见下面的硬守卫）；库目录不存在就创建；
+2. **备份**：已安装的旧 ZML_LAB 模块文件夹复制到
+   `<addons>\_zml_backup\<模块名>-<时间戳>\`（库里被替换的旧压缩包也一起备份）；
+3. **剪切**源压缩包到库目录（源目录里不再保留），库里同模块的旧包按"同一模块"识别后清理；
+4. **安装**：`preferences.addon_install(overwrite=True)`，只替换同名模块；
+5. **重新启用**：`addon_utils.disable` → `enable(default_set=True)`，让插件自己的快捷键重新注册，
+   然后核对它确实处于启用状态；
+6. **报告**：模块名、版本、源 zip → 库路径、备份路径、是否重新启用。
+
+**快捷键为什么不会丢（核心机制）**：Blender 的插件偏好设置（ZML_LAB 自己的快捷键设置就在里面）
+是按**模块名**存的。包内顶层文件夹名一变，Blender 就把它当成另一个插件，原来那套设置归不到新模块
+名下 —— 用户看到的就是"每次更新快捷键都没了"。所以这里有一条硬守卫：**候选包的模块名必须与已安装的
+ZML_LAB 模块名一致**（不区分大小写、允许下划线与版本后缀），**不一致就直接拒绝执行、一个文件都不动**，
+并在报告里说明原因。本机没装过 ZML_LAB 时按"首次安装"放行。
+
+任何一步失败都会**回滚备份**（源压缩包挪回原处、旧模块文件夹放回、被清掉的旧包从备份恢复），
+并把**具体失败原因**写进报告 —— 不会谎报成功。
+
+> 本功能**不写** `userpref.blend`（绝不调用 `wm.save_userpref`）、**不改** keymap、
+> **不删**你的其它插件；对真实 addons 目录只做只读探测。
+
 
 **偏好设置 ▸ 插件 ▸ 红红子lab**：
 
@@ -944,9 +979,11 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 → 提交 → 打 `v<版本>` tag（如 `v2.12.1`）→ 推送（带重试）。
 任何一步不过就直接中止，不会把坏包推上去。加 `-DryRun` 可以只看检查结果不推送。
 
-**本地插件 zip 库**默认是 `D:\build\Blender\4.0\4.0chajian`（放 Boxcutter / HardOps / MACHIN3tools
-这类安装包的地方）：每次发版会把新的 `redkolab-<版本>.zip` 复制进去，并删掉里面的旧版本
+**本地插件 zip 库**默认是 `C:\build\Blender\4.0\4.0chajian`（真实物理路径；`D:\build\Blender`
+是指向 `C:\build\Blender` 的 Junction 目录联接，两种写法是**同一个目录**，不要再把它们当成两处）：
+每次发版会把新的 `redkolab-<版本>.zip` 复制进去，并删掉里面的旧版本
 （只删该目录下匹配 `redkolab-*.zip` 的文件，别的插件包与文件夹一律不碰）。
+目录不存在时只会创建这一个目录，其它目录一律不自动创建、不自动删除。
 
 **已安装副本**默认是 `%APPDATA%\Blender Foundation\Blender\4.0\scripts\addons`：每次发版会把
 `redkolab\` 整个替换成新版本的内容，这样 Blender 下次启动加载的就是最新的
@@ -954,7 +991,7 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 不想动本地用 `-NoDeploy` / `-NoInstall` 跳过，想留历史 zip 用 `-KeepOld`：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "D:\其它\插件库" -InstallTo "D:\其它\addons"
+powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "C:\其它\插件库" -InstallTo "D:\其它\addons"
 ```
 
 推送后 [.github/workflows/release.yml](.github/workflows/release.yml) 自动执行：

@@ -48,8 +48,9 @@ param(
     [string]$ProxyUrl = "",
     [string]$Git = "",
     [string]$Python = "",
-    # Local add-on zip library: every release is copied there, replacing older versions
-    [string]$DeployTo = "D:\build\Blender\4.0\4.0chajian",
+    # Local add-on zip library: every release is copied there, replacing older versions.
+    # Real physical path; D:\build\Blender is a junction to C:\build\Blender (same folder).
+    [string]$DeployTo = "C:\build\Blender\4.0\4.0chajian",
     # Installed add-on folder: keeps the copy Blender actually loads up to date
     [string]$InstallTo = "$env:APPDATA\Blender Foundation\Blender\4.0\scripts\addons",
     # Real-Blender gate: runs before anything is committed, tagged or pushed.

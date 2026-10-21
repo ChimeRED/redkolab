@@ -24,6 +24,7 @@ import glob
 import math
 import os
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -6283,6 +6284,318 @@ def test_layout(module):
 
 
 
+def _make_test_zip(path, folder, version=(1, 2, 3)):
+    """在临时目录里造一个「像 ZML_LAB 包」的 zip（只写临时目录，不碰真实 addons）。"""
+    body = (
+        "bl_info = {{\n"
+        "    \"name\": \"{folder}\",\n"
+        "    \"version\": ({version}),\n"
+        "    \"blender\": (4, 0, 0),\n"
+        "}}\n"
+    ).format(folder=folder, version=", ".join(str(part) for part in version))
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("{}/__init__.py".format(folder), body)
+    return path
+
+
+def _run_zml_operator(**kwargs):
+    """跑一键更新算符并把结果归一化。
+
+    ``self.report({'ERROR'}, ...)`` 会让 ``bpy.ops`` 抛 RuntimeError（而不是安静地
+    返回 ``{'CANCELLED'}``），所以这里把它归一成 CANCELLED + 消息，两种都算"拒绝"。
+    """
+    try:
+        return set(bpy.ops.hhz.zml_lab_update(**kwargs)), ""
+    except RuntimeError as error:
+        return {'CANCELLED'}, str(error)
+
+
+def test_zml_lab_update(module):
+    """ZML_LAB 一键更新：扫描 / 校验 / 模块名守卫 / 计划逻辑。
+
+    全程只碰**临时目录**：真实 addons 目录只读（会传给算符当 ``addons_dir`` 的是
+    临时假目录），**不调用**真实的 ``preferences.addon_install``。
+    """
+    section("功能：一键更新ZML_LAB（扫描 / 校验 / 守卫 / 计划）")
+    ops_module = module.ops
+    context = bpy.context
+    temp_root = tempfile.mkdtemp(prefix="hhz_zml_")
+    config_dir = bpy.utils.user_resource('CONFIG') or ""
+    userpref = os.path.join(config_dir, "userpref.blend") if config_dir else ""
+    before_mtime = os.path.getmtime(userpref) if userpref and os.path.isfile(userpref) else None
+    try:
+        # ---- 偏好设置：三个新项（两个路径 + 一个候选下拉）----
+        properties = module.ui.HHZ_AddonPreferences.bl_rna.properties
+        for name in ("zml_source_dir", "zml_library_dir", "zml_candidate"):
+            check(name in properties, "偏好设置里有 {} 项".format(name))
+        preferences = module.compat.get_preferences()
+        check(preferences is not None, "偏好设置对象可访问")
+        original_source = getattr(preferences, "zml_source_dir", "") if preferences else ""
+        if preferences is not None:
+            check(preferences.zml_source_dir == "D:\\日常软件\\qq",
+                  "源目录默认 D:\\日常软件\\qq", preferences.zml_source_dir)
+            check(preferences.zml_library_dir == "C:\\build\\Blender\\4.0\\4.0chajian",
+                  "库目录默认 C:\\build\\Blender\\4.0\\4.0chajian（真实物理路径）",
+                  preferences.zml_library_dir)
+            check(properties["zml_source_dir"].subtype == 'DIR_PATH'
+                  and properties["zml_library_dir"].subtype == 'DIR_PATH',
+                  "两个路径字段都是目录选择框（subtype=DIR_PATH）")
+            check(properties["zml_candidate"].type == 'ENUM',
+                  "候选包是下拉（EnumProperty）", properties["zml_candidate"].type)
+            extra = sorted(name for name in properties.keys()
+                           if name.startswith("zml_"))
+            check(extra == ["zml_candidate", "zml_library_dir", "zml_source_dir"],
+                  "只新增了这三项（没有多出「自动重新启用」之类的开关）", extra)
+            # 源目录里一个候选都没有时，下拉给占位项而不是空列表
+            preferences.zml_source_dir = os.path.join(temp_root, "empty_source")
+            empty_items = module.ui.zml_candidate_items(preferences, context)
+            check(len(empty_items) == 1
+                  and empty_items[0][1] == "（没有找到 ZML_LAB 压缩包）",
+                  "源目录没有候选时下拉只有一项占位说明", empty_items)
+            preferences.zml_source_dir = original_source
+
+        # ---- 1. 扫描 / 校验：四类样本 ----
+        source = os.path.join(temp_root, "source")
+        os.makedirs(source)
+        good = _make_test_zip(os.path.join(source, "ZML_LAB_Test.zip"), "ZML_LAB_Test", (1, 2, 3))
+        unrelated = _make_test_zip(os.path.join(source, "OtherAddon.zip"), "OtherAddon")
+        not_zml = _make_test_zip(os.path.join(source, "RedkolabLike.zip"), "RedkolabLike")
+        empty = os.path.join(source, "Empty.zip")
+        with zipfile.ZipFile(empty, "w"):
+            pass  # 合法但空着的 zip（没有任何条目）
+        not_zip = os.path.join(source, "readme.txt")
+        with open(not_zip, "w", encoding="utf-8") as handle:
+            handle.write("not a zip\n")
+
+        candidates = ops_module.zml_scan(source)
+        paths = [item[0] for item in candidates]
+        check(len(candidates) == 1, "四类样本里只有 1 个包被列为候选", [os.path.basename(p) for p in paths])
+        check(paths and paths[0] == good, "被选中的正是那个合法的 ZML_LAB 包",
+              [os.path.basename(p) for p in paths])
+        if candidates:
+            check(candidates[0][1] == "ZML_LAB_Test",
+                  "模块名读对了（ZML_LAB_Test）", candidates[0][1])
+            check(candidates[0][2] == "1.2.3",
+                  "版本读对了（bl_info 里的 (1, 2, 3) -> 1.2.3）", candidates[0][2])
+            check(isinstance(candidates[0][3], float), "结果里带 mtime", candidates[0][3])
+        check(os.path.basename(unrelated) not in [os.path.basename(p) for p in paths],
+              "无关 zip 没有被当成候选")
+        check(os.path.basename(not_zml) not in [os.path.basename(p) for p in paths],
+              "模块名不含 ZML_LAB 的包没有被当成候选")
+        check(os.path.basename(empty) not in [os.path.basename(p) for p in paths],
+              "空 zip 没有被当成候选")
+        check(ops_module.zml_zip_module(unrelated)[0] is None,
+              "无关包的模块名读成 None（不会瞎猜）", ops_module.zml_zip_module(unrelated))
+        check(ops_module.zml_zip_module(empty) == (None, ""),
+              "空包的 (模块名, 版本) 都是空", ops_module.zml_zip_module(empty))
+        check(ops_module.zml_scan(os.path.join(temp_root, "no_such_dir")) == [],
+              "源目录不存在时返回空列表（不抛异常）")
+        check(ops_module.zml_scan("") == [], "源目录为空字符串时返回空列表")
+
+        # 模块名匹配规则（不区分大小写、允许下划线与版本后缀）
+        for name in ("ZML_LAB", "zml_lab", "ZML_LAB_Ultimate_Max_V100", "ZMLLAB",
+                     "ZML-LAB-Test", "zml_lab_test"):
+            check(ops_module.zml_lab_identity(name) is not None,
+                  "{} 被认成 ZML_LAB 名字".format(name))
+        for name in ("redkolab", "Boxcutter", "", "HOps"):
+            check(ops_module.zml_lab_identity(name) is None,
+                  "{} 不被认成 ZML_LAB 名字".format(name or "(空)"))
+        check(ops_module.zml_same_module("ZML_LAB_Test", "zml_lab_test"),
+              "大小写差异算同一个模块")
+        check(not ops_module.zml_same_module("ZML_LAB_Test", "ZML_LAB_Other"),
+              "模块名不同就不是同一个模块")
+
+        # ---- 按 mtime 倒序 ----
+        newer = _make_test_zip(os.path.join(source, "ZML_LAB_Newer.zip"),
+                              "ZML_LAB_Newer", (2, 0))
+        future = os.path.getmtime(good) + 600
+        os.utime(newer, (future, future))
+        ordered = ops_module.zml_scan(source)
+        check([item[1] for item in ordered] == ["ZML_LAB_Newer", "ZML_LAB_Test"],
+              "两个候选按 mtime 倒序（新的在前）", [item[1] for item in ordered])
+        check(all(ordered[index][3] >= ordered[index + 1][3]
+                  for index in range(len(ordered) - 1)),
+              "返回顺序确实是 mtime 从大到小")
+        os.remove(newer)
+
+        # ---- 2. 模块名守卫 ----
+        check(ops_module.zml_module_guard("ZML_LAB_Test", []) == (
+            True, "本机还没装过 ZML_LAB，这将是首次安装（模块名 ZML_LAB_Test）"),
+            "没装过时放行（首次安装）")
+        allowed, message = ops_module.zml_module_guard(
+            "ZML_LAB_Test", ["ZML_LAB_Test"])
+        check(allowed and "一致" in message, "同名模块放行", message)
+        allowed, message = ops_module.zml_module_guard(
+            "ZML_LAB_Test", ["ZML_LAB_Ultimate_Max_V100"])
+        check(not allowed, "候选模块名与已安装不一致时拒绝", message)
+        check("模块名" in message and "快捷键" in message,
+              "拒绝说明里点明「模块名变了快捷键就归不到它名下」", message)
+        check(ops_module.zml_module_guard("", ["ZML_LAB_Test"])[0] is False,
+              "候选读不出模块名时也拒绝")
+        allowed, message = ops_module.zml_module_guard(
+            "ZML_LAB_Test", ["ZML_LAB_Old", "zml_lab_test"])
+        check(allowed, "已安装里只要有一个同名模块就放行（多版本共存也能更新）", message)
+
+        # 假 addons 目录：只有一个名字不同的 ZML_LAB 旧模块 + 备份目录 + 无关插件
+        fake_addons = os.path.join(temp_root, "fake_addons")
+        old_module_dir = os.path.join(fake_addons, "ZML_LAB_Old_V1")
+        os.makedirs(old_module_dir)
+        with open(os.path.join(old_module_dir, "__init__.py"), "w", encoding="utf-8") as handle:
+            handle.write("bl_info = {}\n")
+        os.makedirs(os.path.join(fake_addons, "_zml_backup", "ZML_LAB_Test-20260101-000000"))
+        os.makedirs(os.path.join(fake_addons, "EmptyFolder"))
+        os.makedirs(os.path.join(fake_addons, "redkolab"))
+        with open(os.path.join(fake_addons, "redkolab", "__init__.py"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("bl_info = {}\n")
+        check(ops_module.zml_installed_modules(fake_addons) == ["ZML_LAB_Old_V1"],
+              "已安装模块探测只认 ZML_LAB 家族的插件目录（跳过 _zml_backup / 空目录 / 其它插件）",
+              ops_module.zml_installed_modules(fake_addons))
+        check(ops_module.zml_installed_modules(os.path.join(temp_root, "no_dir")) == [],
+              "目录不存在时探测返回空列表")
+
+        # ---- 2b. 算符真的拒绝：CANCELLED 且一个文件都没动 ----
+        library = os.path.join(temp_root, "library_should_not_exist")
+        result, message = _run_zml_operator(
+            source_dir=source, library_dir=library, candidate=good, addons_dir=fake_addons)
+        check(result == {'CANCELLED'}, "模块名不一致时算符拒绝执行（CANCELLED）", result)
+        check("模块名不一致" in message,
+              "拒绝时报告里点明是模块名不一致（不是别的失败）", message[:120])
+        check(os.path.isfile(good), "拒绝后源压缩包还在原处（没有被剪切走）")
+        check(not os.path.exists(library), "拒绝后连库目录都没有创建")
+        check(os.path.isfile(os.path.join(old_module_dir, "__init__.py")),
+              "拒绝后已安装的旧模块文件夹完好")
+        check(not os.path.isdir(os.path.join(fake_addons, "_zml_backup",
+                                             "ZML_LAB_Test-20260101-000000", "ZML_LAB_Old_V1")),
+              "拒绝后没有做任何备份（连备份都没有开始）")
+        result, _message = _run_zml_operator(
+            source_dir=source, library_dir=library, candidate="", addons_dir=fake_addons)
+        check(result == {'CANCELLED'}, "没选压缩包时拒绝执行", result)
+        result, message = _run_zml_operator(
+            source_dir=source, library_dir=library, candidate=unrelated,
+            addons_dir=fake_addons)
+        check(result == {'CANCELLED'}, "不是 ZML_LAB 的包被拒绝", result)
+        check("不是 ZML_LAB" in message, "拒绝原因写明包内没有 ZML_LAB 模块文件夹", message[:120])
+        result, _message = _run_zml_operator(
+            source_dir=source, library_dir="", candidate=good, addons_dir=fake_addons)
+        check(result == {'CANCELLED'}, "没设置库目录时拒绝执行", result)
+        check(os.path.isfile(good), "上面三次拒绝都没有动源压缩包")
+
+        # ---- 3. 计划逻辑（纯函数，逐条断言）----
+        fresh = os.path.join(temp_root, "library")
+        plan = ops_module.zml_library_plan(fresh, "D:/src/ZML_LAB_Test.zip", "ZML_LAB_Test", [])
+        check(plan["move_to"] == os.path.join(fresh, "ZML_LAB_Test.zip"),
+              "库目录为空时：压缩包就放到 库目录/源文件名", plan["move_to"])
+        check(plan["backup"] == [] and plan["delete"] == [] and plan["kept"] == []
+              and plan["conflict"] == [],
+              "库目录为空时没有备份 / 删除 / 冲突", plan)
+
+        same_name = os.path.join(fresh, "ZML_LAB_Test.zip")
+        older = os.path.join(fresh, "ZML_LAB_Test-0.9.zip")
+        other = os.path.join(fresh, "Boxcutter.zip")
+        redko = os.path.join(fresh, "redkolab-2.19.0.zip")
+        entries = [
+            (same_name, "ZML_LAB_Test", "1.0"),
+            (older, "ZML_LAB_Test", "0.9"),
+            (other, "Boxcutter", "26.1.5"),
+            (redko, "", ""),
+        ]
+        plan = ops_module.zml_library_plan(fresh, "D:/src/ZML_LAB_Test.zip",
+                                           "ZML_LAB_Test", entries)
+        check(plan["replace_in_place"] == [same_name],
+              "库里同名旧包 -> 就地替换（移动会覆盖它）", plan["replace_in_place"])
+        check(plan["delete"] == [older],
+              "库里同模块但不同文件名的旧包 -> 清理", plan["delete"])
+        check(plan["backup"] == [same_name, older],
+              "两个旧包都要先备份", plan["backup"])
+        check(plan["kept"] == [other, redko],
+              "别的插件 / 读不出模块名的包一个都不动", plan["kept"])
+        check(plan["conflict"] == [], "没有同名冲突")
+
+        # 同行但模块名不同 -> 冲突（绝不覆盖别人的包）
+        conflict_entries = [(same_name, "OtherAddon", "1.0")]
+        plan = ops_module.zml_library_plan(fresh, "D:/src/ZML_LAB_Test.zip",
+                                           "ZML_LAB_Test", conflict_entries)
+        check(plan["conflict"] == [same_name], "同名但不同模块 -> conflict", plan["conflict"])
+        check(plan["delete"] == [] and plan["replace_in_place"] == [],
+              "冲突的那一项既不算备份也不算删除")
+
+        # 模块名大小写不同仍算同一模块（Windows 上就是同一个目录）
+        plan = ops_module.zml_library_plan(fresh, "D:/src/ZML_LAB_Test.zip",
+                                           "ZML_LAB_Test",
+                                           [(older, "zml_lab_test", "0.9")])
+        check(plan["delete"] == [older], "模块名大小写不同仍按同一模块清理", plan["delete"])
+
+        # ---- 4. 确认文案（二次确认必须列出的六项）----
+        lines = ops_module.zml_confirm_lines(
+            "D:/src/ZML_LAB_Test.zip", "ZML_LAB_Test", "1.2.3",
+            "C:\\build\\Blender\\4.0\\4.0chajian", ["ZML_LAB_Test"])
+        text = "\n".join(lines)
+        for keyword in ("ZML_LAB_Test.zip", "模块名", "版本", "1.2.3",
+                        "C:\\build\\Blender\\4.0\\4.0chajian", "剪切", "重新启用"):
+            check(keyword in text, "确认文案里有「{}」".format(keyword))
+        check("\u00b7" not in text, "确认文案里没有中点号")
+        first_install = "\n".join(ops_module.zml_confirm_lines(
+            "D:/src/a.zip", "ZML_LAB_Test", "", "/lib", []))
+        check("首次安装" in first_install, "没装过时确认文案写明这是首次安装")
+        check("（读不出）" in first_install, "读不出版本时如实写「读不出」，不猜")
+
+        # ---- 5. 算符元数据与 UI 放置 ----
+        operator = ops_module.HHZ_OT_zml_lab_update
+        check(operator.bl_label == "一键更新ZML_LAB",
+              "bl_label 精确为「一键更新ZML_LAB」", operator.bl_label)
+        check("一键更新ZML_LAB" in operator.bl_label, "bl_label 精确含「一键更新ZML_LAB」")
+        check({'REGISTER', 'UNDO'} <= set(operator.bl_options),
+              "bl_options 含 REGISTER 与 UNDO", list(operator.bl_options))
+        check(operator.bl_idname == "hhz.zml_lab_update",
+              "算符 idname 是 hhz.zml_lab_update", operator.bl_idname)
+        check("invoke" in operator.__dict__, "算符有 invoke（二次确认）")
+        check("draw" in operator.__dict__, "算符有 draw（确认弹窗里列出细节）")
+        ops_source = source_of(module, "ops.py")
+        check("invoke_confirm" in ops_source and "invoke_props_dialog" in ops_source,
+              "invoke 先走 invoke_confirm，画不出文案的旧版本退回属性弹窗")
+        check("addon_install" in ops_source and "overwrite=True" in ops_source,
+              "安装走 preferences.addon_install(overwrite=True)")
+        check("addon_utils.disable" in ops_source and "default_set=True" in ops_source,
+              "重新启用走 disable -> enable(default_set=True)")
+        zml_class = class_source(ops_source, "HHZ_OT_zml_lab_update")
+        check("bpy.ops.wm.save_userpref" not in zml_class,
+              "更新流程里绝不写 userpref.blend（算符里没有调用 save_userpref）")
+        check("keymap_items" not in zml_class,
+              "算符内部不碰 keymap（快捷键靠重新启用自然注册）")
+        check("os.remove" in ops_source or "shutil.rmtree" in ops_source,
+              "清理只在库目录里删旧包，不删用户的其它插件")
+        check("_zml_backup" in ops_source, "备份目录是 addons 下的 _zml_backup")
+
+        ui_source = source_of(module, "ui.py")
+        panel_source = class_source(ui_source, "HHZ_PT_settings")
+        check('"hhz.zml_lab_update"' in panel_source,
+              "按钮画在「插件设置」面板里（不是新面板）")
+        check('"zml_source_dir"' in panel_source and '"zml_library_dir"' in panel_source,
+              "面板里有两个路径字段")
+        check('"zml_candidate"' in panel_source, "面板里有候选包下拉")
+        check("扫描源目录里的 ZML_LAB 压缩包" in panel_source,
+              "路径字段下方有那句说明（更新会移动压缩包，设置与快捷键不受影响）")
+        check(getattr(bpy.types, "HHZ_PT_zml", None) is None,
+              "没有新增面板（HHZ_PT_zml 不存在）")
+        panel_count = len([name for name in dir(bpy.types) if name.startswith("HHZ_PT_")])
+        check(panel_count == 7, "本插件仍然是 7 个面板", panel_count)
+        registered = sorted(name for name in dir(bpy.types)
+                            if name.startswith("HHZ_OT_zml"))
+        check(registered == ["HHZ_OT_zml_lab_update"], "只注册了这一个新算符", registered)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    check(not os.path.isdir(temp_root), "临时目录已清理干净")
+    if before_mtime is None:
+        skip("这个测试环境还没有 userpref.blend，无法比对 mtime（不算失败）")
+    else:
+        after_mtime = os.path.getmtime(userpref) if os.path.isfile(userpref) else None
+        check(after_mtime == before_mtime,
+              "本节没有写过 userpref.blend（mtime 未变）",
+              "{} -> {}".format(before_mtime, after_mtime))
+
+
 def test_unregister(module_name, module):
     section("卸载清理")
     keyconfig = module.compat.addon_keyconfig()
@@ -6363,6 +6676,7 @@ def main():
     run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)
     run("拖动排序整条链（注册 / 方向 / 持久化）", test_panel_order_drag_chain, module)
+    run("一键更新ZML_LAB（扫描 / 校验 / 守卫 / 计划）", test_zml_lab_update, module)
     run("算符 poll", test_poll)
     # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
     # 会清掉当前场景，所以后面只剩"卸载清理"这种不吃场景数据的用例
