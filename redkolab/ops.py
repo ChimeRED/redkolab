@@ -17,6 +17,7 @@
 """
 
 import ast
+import hashlib
 import math
 import os
 import re
@@ -3140,6 +3141,256 @@ def _zml_decode(raw):
     return raw.decode("utf-8", "replace")
 
 
+#: zip 成员名里的「名字是 UTF-8」标志位（APPNOTE 4.4.4 / zip 通用标志 bit 11）
+_ZML_ZIP_UTF8_FLAG = 0x800
+
+#: 下拉标签的最大长度。教训（2.14.0 颜色项乱码）：中文长标签在弹出框里会被
+#: Blender 按像素宽度从中间截断，半个汉字就画成乱码 —— 所以标签必须短。
+_ZML_LABEL_LIMIT = 32
+
+#: 下拉里的占位标识符（没有候选 / 扫描失败）。必须是纯 ASCII 的稳定字符串
+ZML_NONE_ID = "__none__"
+ZML_SCAN_FAILED_ID = "__scan_failed"
+
+
+def _zml_has_control(text):
+    """文本里有没有控制字符 / 代理项（这种名字不能当模块名，也不能进 UI）。"""
+    try:
+        for char in str(text or ""):
+            code = ord(char)
+            if code < 0x20 or code == 0x7F or 0xD800 <= code <= 0xDFFF:
+                return True
+    except Exception:
+        return True
+    return False
+
+
+def _zml_clean_text(text, limit=64):
+    """把任意文本清成「能安全交给 Blender 画」的样子：去掉控制字符与代理项，
+    中点号换成 ``-``。**绝不抛异常**。"""
+    try:
+        raw = str(text or "")
+    except Exception:
+        return ""
+    chars = []
+    for char in raw:
+        code = ord(char)
+        if code < 0x20 or code == 0x7F or 0xD800 <= code <= 0xDFFF:
+            continue
+        if char == "\u00b7":          # 中点号：用户换过界面字体后缺字会画成乱码
+            chars.append("-")
+            continue
+        chars.append(char)
+    try:
+        return "".join(chars).strip()[:limit]
+    except Exception:
+        return ""
+
+
+def zml_decode_name(name, utf8_flag=None):
+    """把 zip 成员名解码成可读文本；**绝不抛异常**。
+
+    为什么要它（2.21.1 修复）：``zipfile`` 只在成员名打了 UTF-8 标志
+    （``flag_bits & 0x800``）时才按 UTF-8 解码，**没打标志就一律按 CP437 解**。
+    中文 Windows 上打的包常常是「GBK 字节 + 不打标志」，于是 ``ZML_LAB_椎木兰``
+    读回来是 ``ZML_LAB_╫╡─╫╘╜╙`` 这种乱码 —— 而且它会**冒充**一个合法模块名，
+    被后续的同族改名、确认文案、下拉标签一路用下去。
+
+    解码顺序（按需求）：
+      1. ``utf8_flag`` 为真 → ``zipfile`` 已按 UTF-8 解过，原样返回；
+      2. 纯 ASCII → 原样返回；
+      3. 把文本按 CP437 **编回原始字节**，再依次用 ``utf-8`` → ``gbk`` 试探解码；
+      4. 全都失败（或解出控制字符）→ 返回 CP437 那版原文（宁可变乱码，也不抛）。
+    """
+    if name is None:
+        return ""
+    if isinstance(name, (bytes, bytearray)):
+        raw = bytes(name)
+        for encoding in ("utf-8", "gbk", "cp437"):
+            try:
+                decoded = raw.decode(encoding)
+            except Exception:
+                continue
+            if not _zml_has_control(decoded):
+                return decoded
+        return raw.decode("cp437", "replace")
+    try:
+        text = str(name)
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    if utf8_flag:
+        return text
+    try:
+        text.encode("ascii")
+        return text
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    except Exception:
+        return text
+    # 没有 UTF-8 标志：zipfile 是拿 CP437 解的，编回去就拿到原始字节
+    try:
+        raw = text.encode("cp437")
+    except Exception:
+        return text
+    for encoding in ("utf-8", "gbk"):
+        try:
+            decoded = raw.decode(encoding)
+        except Exception:
+            continue
+        if not _zml_has_control(decoded):
+            return decoded
+    return text
+
+
+def zml_version_tag(module):
+    """模块名尾部的版本序号 → 短标签（``..._V107`` → ``V1.07``）；没有后缀返回空串。
+
+    只做机械换算：三位数字按 ``V<首位>.<后两位>``（V107 → V1.07、V076 → V0.76）。
+    尾部不是纯数字（例如 ``..._V107beta``）就不认，返回空串 —— 不猜。
+    """
+    key = zml_lab_identity(module) or ""
+    found = re.search(r"v(\d+)$", key)
+    if not found:
+        return ""
+    digits = found.group(1)
+    if len(digits) <= 3:
+        digits = digits.zfill(3)
+        return "V{}.{}".format(digits[:-2], digits[-2:])
+    return "V" + digits
+
+
+def zml_candidate_label(module, version="", path=""):
+    """下拉里的**短标签**：``V1.07 - 1.7``（短、无中点号、无控制字符、截断到 32 字）。
+
+    ``ZML_LAB`` 前缀故意省掉：文件名那一长串在弹出框里会被截断成乱码。
+    """
+    tag = zml_version_tag(module)
+    parts = []
+    if tag:
+        parts.append(tag)
+    clean_version = _zml_clean_text(version, 16)
+    if clean_version:
+        parts.append(clean_version)
+    if not parts:
+        parts.append(_zml_clean_text(os.path.basename(str(path or "")), 24) or "ZML_LAB 包")
+    return _zml_clean_text(" - ".join(parts), _ZML_LABEL_LIMIT)
+
+
+def zml_candidate_description(entry):
+    """候选包的悬停说明（含真实文件名与模块名，方便核对；不含控制字符）。"""
+    entry = entry or {}
+    name = _zml_clean_text(os.path.basename(entry.get("path") or ""), 64) or "（文件名读不出）"
+    module = _zml_clean_text(entry.get("module") or "", 64) or "（读不出）"
+    version = _zml_clean_text(entry.get("version") or "", 16) or "（读不出）"
+    return "文件 {}；模块名 {}；版本 {}；更新会剪切这个压缩包并替换已安装版本".format(
+        name, module, version)
+
+
+def zml_candidate_id(path, module):
+    """候选包的枚举标识符：**纯 ASCII**（哈希），绝不含路径 / 中文 / 控制字符。
+
+    为什么必须是纯 ASCII（2.21.1 崩溃的直接原因）：旧版直接把**完整路径**当枚举
+    标识符，路径里有中文时 Blender 的枚举项缓存会变成乱码字节，面板 ``draw()``
+    每次读 ``preferences.zml_candidate`` 都抛
+    ``UnicodeDecodeError: 'utf-8' codec can't decode byte 0x01 in position 0``，
+    下拉与「一键更新」按钮一起废掉。
+
+    标识符只由「归一化模块名 + 文件名」哈希而来，跟目录无关、可复现、稳定。
+    """
+    name = os.path.basename(str(path or "")).lower()
+    seed = "{}|{}".format(zml_lab_identity(module) or "", name)
+    try:
+        digest = hashlib.sha1(seed.encode("utf-8", "backslashreplace")).hexdigest()
+    except Exception:
+        digest = hashlib.sha1(name.encode("ascii", "ignore")).hexdigest()
+    return "zml_{}".format(digest[:12])
+
+
+def zml_zip_inspect(zip_path):
+    """只读检查一个 zip：返回 ``{"module", "version", "problem"}``。
+
+    ``problem`` 为空串表示「是合法的 ZML_LAB 包」；否则是**具体原因**（打不开 /
+    文件名解码失败 / 没有 ``__init__.py`` / 模块名含控制字符），用来回答
+    「这个包为什么不算候选」，绝不返回空原因。
+    """
+    result = {"module": None, "version": "", "problem": ""}
+    path = str(zip_path or "")
+    if not path:
+        result["problem"] = "没有给出压缩包路径"
+        return result
+    try:
+        if not os.path.isfile(path):
+            result["problem"] = "文件不存在或不是文件"
+            return result
+    except OSError:
+        result["problem"] = "文件路径读不了"
+        return result
+    try:
+        archive = zipfile.ZipFile(path)
+    except Exception as error:
+        result["problem"] = "压缩包打不开（{}）".format(error.__class__.__name__)
+        return result
+    try:
+        with archive:
+            try:
+                infos = archive.infolist()
+            except Exception as error:
+                result["problem"] = "包内文件名解码失败（{}）".format(
+                    error.__class__.__name__)
+                return result
+            if not infos:
+                result["problem"] = "空压缩包（没有任何条目）"
+                return result
+            modules = {}
+            manifests = {}
+            for info in infos:
+                try:
+                    decoded = zml_decode_name(
+                        info.filename, info.flag_bits & _ZML_ZIP_UTF8_FLAG)
+                except Exception:
+                    continue
+                parts = decoded.split("/")
+                if len(parts) != 2 or not parts[0]:
+                    continue
+                if parts[1] == "__init__.py":
+                    if zml_lab_identity(parts[0]) is None:
+                        continue
+                    if _zml_has_control(parts[0]):
+                        result["problem"] = "模块名解码失败（含控制字符）"
+                        continue
+                    modules.setdefault(parts[0], info)
+                elif parts[1] == "blender_manifest.toml":
+                    manifests.setdefault(parts[0], info)
+            if not modules:
+                if not result["problem"]:
+                    result["problem"] = ("包内没有 ZML_LAB 模块文件夹"
+                                         "（缺 <模块名>/__init__.py）")
+                return result
+            module = sorted(modules)[0]
+            result["module"] = module
+            version = ""
+            try:
+                info = modules[module]
+                if info.file_size <= _ZML_MAX_SOURCE_BYTES:
+                    version = _zml_bl_info_version(_zml_decode(archive.read(info)))
+            except Exception:
+                version = ""
+            if not version:
+                try:
+                    info = manifests.get(module)
+                    if info is not None and info.file_size <= _ZML_MAX_SOURCE_BYTES:
+                        version = _zml_manifest_version(_zml_decode(archive.read(info)))
+                except Exception:
+                    version = ""
+            result["version"] = version
+            return result
+    except Exception as error:
+        result["problem"] = "读取压缩包失败（{}）".format(error.__class__.__name__)
+        return result
+
+
 def _zml_version_text(value):
     if isinstance(value, (tuple, list)):
         return ".".join(str(part) for part in value)
@@ -3193,74 +3444,177 @@ def _zml_manifest_version(text):
 def zml_zip_module(zip_path):
     """读一个 zip 的 ``(模块名, 版本)``；不是 ZML_LAB 包时返回 ``(None, "")``。
 
-    只读：只用 ``zipfile`` 打开、读两个候选文件，不改磁盘上的任何东西。
+    只读：只打开一次压缩包、读两个候选文件，不改磁盘上的任何东西。
     判定"是 ZML_LAB 包"的机械条件（按需求）：包内存在**顶层模块文件夹**，
     也就是 ``<模块名>/__init__.py`` 这一项，且该文件夹名匹配 ZML_LAB。
+    成员名一律先过 :func:`zml_decode_name`（修掉「不打 UTF-8 标志的中文名」）。
     """
     try:
-        with zipfile.ZipFile(zip_path) as archive:
-            folders = []
-            for entry in archive.namelist():
-                parts = entry.split("/")
-                if len(parts) != 2 or not parts[0]:
-                    continue
-                if parts[1] != "__init__.py":
-                    continue
-                if zml_lab_identity(parts[0]) is None:
-                    continue
-                folders.append(parts[0])
-            if not folders:
-                return (None, "")
-            module = sorted(set(folders))[0]
-            version = ""
-            try:
-                info = archive.getinfo("{}/__init__.py".format(module))
-                if info.file_size <= _ZML_MAX_SOURCE_BYTES:
-                    version = _zml_bl_info_version(_zml_decode(archive.read(info)))
-            except Exception:
-                version = ""
-            if not version:
-                try:
-                    info = archive.getinfo("{}/blender_manifest.toml".format(module))
-                    if info.file_size <= _ZML_MAX_SOURCE_BYTES:
-                        version = _zml_manifest_version(_zml_decode(archive.read(info)))
-                except Exception:
-                    version = ""
-            return (module, version)
+        info = zml_zip_inspect(zip_path)
     except Exception:
         return (None, "")
+    module = info.get("module")
+    if not module:
+        return (None, "")
+    return (module, info.get("version") or "")
 
 
-def zml_scan(source_dir):
-    """扫描源目录里的 ZML_LAB 压缩包，返回 ``[(zip 路径, 模块名, 版本, mtime)]``。
 
-    按 **mtime 倒序**（最新改动的排最前；mtime 相同再按模块名排，保证结果稳定）。
-    校验不通过的 zip（空包、无关包、模块名不含 ZML_LAB）不会出现在结果里。
+def zml_scan_detail(source_dir):
+    """扫描源目录，返回 ``{"source", "total", "entries", "problems"}``；**绝不抛异常**。
+
+    ``entries``：``[{"path","module","version","mtime","id"}]``，按 mtime 倒序
+    （``id`` 是纯 ASCII 的下拉标识符，见 :func:`zml_candidate_id`）
+    ``problems``：``[(文件名, 原因)]`` —— 看着像压缩包但校验没过的，原因写具体
+    ``total``：源目录里 zip 的总数（用来回答「找到 N 个 zip，其中 M 个没通过」）
     """
-    results = []
-    source_dir = str(source_dir or "")
-    if not source_dir or not os.path.isdir(source_dir):
-        return results
+    detail = {"source": str(source_dir or ""), "total": 0, "entries": [], "problems": []}
+    if not detail["source"] or not os.path.isdir(detail["source"]):
+        return detail
     try:
-        entries = os.listdir(source_dir)
-    except OSError:
-        return results
-    for name in entries:
+        names = os.listdir(detail["source"])
+    except OSError as error:
+        detail["problems"].append(
+            ("（目录）", "列不出目录内容（{}）".format(error.__class__.__name__)))
+        return detail
+    for name in sorted(names):
         if not name.lower().endswith(".zip"):
             continue
-        path = os.path.join(source_dir, name)
+        path = os.path.join(detail["source"], name)
         try:
             if not os.path.isfile(path):
                 continue
             mtime = os.path.getmtime(path)
         except OSError:
             continue
-        module, version = zml_zip_module(path)
-        if not module:
+        detail["total"] += 1
+        try:
+            info = zml_zip_inspect(path)
+        except Exception:
+            info = {"module": None, "version": "", "problem": "检查时抛出异常"}
+        if not info.get("module") or info.get("problem"):
+            detail["problems"].append(
+                (name, info.get("problem") or "读不出模块名"))
             continue
-        results.append((path, module, version, mtime))
-    results.sort(key=lambda item: (-item[3], item[1]))
-    return results
+        detail["entries"].append({
+            "path": path,
+            "module": info["module"],
+            "version": info.get("version") or "",
+            "mtime": mtime,
+            "id": zml_candidate_id(path, info["module"]),
+        })
+    detail["entries"].sort(key=lambda item: (-item["mtime"], item["module"]))
+    return detail
+
+
+def zml_scan(source_dir):
+    """扫描源目录里的 ZML_LAB 压缩包，返回 ``[(zip 路径, 模块名, 版本, mtime)]``。
+
+    按 **mtime 倒序**（最新改动的排最前；mtime 相同再按模块名排，保证结果稳定）。
+    校验不通过的 zip（空包、无关包、模块名不含 ZML_LAB、名字解码失败）不会出现在
+    结果里，具体原因见 :func:`zml_scan_detail` 的 ``problems``。
+    """
+    detail = zml_scan_detail(source_dir)
+    return [(entry["path"], entry["module"], entry["version"], entry["mtime"])
+            for entry in detail["entries"]]
+
+
+def zml_package_items(source_dir):
+    """下拉项：``[(ASCII id, 短标签, 悬停说明)]``；没有候选时给一项占位说明。
+
+    标签只用短版（``V1.07 - 1.7``），**不用完整路径/文件名**：长中文标签在弹出框里
+    会被 Blender 按像素宽度截断成乱码。同标签时补 ``(2)`` ``(3)`` 区分。
+    绝不抛异常（外层 UI 回调还会再包一层 try / except）。
+    """
+    items = []
+    try:
+        detail = zml_scan_detail(source_dir)
+        if not detail["entries"]:
+            return [(ZML_NONE_ID, "（没有找到 ZML_LAB 压缩包）",
+                     "源目录里没有通过校验的 ZML_LAB 压缩包")]
+        used = {}
+        for entry in detail["entries"]:
+            label = zml_candidate_label(entry["module"], entry["version"], entry["path"])
+            used[label] = used.get(label, 0) + 1
+            if used[label] > 1:
+                label = _zml_clean_text("{} ({})".format(label, used[label]),
+                                        _ZML_LABEL_LIMIT)
+            items.append((entry["id"], label, zml_candidate_description(entry)))
+    except Exception:
+        return [(ZML_SCAN_FAILED_ID, "（扫描失败，详见控制台）",
+                 "扫描 ZML_LAB 压缩包时出错，详情已打印到控制台")]
+    return items
+
+
+def zml_resolve_candidate(source_dir, value):
+    """把下拉里的值反查成扫描结果里的真实 zip：返回 ``(entry, detail)``。
+
+    按需求：算符**不依赖名字**，而是从扫描结果表里按 ASCII id 反查真实路径。
+    为了兼容 2.21.0 及更早版本存下的「完整路径」，值本身是存在的文件时也认。
+    找不到时 ``entry`` 为 ``None``，``detail`` 带扫描现状（供报告使用）。
+    """
+    text = str(value or "").strip()
+    detail = zml_scan_detail(source_dir)
+    if not text:
+        return (None, detail)
+    for entry in detail["entries"]:
+        if entry["id"] == text:
+            return (entry, detail)
+    # 旧版存的是完整路径（也接受用户手工填一个路径）
+    try:
+        if os.path.isfile(text):
+            for entry in detail["entries"]:
+                try:
+                    if os.path.normcase(os.path.abspath(entry["path"])) == \
+                            os.path.normcase(os.path.abspath(text)):
+                        return (entry, detail)
+                except OSError:
+                    continue
+            return ({"path": text, "module": "", "version": "", "mtime": 0.0,
+                     "id": ""}, detail)
+    except OSError:
+        pass
+    return (None, detail)
+
+
+def zml_missing_candidate_message(source_dir, value, detail=None):
+    """算符找不到候选时的报告文案：说清扫到了什么、为什么不算候选。
+
+    **绝不留空冒号**（2.21.0 的缺陷：报告只有「找不到要更新的 ZML_LAB 压缩包：」）。
+    """
+    source = str(source_dir or "")
+    shown = _zml_clean_text(value, 64)
+    if not source:
+        return ("还没有设置 ZML_LAB 源目录（偏好设置里选一个放 ZML_LAB 压缩包的目录）")
+    if not os.path.isdir(source):
+        return "ZML_LAB 源目录不存在：{}".format(source)
+    if detail is None:
+        detail = zml_scan_detail(source)
+    total = detail.get("total", 0)
+    entries = detail.get("entries") or []
+    problems = detail.get("problems") or []
+    parts = []
+    if total:
+        parts.append("在 {} 找到 {} 个 zip".format(source, total))
+    else:
+        parts.append("源目录 {} 里一个 zip 都没有".format(source))
+    if problems:
+        shown_problems = "；".join("{}：{}".format(name, reason)
+                                  for name, reason in problems[:4])
+        parts.append("其中 {} 个像 ZML_LAB 但校验未通过（{}）".format(
+            len(problems), shown_problems))
+        if len(problems) > 4:
+            parts.append("只列出前 4 个")
+    if entries:
+        names = " / ".join(os.path.basename(entry["path"]) for entry in entries[:3])
+        if not shown:
+            parts.append("下拉里还没有选择候选包，请先在下拉里选一个"
+                         "（现在有 {} 个候选：{}）".format(len(entries), names))
+    else:
+        parts.append("所以没有可以更新的候选包")
+    if shown and not any(entry["id"] == shown for entry in entries):
+        parts.append("当前选择 {} 不在扫描结果里，请重新选一个".format(shown))
+    return "；".join(part for part in parts if part)
 
 
 def zml_addons_dir():
@@ -3435,11 +3789,18 @@ def zml_rewrite_module(zip_path, target_module, out_path):
     try:
         with zipfile.ZipFile(zip_path) as archive:
             infos = archive.infolist()
+            decoded = {}
             folders = []
             for info in infos:
-                parts = info.filename.split("/")
+                # 成员名先解码（修掉「不打 UTF-8 标志的中文名」），否则会按乱码
+                # 模块名去找顶层文件夹，接着把包写成一堆乱码目录
+                name = zml_decode_name(info.filename,
+                                       info.flag_bits & _ZML_ZIP_UTF8_FLAG)
+                decoded[id(info)] = name
+                parts = name.split("/")
                 if len(parts) == 2 and parts[1] == "__init__.py" \
-                        and zml_lab_identity(parts[0]) is not None:
+                        and zml_lab_identity(parts[0]) is not None \
+                        and not _zml_has_control(parts[0]):
                     folders.append(parts[0])
             if not folders:
                 return empty
@@ -3447,7 +3808,7 @@ def zml_rewrite_module(zip_path, target_module, out_path):
             prefix = source + "/"
             with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as out:
                 for info in infos:
-                    name = info.filename
+                    name = decoded.get(id(info), info.filename)
                     if name == prefix:
                         out.writestr(target + "/", b"")
                         continue
@@ -3619,8 +3980,8 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
     )
     candidate: bpy.props.StringProperty(
         name="ZML_LAB 压缩包",
-        description="要更新的那个 ZML_LAB 压缩包（完整路径）",
-        subtype='FILE_PATH',
+        description="要更新的那个 ZML_LAB 压缩包（下拉里的 ASCII 标识符；"
+                    "旧版存下的完整路径也认）",
         default="",
     )
     addons_dir: bpy.props.StringProperty(
@@ -3632,21 +3993,50 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
 
     # -- 二次确认 --------------------------------------------------------
 
+    def _source_dir(self, context):
+        """源目录：算符属性优先，空着就退回偏好设置里的同一个值。"""
+        value = str(self.source_dir or "").strip()
+        if value:
+            return value
+        preferences = compat.get_preferences(context)
+        if preferences is not None:
+            return str(getattr(preferences, "zml_source_dir", "") or "").strip()
+        return ""
+
+    def _resolve_entry(self, context):
+        """把下拉里的值（现在是**纯 ASCII id**）反查成扫描结果里的真实 zip。
+
+        2.21.1 起 ``self.candidate`` 里存的是 ASCII 标识符而不是路径 —— 路径里
+        有中文时 Blender 的枚举项缓存会坏掉（面板 draw 每次抛 UnicodeDecodeError）。
+        这里按扫描结果表反查，**不依赖名字**。旧版存下的完整路径也认。
+        """
+        return zml_resolve_candidate(self._source_dir(context), self.candidate)
+
     def _resolve(self, context):
         """解析候选包与「要沿用的旧模块名」。
 
-        返回 ``(module, version, installed, decision)``；``decision`` 是
+        返回 ``(module, version, installed, decision, entry)``；``decision`` 是
         ``zml_target_module`` 的结果（确认文案与执行都用它，避免两处判断不一致）。
         """
-        module, version = zml_zip_module(self.candidate or "")
+        entry, _detail = self._resolve_entry(context)
+        path = (entry or {}).get("path") or ""
+        module, version = zml_zip_module(path)
         installed = zml_installed_modules(str(self.addons_dir or "").strip() or zml_addons_dir())
         decision = zml_target_module(installed, zml_enabled_modules(context), module)
-        return module, version, installed, decision
+        return module, version, installed, decision, entry
 
     def _confirm_text(self, context=None):
-        module, version, installed, decision = self._resolve(context)
+        module, version, installed, decision, entry = self._resolve(context)
+        if entry is None:
+            # 找不到候选时也要有内容可看：写明扫到了什么、为什么不算候选
+            return module, version, installed, decision, "\n".join([
+                "找不到要更新的 ZML_LAB 压缩包",
+                zml_missing_candidate_message(
+                    self._source_dir(context), self.candidate,
+                    self._resolve_entry(context)[1]),
+            ])
         return module, version, installed, decision, "\n".join(zml_confirm_lines(
-            self.candidate, module, version, self.library_dir, installed,
+            entry.get("path") or "", module, version, self.library_dir, installed,
             decision.get("target") or ""))
 
     def draw(self, context):
@@ -3677,14 +4067,20 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
     # -- 执行 ------------------------------------------------------------
 
     def execute(self, context):
-        candidate = str(self.candidate or "").strip()
+        # 候选先按扫描结果表反查成真实路径：候选值是 ASCII id（旧版存的是路径）
+        entry, detail = self._resolve_entry(context)
+        self._candidate_path = (entry or {}).get("path") or ""
+        candidate = self._candidate_path
         library_dir = str(self.library_dir or "").strip()
         if not candidate or not os.path.isfile(candidate):
-            return self._cancel("找不到要更新的 ZML_LAB 压缩包：{}".format(
-                candidate or "（没有选择）"))
+            return self._cancel("找不到要更新的 ZML_LAB 压缩包。{}".format(
+                zml_missing_candidate_message(
+                    self._source_dir(context), self.candidate, detail)))
         module, version = zml_zip_module(candidate)
         if not module:
-            return self._cancel("这个压缩包不是 ZML_LAB 插件包：包内没有 ZML_LAB 模块文件夹")
+            return self._cancel("这个压缩包不是 ZML_LAB 插件包：{}".format(
+                zml_zip_inspect(candidate).get("problem")
+                or "包内没有 ZML_LAB 模块文件夹"))
         if not library_dir:
             return self._cancel("还没有设置 ZML_LAB 的目标库目录（插件库目录）")
 
@@ -3852,9 +4248,15 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         # 1) 库目录里的新包挪回原处（等于撤销"剪切"）
-        if moved_to and os.path.isfile(moved_to) and self.candidate:
+        source_zip = getattr(self, "_candidate_path", "") or ""
+        if not source_zip:
+            # 兜底：候选值本身就是一个存在的路径（旧版语义）时才用它
+            candidate_value = str(self.candidate or "").strip()
+            if candidate_value and os.path.isfile(candidate_value):
+                source_zip = candidate_value
+        if moved_to and os.path.isfile(moved_to) and source_zip:
             try:
-                shutil.move(moved_to, self.candidate)
+                shutil.move(moved_to, source_zip)
             except Exception as error:
                 problems.append("压缩包没能移动回原处（{}）".format(error))
         # 2) 已经动过模块文件夹：把备份的旧版本放回去（首次安装则删掉新装的那份）

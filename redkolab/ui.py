@@ -12,6 +12,7 @@
 """
 
 import os
+import traceback
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
@@ -326,28 +327,62 @@ def layout_items(self, context):
 def zml_candidate_items(self, context):
     """ZML_LAB 候选包的下拉项（动态，跟着源目录里通过校验的包走）。
 
-    条目来自 ``ops.zml_scan``（纯逻辑，可无头测试）：只有包内存在模块名匹配
+    条目来自 ``ops.zml_package_items``（纯逻辑，可无头测试）：只有包内存在模块名匹配
     ZML_LAB 的顶层文件夹、且有 ``__init__.py`` 的 zip 才算候选，按 mtime 倒序。
     一个都没有时给一项占位说明，不会出现空下拉框。
+
+    2.21.1 的两条硬要求：
+
+    * **标识符必须是纯 ASCII**（``zml_<哈希>``）。旧版把**完整路径**当标识符，
+      路径里有中文时 Blender 的枚举项缓存会坏掉，面板 ``draw()`` 每次读
+      ``preferences.zml_candidate`` 都抛 ``UnicodeDecodeError``（用户日志里
+      那个 ``byte 0x01 in position 0``），下拉和「一键更新」一起废掉。
+    * **整段包在 try / except 里**：任何异常都只返回一条占位项并把 traceback
+      打到控制台，**绝不让面板 draw() 抛异常**。
 
     ``from . import ops`` 放在函数里是**故意的**：``ops`` 在导入期依赖本模块，
     模块级互相导入会成环。
     """
     from . import ops
 
-    source = getattr(self, "zml_source_dir", "") or ""
-    candidates = ops.zml_scan(source) if source else []
-    if not candidates:
-        return [("__none__", "（没有找到 ZML_LAB 压缩包）",
+    try:
+        source = getattr(self, "zml_source_dir", "") or ""
+        items = ops.zml_package_items(source)
+    except Exception:
+        traceback.print_exc()
+        return [(ops.ZML_SCAN_FAILED_ID, "（扫描失败，详见控制台）",
+                 "扫描 ZML_LAB 压缩包时出错，详情已打印到控制台")]
+    if not items:
+        return [(ops.ZML_NONE_ID, "（没有找到 ZML_LAB 压缩包）",
                  "源目录里没有通过校验的 ZML_LAB 压缩包")]
-    items = []
-    for path, module, version, _mtime in candidates:
-        label = os.path.basename(path)
-        if version:
-            label += "  版本 {}".format(version)
-        items.append((path, label, "模块名 {}，版本 {}；更新会移动这个压缩包并替换已安装版本".format(
-            module, version or "（读不出）")))
     return items
+
+
+def heal_zml_candidate(preferences=None, context=None):
+    """把旧版（<=2.21.0）存进偏好设置的**坏枚举值**就地清掉。
+
+    旧版把完整路径当枚举标识符，含中文的路径会让 Blender 的枚举项缓存变成乱码字节；
+    用户偏好设置里已经存下的坏值会让 ``preferences.zml_candidate`` 读一次抛一次
+    ``UnicodeDecodeError``。2.21.1 改成纯 ASCII 标识符，同时在这里把**已经存坏的
+    旧值**重置成当前第一个合法候选。
+
+    返回 ``True`` 表示确实做过重置。**绝不抛异常**（自愈失败也不能拖垮 draw）。
+    """
+    if preferences is None:
+        return False
+    try:
+        preferences.zml_candidate
+        return False
+    except Exception:
+        pass
+    try:
+        items = zml_candidate_items(preferences, context)
+        if items:
+            preferences.zml_candidate = items[0][0]
+    except Exception:
+        traceback.print_exc()
+    return True
+
 
 
 def _on_theme_color_update(self, context):
@@ -537,6 +572,9 @@ class HHZ_PT_settings(bpy.types.Panel):
         if preferences is None:
             box.label(text="读不到插件偏好设置", icon='ERROR')
         else:
+            # 2.21.1：旧版把完整路径当枚举标识符，用户偏好里可能已经存了坏值；
+            # 先就地重置（读一次就抛 UnicodeDecodeError 的那种），再画控件。
+            heal_zml_candidate(preferences, context)
             box.prop(preferences, "zml_source_dir", text="源目录")
             box.prop(preferences, "zml_library_dir", text="库目录")
             box.prop(preferences, "zml_candidate", text="压缩包")
@@ -546,7 +584,13 @@ class HHZ_PT_settings(bpy.types.Panel):
                                      icon='FILE_REFRESH')
             operation.source_dir = preferences.zml_source_dir
             operation.library_dir = preferences.zml_library_dir
-            operation.candidate = preferences.zml_candidate
+            # 2.21.1：读候选值的这一步**绝不**让 draw 抛异常（旧版就是在这里每帧
+            # 抛 UnicodeDecodeError: 'utf-8' codec can't decode byte 0x01 in position 0）
+            try:
+                operation.candidate = preferences.zml_candidate
+            except Exception:
+                traceback.print_exc()
+                operation.candidate = ""
 
         column = layout.column(align=True)
         column.label(text="{} {}".format(compat.ADDON_NAME, compat.ADDON_NAME_EN))
@@ -1145,6 +1189,9 @@ class HHZ_AddonPreferences(bpy.types.AddonPreferences):
         name="ZML_LAB 压缩包",
         description="源目录里通过校验的 ZML_LAB 压缩包（按文件修改时间从新到旧）",
         items=zml_candidate_items,
+        # 2.21.1：动态下拉的值不值得存 —— 候选列表随源目录变，存下来只会变成
+        # 指向旧条目的坏值（旧版把完整路径当标识符，存坏后每帧抛 UnicodeDecodeError）
+        options={'SKIP_SAVE'},
     )
 
     def hotkey_label(self):

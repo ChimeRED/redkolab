@@ -665,8 +665,13 @@ ZML_LAB**，并且保证**插件设置与快捷键不变**。
 | --- | --- |
 | 源目录 | 自动扫描 ZML_LAB 压缩包的目录，默认 `D:\日常软件\qq` |
 | 库目录 | 压缩包要剪切过去的插件 zip 库，默认 `C:\build\Blender\4.0\4.0chajian`（不存在会自动创建） |
-| 压缩包 | 源目录里**通过校验**的候选项（包内必须有 `ZML_LAB…/__init__.py`），按文件修改时间从新到旧 |
+| 压缩包 | 源目录里**通过校验**的候选项（包内必须有 `ZML_LAB…/__init__.py`），按文件修改时间从新到旧；下拉里显示**短标签** `V1.07 - 1.7`（文件夹版本 + 代码版本），悬停提示里才有完整文件名与模块名 |
 | **一键更新ZML_LAB** | 点一下弹确认（列出源包名 / 模块名 / 版本 / 目标库目录 / 会改名沿用旧模块 / 会移动源文件 / 会重新启用），确认后执行 |
+
+> 2.21.1 起下拉的值是**纯 ASCII 标识符**（`zml_<哈希>`），不再是完整路径：旧版把路径当
+> 枚举值，源目录含中文时会让 Blender 的枚举项缓存变成乱码字节，面板每帧抛
+> `UnicodeDecodeError`（详见第四节「2.21.1：ZML_LAB 候选包命名的实测与断言」）。
+> 找不到候选时报告会写清扫到了几个 zip、哪几个没通过校验、具体原因是什么。
 
 点下去之后依次做：
 
@@ -825,16 +830,18 @@ Windows 上默认输入法是中文时，Blender 一打开就是中文组字模�
 > **从 2.16.1 起，常规矩阵只测两条版本线**：用户实际使用的 **Blender 4.0** 与**最新稳定版**。
 > 4.2 LTS / 4.5 LTS 等中间版本**不再纳入常规矩阵**（依据是聚焦实际使用环境；代价见本节末尾「矩阵收窄的代价」）。
 
-同一份 `redkolab-2.18.0.zip`，真机无头测试：真的装包、真启用、真建场景、真跑功能并断言。
-（跑之前清干净隔离沙箱 `%TEMP%\redkolab_tests`，并显式指定被测的包 `-Zip dist\redkolab-2.18.0.zip`。）
+同一份 `redkolab-2.21.1.zip`，真机无头测试：真的装包、真启用、真建场景、真跑功能并断言。
+（跑之前清干净隔离沙箱 `%TEMP%\redkolab_tests`，并显式指定被测的包 `-Zip dist\redkolab-2.21.1.zip`。）
 
 | Blender | 安装入口 | 装成的模块 | 断言 | 结果 |
 | --- | --- | --- | --- | --- |
-| **4.0.2**（用户实际使用的版本） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **1603** | ✔ |
-| **5.2.2 LTS**（最新稳定版） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **1596** | ✔ |
-| **5.2.2 LTS**（最新稳定版） | 扩展页 Install from Disk（`extensions.package_install_files`） | `bl_ext.user_default.redkolab` | **1594** | ✔ |
+| **4.0.2**（用户实际使用的版本） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **1891** | ✔ |
+| **5.2.2 LTS**（最新稳定版） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **1884** | ✔ |
+| **5.2.2 LTS**（最新稳定版） | 扩展页 Install from Disk（`extensions.package_install_files`） | `bl_ext.user_default.redkolab` | **1863** | ✔ |
 
-> **三条全部 `PASS`，`0 项失败`（退出码 0）** —— 以上 1603 / 1596 / 1594 是逐条实跑抄下来的结果行。
+> **三条全部 `PASS`，`0 项失败`（退出码 0）** —— 以上 1891 / 1884 / 1863 是 2.21.1 逐条实跑抄下来的结果行。
+> **2.21.0 的本地实测是 1813 / 1806 / 1804**（同一台机器、同一套沙箱清理方式），
+> 2.21.1 修的「候选包名字解码 / ASCII 标识符」新增 **78** 条断言，所以数字比 2.21.0 高。
 > 4.0.2 那一条**只跑 `auto`（插件页）**：Blender 4.0.x 没有扩展安装入口（`bpy.ops.extensions` 是 4.2 才有的），
 > 所以给 4.0 跑扩展页没有意义；扩展入口由「5.2.2 LTS + 扩展页」那一条单独守住。
 >
@@ -846,15 +853,21 @@ Windows 上默认输入法是中文时，Blender 一打开就是中文组字模�
 > 届时需要重新下载那一版、临时加回矩阵跑一次 `tools\run_tests.ps1` 才能定位。功能断言本身一条没减，
 > 收窄的只是**被测版本面**。
 >
-> 同一版在 CI（Ubuntu runner，打 tag 时触发）上同样 **0 项失败**，逐条比本机 Windows **各少 6 条**，
-> 这是**既有**的平台差（脚本里按平台条件的 `[skip]`，上一版也同样少 6 条），不是 CI 少测功能。
-> CI 的矩阵已同步为 **4.0.2 auto / 最新稳定版 auto / 最新稳定版 extensions** 三条。
+> 同一版在 CI（Ubuntu runner，打 tag 时触发）上同样 **0 项失败**，但条数**比本机少**（如实说明，不再写「各少 6 条」）：
+> 4.0.2 `auto` 与 5.2.2 `auto` 各少约 **6** 条（脚本里按平台条件的 `[skip]`，既有平台差）；
+> **扩展页那条少约 25 条** —— 该 job 在扩展安装下**跳过沙箱 E2E 段**
+> （`test_zml_family_update` 会打印 `[skip] 不在隔离沙箱里，跳过端到端用例`：扩展安装不会创建
+> `<沙箱>\scripts\addons`，测试拒绝往真实 addons 目录写）。跳的是「真的装一次 / 真的回滚一次」那段，
+> 不是少测功能；CI 的矩阵仍是 **4.0.2 auto / 最新稳定版 auto / 最新稳定版 extensions** 三条。
 >
-> 断言数 1603 / 1596 / 1594 的差别来自安装入口与 Blender 版本，不是少测功能：
-> **扩展页安装**下 Blender 会接管元数据（不再暴露 `bl_info`），测试会跳过 2 项元数据检查
-> （所以 5.2.2 的扩展页比同版本的插件页少 2）；5.x 上另有几条 4.x 独有的断言
-> （时间线当前帧色那几项、5.x 无头环境下 `is_dirty` 造不出真的那一组）换成了对应的 5.x 断言 ——
-> 那些颜色项在 5.x 里已经被 Blender 删掉，面板上会自动隐藏。功能断言一项不少。
+> 断言数 1891 / 1884 / 1863 的差别来自安装入口与 Blender 版本，不是少测功能：
+> **扩展页安装**下 Blender 会接管元数据（不再暴露 `bl_info`），测试会跳过 2 项元数据检查；
+> 再加上上面说的沙箱 E2E 段（19 条）在扩展安装下整段 `[skip]`，所以 5.2.2 的扩展页比同版本的插件页少 21；
+> 5.x 上另有几条 4.x 独有的断言（时间线当前帧色那几项、5.x 无头环境下 `is_dirty` 造不出真的那一组）
+> 换成了对应的 5.x 断言 —— 那些颜色项在 5.x 里已经被 Blender 删掉，面板上会自动隐藏。功能断言一项不少。
+>
+> **2.21.1** 新增/加强的断言（**78 / 78 / 59** 条）：见本节末尾「2.21.1：ZML_LAB 候选包命名的实测与断言」。
+
 >
 > **2.18.0** 新增/加强的断言（比 2.17.0 的 1556 / 1549 / 1547 多 **47 / 47 / 47** 项）：
 > **灰度滤镜** —— 算符注册 + `bl_idname` 精确等于 `hhz.grayscale_filter` + **`bl_label` 精确等于「灰度滤镜」** +
@@ -934,6 +947,68 @@ blender --factory-startup --command extension validate dist/redkolab-2.12.2.zip
 # -> Success parsing TOML in "dist\redkolab-2.12.2.zip"    # 两个版本输出相同
 ```
 
+### 2.21.1：ZML_LAB 候选包命名的实测与断言
+
+**用户报的两个症状**（同一根因）：①「压缩包」下拉显示乱码；② 点「一键更新ZML_LAB」报
+「找不到要更新的 ZML_LAB 压缩包：」（冒号后空白）。Blender 控制台里每帧都在打印：
+
+```text
+File "...\addons\redkolab\ui.py", line 549, in draw
+    operation.candidate = preferences.zml_candidate
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0x01 in position 0: invalid start byte
+```
+
+**根因（本机实测，不是推测）**：旧版把**完整路径**当 `zml_candidate` 枚举的 identifier。
+源目录是 `D:\日常软件\qq`，路径含中文 —— Blender 的**动态枚举项缓存**在 identifier
+不是纯 ASCII 时会退化成一串乱码字节。实测（`blender -b`，隔离沙箱，装 2.21.0 的包）：
+
+| 场景 | `preferences.zml_candidate` 读回 | 设值 |
+| --- | --- | --- |
+| 源目录 `%TEMP%\...\source`（纯 ASCII） | 正常路径 | `SET-OK` |
+| 源目录 `%TEMP%\日常软件\qq`（含中文） | 4.0.2：`''` / 5.2.2：**`UnicodeDecodeError: 'utf-8' codec can't decode byte 0x80 in position 0`** | `TypeError: enum "..." not found in ('p\ufffd\ufffd\ufffd\x08\x02', ...)`（枚举项列表本身已是乱码字节） |
+
+也就是说：**只要 identifier 里出现非 ASCII，Blender 交给 Python 的枚举项就已经坏了** ——
+读值是乱码字节（有时恰好是 `0x01` 开头 → 用户看到的那个 `UnicodeDecodeError`），
+写值直接查不到项。`draw()` 里那一行每帧读它，于是面板的下拉和按钮一起废掉；
+按钮拿不到候选值，就只能报「找不到……：」加一个空串。
+
+顺带修掉一个**同族**问题（不是崩溃原因，但同样是缺陷）：`zipfile` 只在成员名打了 UTF-8
+标志（`flag_bits & 0x800`）时按 UTF-8 解码，**没打标志一律按 CP437 解**。中文 Windows 上
+打的包常常是「GBK 字节 + 不打标志」，于是 `ZML_LAB_椎木兰_V200` 读回来是
+`ZML_LAB_╫╡─╫╘╜╙_V200` 这种乱码 —— 而它**会冒充合法模块名**被后面的同族改名 / 确认文案
+继续用下去。真实包 `ZML_LAB_Ultimate_Max_V1.07.zip` 的成员名是纯 ASCII（`flag_bits=0x0000`），
+所以不受影响；受影响的是中文名成员名的包。
+
+**2.21.1 的三层修复**：
+
+1. **名字解码要健壮**：新增纯函数 `ops.zml_decode_name(name, utf8_flag)` —— 打了 UTF-8 标志
+   就原样用；没打标志时按「CP437 编回原始字节 → `utf-8` → `gbk` → 原样」试探解码，
+   任何异常都吞掉并回退，**绝不抛异常**；解出控制字符的名字不算合法模块名。
+2. **标识符必须纯 ASCII**：`zml_candidate` 的 identifier 改成 `zml_<12 位哈希>`
+   （`ops.zml_candidate_id`，只由「归一化模块名 + 文件名」算出，跟目录无关、可复现）；
+   人类可读的部分放进 **`label`，而且是短标签**（`V1.07 - 1.7`，最长 32 字，
+   不用完整路径 —— 长中文标签在弹出框里会被 Blender 按像素宽度截断成乱码，见
+   第七节「颜色项下拉出现乱码」那次的教训）；`items` 回调**整段 try / except**，
+   出错只返回一项 `（扫描失败，详见控制台）` 并把 traceback 打到控制台，
+   **绝不让 `draw()` 抛异常**。此外这个枚举带 `SKIP_SAVE`（候选列表本来就是动态的，
+   存下来只会变成指向旧条目的坏值），面板 `draw()` 里还加了一层护栏 + 旧坏值自愈
+   `ui.heal_zml_candidate`，所以**已经存坏的旧偏好设置也能直接用**。
+3. **算符取值要稳**：算符从 `preferences.zml_candidate`（现在一定是 ASCII id）**反查**
+   扫描结果表里的真实路径（不依赖名字；旧版存下的完整路径也认），找不到时报告写明
+   「在 `<源目录>` 找到 N 个 zip，其中 M 个像 ZML_LAB 但校验未通过（逐条原因：模块名
+   解码失败 / 含控制字符 / 缺 `<模块名>/__init__.py`）」，**不再出现空冒号**。
+
+**新增断言（78 / 78 / 59 条）**，覆盖：CP437 中文成员名样本解码后可读（GBK 与 UTF-8
+两种原始字节）、垃圾样本（`\x01` / NUL 成员名）下 `items` 回调不抛异常且算符给出明确错误、
+**遍历下拉的所有 identifier 逐个匹配 `^[A-Za-z0-9_]+$` 且是纯 ASCII**、label 无控制字符 /
+无中点号、**Blender 层面读 `preferences.zml_candidate` 不抛异常且每个 identifier 都能设进去
+再读回（含中文源目录）**、真实包 `ZML_LAB_Ultimate_Max_V1.07.zip` 能解出模块名
+`ZML_LAB_Ultimate_Max_V107` 与版本 `1.7`（短标签 `V1.07 - 1.7`）。
+
+**未验证（如实标注）**：无头环境画不出面板，所以「GUI 里下拉真的显示成
+`V1.07 - 1.7`、点按钮真的弹出确认框」只能在 GUI 里看 —— 这一版能自动验证到的是
+「枚举读值 / 设值都正常 + 标签内容就是那串短文本」，**实际观感待用户实测**。
+
 ### 关于 2.80 ~ 3.x
 
 按需求已不再支持（旧接口分支、旧安装格式都删掉了）。如果你以后要给 2.80~3.1 出包，
@@ -963,7 +1038,7 @@ redkolab/
 │  ├─ build_zips.py             打包（默认 nested 布局，可选其他布局做对比）
 │  ├─ check_version.py          版本号一致性检查（发布守门）
 │  ├─ inspect_zip.py            安装包结构自检（发布守门）
-│  ├─ blender_test.py           Blender 内部真机测试（1603 项断言；随版本与安装入口 1594~1603，Ubuntu CI 上少 6 条，含边界情况）
+│  ├─ blender_test.py           Blender 内部真机测试（1891 项断言；随版本与安装入口 1863~1891，Ubuntu CI 上更少，含边界情况）
 │  ├─ run_tests.ps1             在指定 Blender 上跑测试（自动隔离配置目录）
 │  ├─ release.ps1               一键发版：校验 → 升版本 → 本地部署 → 打 tag → 推送
 │  ├─ deploy_local.ps1          把新包复制进本地插件 zip 库并替换旧版本

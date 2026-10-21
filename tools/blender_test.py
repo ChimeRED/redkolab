@@ -6898,6 +6898,399 @@ def test_zml_family_update(module):
               "{} -> {}".format(before_mtime, after_mtime))
 
 
+# --------------------------- ZML_LAB 候选包命名解码 / 枚举标识符（2.21.1 修复）
+
+#: 造样本用的中文模块名（GBK 与 UTF-8 两种原始字节各造一个包）
+_ZML_CN_MODULE = "ZML_LAB_椎木兰_V200"
+
+
+def _raw_zip(path, members):
+    """手工写一个 zip：成员名用**原始字节**、``flag_bits`` 恒为 0（不打 UTF-8 标志）。
+
+    为什么不能用 ``zipfile.writestr``：它会给非 ASCII 名字自动补上 UTF-8 名字标志
+    （bit 11），就造不出「中文名 + 无标志」这个真实样本了。这里直接拼
+    本地文件头 / 中央目录 / 结束记录（store 方式，无 extra）。
+    """
+    local = bytearray()
+    central = bytearray()
+    for raw_name, data in members:
+        crc = zipfile.crc32(data) & 0xFFFFFFFF
+        offset = len(local)
+        local += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0x0000, 0, 0, 0x21,
+                             crc, len(data), len(data), len(raw_name), 0)
+        local += raw_name + data
+        central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0x0000, 0,
+                               0, 0x21, crc, len(data), len(data), len(raw_name),
+                               0, 0, 0, 0, 0, offset)
+        central += raw_name
+    cd_offset = len(local)
+    local += central
+    local += struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(members), len(members),
+                         len(central), cd_offset, 0)
+    with open(path, "wb") as handle:
+        handle.write(bytes(local))
+    return path
+
+
+def _zml_sample_init(name, version=(2, 0, 0)):
+    body = "bl_info = {\n"
+    body += '    "name": "{}",\n'.format(name)
+    body += '    "version": ({}),\n'.format(", ".join(str(part) for part in version))
+    body += '    "blender": (4, 0, 0),\n'
+    body += "}\n"
+    return body.encode("utf-8")
+
+
+def _zml_noflag_cn_zip(path, encoding="gbk"):
+    """造「成员名是不带 UTF-8 标志的中文」的包；``encoding`` 决定成员名的原始字节。"""
+    raw_name = _ZML_CN_MODULE.encode(encoding) + b"/__init__.py"
+    return _raw_zip(path, [(raw_name, _zml_sample_init(_ZML_CN_MODULE))])
+
+
+def _zml_junk_zip(path):
+    """造成员名含 ``\\x01`` / NUL 的垃圾包（旧版会把它当合法候选）。"""
+    return _raw_zip(path, [
+        (b"ZML_LAB_\x01\x01\x02\x03/__init__.py", _zml_sample_init("junk")),
+        (b"ZML_LAB_NUL\x00X/__init__.py", _zml_sample_init("nul")),
+    ])
+
+
+def test_zml_candidate_naming(module):
+    """2.21.1：候选包名字解码 + 下拉标识符必须纯 ASCII（用户报的崩溃就是这条链）。
+
+    覆盖三件事：
+
+    1. ``zml_decode_name``：无 UTF-8 标志的中文成员名要解回可读文本（GBK / UTF-8
+       两种字节），垃圾输入绝不抛异常；
+    2. 下拉项：identifier 全部匹配 ``^[A-Za-z0-9_]+$``、label 短且无控制字符/中点号；
+    3. **Blender 层面**：读 ``preferences.zml_candidate`` 不抛 ``UnicodeDecodeError``、
+       每个 identifier 都能设进去再读回来（含**中文源目录**，旧版就是在这里崩的）。
+
+    全程只碰临时目录；真实包只读（``zml_zip_inspect`` 打开读一下就关）。
+    """
+    section("功能：ZML_LAB 候选包名字解码与 ASCII 标识符（2.21.1）")
+    ops_module = module.ops
+    ui_module = module.ui
+    context = bpy.context
+    temp_root = tempfile.mkdtemp(prefix="hhz_zml_name_")
+    id_pattern = re.compile(r"^[A-Za-z0-9_]+$")
+    real_zip = r"D:\日常软件\qq\ZML_LAB_Ultimate_Max_V1.07.zip"
+    preferences = module.compat.get_preferences(context)
+    original_source = ""
+    original_candidate = ""
+    if preferences is not None:
+        try:
+            original_source = preferences.zml_source_dir
+        except Exception:
+            original_source = ""
+        try:
+            original_candidate = preferences.zml_candidate
+        except Exception:
+            original_candidate = ""
+    ui_source = source_of(module, "ui.py")
+    ops_source = source_of(module, "ops.py")
+    try:
+        # ---- 1. 纯函数：zml_decode_name ----
+        decode = ops_module.zml_decode_name
+        check(ops_module._ZML_ZIP_UTF8_FLAG == 0x800,
+              "UTF-8 名字标志位常量就是 0x800", ops_module._ZML_ZIP_UTF8_FLAG)
+        check(decode("ZML_LAB_Test/__init__.py", 0) == "ZML_LAB_Test/__init__.py",
+              "ASCII 成员名原样返回")
+        check(decode(_ZML_CN_MODULE, 0x800) == _ZML_CN_MODULE,
+              "打了 UTF-8 标志时信任 zipfile 已解好的文本")
+        gbk_bytes = _ZML_CN_MODULE.encode("gbk")
+        gbk_readback = (gbk_bytes + b"/__init__.py").decode("cp437")
+        check(decode(gbk_readback, 0) == _ZML_CN_MODULE + "/__init__.py",
+              "CP437 误读的 GBK 中文名 -> 解回可读中文", ascii(decode(gbk_readback, 0)))
+        utf8_readback = (_ZML_CN_MODULE.encode("utf-8") + b"/__init__.py").decode("cp437")
+        check(decode(utf8_readback, 0) == _ZML_CN_MODULE + "/__init__.py",
+              "CP437 误读的 UTF-8 中文名 -> 解回可读中文", ascii(decode(utf8_readback, 0)))
+        check(decode(gbk_bytes) == _ZML_CN_MODULE,
+              "直接给原始字节（GBK）也能解出可读中文", ascii(decode(gbk_bytes)))
+        check(decode(_ZML_CN_MODULE.encode("utf-8")) == _ZML_CN_MODULE,
+              "直接给原始字节（UTF-8）也能解出可读中文")
+        nasty_inputs = ["", None, "\ud800", "ZML_LAB_\x01\x02", b"\x00\x01\xff",
+                        b"", b"\xd7\xb5", "🙂", "x" * 5000, "ZML_LAB_NUL\x00tail"]
+        nasty_ok = True
+        nasty_results = []
+        for value in nasty_inputs:
+            try:
+                result = decode(value, 0)
+                nasty_results.append(ascii(result)[:24])
+                if not isinstance(result, str):
+                    nasty_ok = False
+            except Exception:
+                nasty_ok = False
+                nasty_results.append("RAISED")
+        check(nasty_ok, "zml_decode_name 对垃圾输入绝不抛异常且总返回 str", nasty_results)
+
+        # ---- 2. 复现样本：中文成员名 + 无 UTF-8 标志 ----
+        source = os.path.join(temp_root, "source")
+        os.makedirs(source)
+        gbk_zip = _zml_noflag_cn_zip(os.path.join(source, "ZML_LAB_GBK_NOMARK.zip"), "gbk")
+        utf8_zip = _zml_noflag_cn_zip(os.path.join(source, "ZML_LAB_UTF8_NOMARK.zip"), "utf-8")
+        with zipfile.ZipFile(gbk_zip) as archive:
+            first_info = archive.infolist()[0]
+            raw_readback = first_info.filename
+            raw_flag = first_info.flag_bits
+        check(raw_flag & 0x800 == 0,
+              "样本包确实没打 UTF-8 名字标志（flag_bits 无 0x800）", hex(raw_flag))
+        check(_ZML_CN_MODULE not in raw_readback,
+              "未解码的读回值是 CP437 乱码，读不出中文模块名（复现样本）",
+              ascii(raw_readback))
+        check(decode(raw_readback, raw_flag & 0x800) == _ZML_CN_MODULE + "/__init__.py",
+              "同一个读回值经 zml_decode_name 后是可读中文", ascii(decode(raw_readback, 0)))
+        gbk_inspect = ops_module.zml_zip_inspect(gbk_zip)
+        check(gbk_inspect["module"] == _ZML_CN_MODULE,
+              "GBK 字节 + 无标志的包：模块名解回可读中文", ascii(gbk_inspect["module"]))
+        check(gbk_inspect["version"] == "2.0.0",
+              "GBK 样本的代码版本读出 2.0.0", gbk_inspect["version"])
+        check(gbk_inspect["problem"] == "",
+              "GBK 样本没有校验问题", gbk_inspect["problem"])
+        check(ops_module.zml_zip_module(utf8_zip) == (_ZML_CN_MODULE, "2.0.0"),
+              "UTF-8 字节 + 无标志的包：也解回同一个模块名",
+              ops_module.zml_zip_module(utf8_zip))
+
+        # ---- 3. 短标签（不重复 2.14.0 颜色项乱码的教训）----
+        check(ops_module.zml_version_tag(_ZML_CN_MODULE) == "V2.00",
+              "模块名尾部 V200 -> 短标签 V2.00", ops_module.zml_version_tag(_ZML_CN_MODULE))
+        check(ops_module.zml_version_tag("ZML_LAB_Ultimate_Max_V107") == "V1.07",
+              "V107 -> V1.07（真实包的短标签）",
+              ops_module.zml_version_tag("ZML_LAB_Ultimate_Max_V107"))
+        sample_label = ops_module.zml_candidate_label(_ZML_CN_MODULE, "2.0.0", gbk_zip)
+        check(sample_label == "V2.00 - 2.0.0",
+              "候选标签是短版（文件夹版本 + 代码版本）", sample_label)
+        check(len(sample_label) <= 32, "标签长度不超过 32 字", len(sample_label))
+        check("\u00b7" not in sample_label, "标签里没有中点号")
+        check(not any(ord(char) < 0x20 for char in sample_label), "标签里没有控制字符")
+        long_label = ops_module.zml_candidate_label(
+            "ZML_LAB_" + "很长的名字" * 20 + "_V107", "1.7", "x.zip")
+        check(len(long_label) <= 32, "超长名字也只给出 <= 32 字的标签", (len(long_label), long_label))
+
+        # ---- 4. 垃圾样本：控制字符 / NUL 成员名 ----
+        junk = _zml_junk_zip(os.path.join(source, "ZML_LAB_JUNK.zip"))
+        junk_inspect = ops_module.zml_zip_inspect(junk)
+        check(junk_inspect["module"] is None,
+              "成员名含控制字符的包读不出模块名（不算候选）", ascii(junk_inspect["module"]))
+        check(bool(junk_inspect["problem"]),
+              "并且给出具体原因，不是空字符串", junk_inspect["problem"])
+        check("控制字符" in junk_inspect["problem"] or "__init__.py" in junk_inspect["problem"],
+              "原因可读（控制字符 / 缺 __init__.py）", junk_inspect["problem"])
+        detail = ops_module.zml_scan_detail(source)
+        modules = [entry["module"] for entry in detail["entries"]]
+        check(sorted(modules) == [_ZML_CN_MODULE, _ZML_CN_MODULE],
+              "扫描只把两个名字解对的包列为候选", [ascii(item) for item in modules])
+        check(detail["total"] == 3, "total 统计了目录里的全部 zip", detail["total"])
+        check(len(detail["problems"]) == 1,
+              "垃圾包进了 problems（不在候选里）", detail["problems"])
+        check(all(reason for _name, reason in detail["problems"]),
+              "每条问题都带原因（不留空）", detail["problems"])
+
+        # ---- 5. 枚举全量判据：identifier 纯 ASCII / label 干净 ----
+        items = ops_module.zml_package_items(source)
+        check(len(items) == 2, "下拉项数量等于合法候选数", len(items))
+        identifiers = [item[0] for item in items]
+        check(all(id_pattern.match(item) for item in identifiers),
+              "所有 identifier 都匹配 ^[A-Za-z0-9_]+$", identifiers)
+        check(all(item.isascii() for item in identifiers),
+              "所有 identifier 都是纯 ASCII", identifiers)
+        check(len(set(identifiers)) == len(identifiers), "identifier 互不重复", identifiers)
+        check(all(len(item[1]) <= 32 for item in items),
+              "所有 label 都不超过 32 字", [len(item[1]) for item in items])
+        check(all("\u00b7" not in item[1] for item in items),
+              "没有 label 含中点号", [item[1] for item in items])
+        check(all(not any(ord(char) < 0x20 or ord(char) == 0x7F
+                          for char in item[1] + item[2]) for item in items),
+              "label / 悬停说明里都没有控制字符")
+        check(all(_ZML_CN_MODULE in item[2] for item in items),
+              "悬停说明里是解对的可读模块名（不是乱码）",
+              [item[2][:40] for item in items])
+        check(all(identifier == ops_module.zml_candidate_id(entry["path"], entry["module"])
+                  for identifier, entry in zip(identifiers, detail["entries"])),
+              "identifier 就是 zml_<哈希>，可用扫描结果复现")
+
+        # ---- 6. Blender 层面：读值 / 设值（旧版在这里每帧抛 UnicodeDecodeError）----
+        if preferences is None:
+            skip("拿不到插件偏好设置，跳过枚举读值 / 设值用例")
+        else:
+            preferences.zml_source_dir = source
+            ui_items = ui_module.zml_candidate_items(preferences, context)
+            check(len(ui_items) == 2, "UI 回调返回的项数正确", len(ui_items))
+            check(all(id_pattern.match(item[0]) for item in ui_items),
+                  "UI 回调返回的 identifier 全是纯 ASCII", [item[0] for item in ui_items])
+            read_error = None
+            try:
+                current = preferences.zml_candidate
+            except Exception as error:
+                read_error = error
+                current = ""
+            check(read_error is None,
+                  "读 preferences.zml_candidate 不抛异常（2.21.0 的崩溃点）",
+                  repr(read_error))
+            check(not current or id_pattern.match(current) is not None,
+                  "读回来的是合法 ASCII 标识符（不是乱码字节 / 不是路径）", ascii(current))
+            roundtrip = []
+            for identifier in [item[0] for item in ui_items]:
+                try:
+                    preferences.zml_candidate = identifier
+                    roundtrip.append(preferences.zml_candidate == identifier)
+                except Exception as error:
+                    roundtrip.append("SET-FAILED {}".format(error))
+            check(all(flag is True for flag in roundtrip),
+                  "每个 identifier 都能设进去并原样读回（Blender 枚举往返）", roundtrip)
+            check(ui_module.heal_zml_candidate(preferences, context) is False,
+                  "正常值不会被自愈逻辑误重置")
+
+            # 中文源目录：旧版把完整路径当 identifier，正是在这里坏掉的
+            cn_source = os.path.join(temp_root, "中文目录", "qq")
+            os.makedirs(cn_source)
+            shutil.copy2(gbk_zip, cn_source)
+            preferences.zml_source_dir = cn_source
+            cn_items = ui_module.zml_candidate_items(preferences, context)
+            check(len(cn_items) == 1, "中文目录里的候选也扫得到", len(cn_items))
+            check(all(id_pattern.match(item[0]) for item in cn_items),
+                  "中文目录下 identifier 仍然是纯 ASCII（旧版这里就是中文路径标识符）",
+                  [item[0] for item in cn_items])
+            cn_error = None
+            try:
+                cn_value = preferences.zml_candidate
+            except Exception as error:
+                cn_error = error
+                cn_value = ""
+            check(cn_error is None,
+                  "中文源目录下读 preferences.zml_candidate 也不抛 UnicodeDecodeError",
+                  repr(cn_error))
+            cn_roundtrip = False
+            try:
+                preferences.zml_candidate = cn_items[0][0]
+                cn_roundtrip = preferences.zml_candidate == cn_items[0][0]
+            except Exception as error:
+                print("  中文目录下设值失败：{}".format(error))
+            check(cn_roundtrip, "中文源目录下设值 / 读回都正常")
+            check(not any(ord(char) < 0x20 or ord(char) == 0x7F for char in cn_items[0][1])
+                  and "\u00b7" not in cn_items[0][1],
+                  "中文目录下的标签仍然干净（短、无控制字符、无中点号）", cn_items[0][1])
+
+        # ---- 7. items 回调：内部出错也不往外抛 ----
+        saved_builder = ops_module.zml_package_items
+
+        def exploding_builder(_source):
+            raise RuntimeError("故意让扫描炸掉（测试 items 回调的兜底）")
+
+        try:
+            ops_module.zml_package_items = exploding_builder
+            safe_items = ui_module.zml_candidate_items(preferences, context) \
+                if preferences is not None else []
+        finally:
+            ops_module.zml_package_items = saved_builder
+        check(len(safe_items) == 1
+              and safe_items[0][0] == ops_module.ZML_SCAN_FAILED_ID,
+              "items 回调内部出错时返回安全占位项（不抛异常）", safe_items)
+        check(bool(safe_items) and "扫描失败" in safe_items[0][1],
+              "占位项标签写明「扫描失败，详见控制台」",
+              safe_items[0][1] if safe_items else "")
+
+        saved_detail = ops_module.zml_scan_detail
+
+        def exploding_detail(_source):
+            raise RuntimeError("故意让扫描细节炸掉")
+
+        try:
+            ops_module.zml_scan_detail = exploding_detail
+            fallback = ops_module.zml_package_items(source)
+        finally:
+            ops_module.zml_scan_detail = saved_detail
+        check(len(fallback) == 1 and fallback[0][0] == ops_module.ZML_SCAN_FAILED_ID,
+              "zml_package_items 内部异常 -> 也返回扫描失败占位项", fallback)
+        check(ops_module.ZML_SCAN_FAILED_ID.isascii()
+              and id_pattern.match(ops_module.ZML_SCAN_FAILED_ID) is not None,
+              "占位项 identifier 也是纯 ASCII", ops_module.ZML_SCAN_FAILED_ID)
+
+        # ---- 8. 算符：找不到时必须说清扫到了什么（绝不留空冒号）----
+        junk_only = os.path.join(temp_root, "junk_only")
+        os.makedirs(junk_only)
+        _zml_junk_zip(os.path.join(junk_only, "ZML_LAB_JUNK.zip"))
+        message = ops_module.zml_missing_candidate_message(junk_only, "zml_deadbeef0000")
+        check(bool(message) and not message.rstrip().endswith("："),
+              "找不到候选的报告不以空冒号结尾", message[:160])
+        check("找到 1 个 zip" in message, "报告写明扫到了多少个 zip", message[:160])
+        check("校验未通过" in message, "报告写明其中几个没通过校验", message[:160])
+        check("控制字符" in message or "__init__.py" in message,
+              "报告写明具体原因（控制字符 / 缺 __init__.py）", message[:160])
+        check("zml_deadbeef0000" in message, "报告带上失效的那个选择", message[:160])
+        check("源目录" in ops_module.zml_missing_candidate_message("", ""),
+              "没设源目录时报告点明源目录（不是空冒号）")
+        check("不存在" in ops_module.zml_missing_candidate_message(
+                  os.path.join(temp_root, "no_such_dir"), ""),
+              "源目录不存在时如实说明")
+        lib_never = os.path.join(temp_root, "lib_never")
+        result, operator_message = _run_zml_operator(
+            source_dir=junk_only, library_dir=lib_never,
+            candidate="zml_deadbeef0000",
+            addons_dir=os.path.join(temp_root, "empty_addons"))
+        check(result == {'CANCELLED'}, "垃圾目录 + 失效 id：算符拒绝执行", result)
+        check("校验未通过" in operator_message
+              and not operator_message.rstrip().endswith("："),
+              "算符报告不出现空冒号，且带扫描结论", operator_message[:200])
+        check(not os.path.isdir(lib_never), "拒绝时连库目录都没有创建")
+
+        # ---- 9. 真实包（只读，只打开读一下）----
+        if os.path.isfile(real_zip):
+            real_info = ops_module.zml_zip_inspect(real_zip)
+            check(real_info["module"] == "ZML_LAB_Ultimate_Max_V107",
+                  "真实包能解出模块名 ZML_LAB_Ultimate_Max_V107",
+                  ascii(real_info["module"]))
+            check(real_info["version"].startswith("1.7"),
+                  "真实包能解出版本 1.7", ascii(real_info["version"]))
+            check(real_info["problem"] == "", "真实包没有校验问题", real_info["problem"])
+            real_label = ops_module.zml_candidate_label(
+                real_info["module"], real_info["version"], real_zip)
+            check(real_label.startswith("V1.07"),
+                  "真实包的短标签是 V1.07 - 1.7", real_label)
+            real_id = ops_module.zml_candidate_id(real_zip, real_info["module"])
+            check(id_pattern.match(real_id) is not None,
+                  "真实包的 identifier 也是纯 ASCII", real_id)
+        else:
+            skip("本机没有 D:\\日常软件\\qq\\ZML_LAB_Ultimate_Max_V1.07.zip，真实包断言跳过")
+
+        # ---- 10. 源码级约定（防止改回去）----
+        items_source = function_source(ui_source, "zml_candidate_items")
+        check("try:" in items_source and "except Exception" in items_source,
+              "下拉回调整体包在 try / except 里（绝不让 draw 抛异常）")
+        check("traceback.print_exc()" in items_source,
+              "回调出错时把 traceback 打到控制台（便于排查）")
+        check("(path," not in items_source,
+              "下拉项不再拿完整路径当 identifier")
+        panel_source = class_source(ui_source, "HHZ_PT_settings")
+        check("try:" in panel_source and "except Exception" in panel_source,
+              "面板 draw 读候选值也有护栏")
+        check("heal_zml_candidate(preferences, context)" in panel_source,
+              "面板先自愈旧版存坏的枚举值，再画控件")
+        check("SKIP_SAVE" in class_source(ui_source, "HHZ_AddonPreferences"),
+              "候选下拉不写进偏好设置（避免存下指向旧条目的坏值）")
+        decode_source = function_source(ops_source, "zml_decode_name")
+        check('encode("cp437")' in decode_source,
+              "未打标志时先按 CP437 编回原始字节再试探解码")
+        check('"utf-8", "gbk"' in decode_source,
+              "试探解码顺序是 utf-8 -> gbk")
+        check("zml_candidate_id" in source_of(module, "ops.py"),
+              "候选标识符由纯 ASCII 哈希函数生成")
+    finally:
+        if preferences is not None:
+            try:
+                preferences.zml_source_dir = original_source
+            except Exception:
+                pass
+            try:
+                if original_candidate:
+                    preferences.zml_candidate = original_candidate
+            except Exception:
+                pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    check(not os.path.isdir(temp_root), "候选包命名用例的临时目录已清理干净")
+
+
 def test_unregister(module_name, module):
     section("卸载清理")
     keyconfig = module.compat.addon_keyconfig()
@@ -7134,6 +7527,7 @@ def main():
     run("拖动排序整条链（注册 / 方向 / 持久化）", test_panel_order_drag_chain, module)
     run("一键更新ZML_LAB（扫描 / 校验 / 守卫 / 计划）", test_zml_lab_update, module)
     run("ZML_LAB 同族改名更新（2.20.0）", test_zml_family_update, module)
+    run("ZML_LAB 候选包命名解码与 ASCII 标识符（2.21.1）", test_zml_candidate_naming, module)
     run("打开 Blender 自动切英文输入法（2.20.0）", test_english_ime, module)
     run("算符 poll", test_poll)
     # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
