@@ -18,6 +18,7 @@
     10. 字体设置：界面缩放、DPI、自定义界面字体 / 等宽字体、抗锯齿、hinting、线条宽度
     11. 页面布局：把工作区与区域划分存成快照，在新文件里一键还原（也可存成启动布局）
     12. 拖动调整本插件面板在 N 面板里的先后顺序
+    13. 打开 Blender 自动切英文输入法（仅 Windows，尽力而为；失败只打印一行说明）
 
 分页（样式参考插件库里 ZML_LAB 的做法）：
     N 面板里最上面一排「建模 | 工具 | 主题」三个按钮，点了只显示该页的面板：
@@ -114,9 +115,13 @@ def register():
     if preferences is not None:
         ui.load_family_parts(bpy.context, preferences)
     ui.register_keymap()
+    # 打开 Blender 自动切英文输入法（仅 Windows；失败只打印一行说明，绝不抛异常）
+    ops.register_english_ime()
 
 
 def unregister():
+    # 与注册顺序相反：先撤掉自动英文输入法的 handler 与一次性定时器
+    ops.unregister_english_ime()
     ui.unregister_keymap()
     for cls in reversed(_classes):
         try:

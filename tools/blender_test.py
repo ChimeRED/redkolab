@@ -6915,6 +6915,160 @@ def test_unregister(module_name, module):
               len(_pie_shortcut_items(keyconfig)))
 
 
+def test_english_ime(module):
+    """2.20.0：打开 Blender 自动切英文输入法（纯函数 / 守卫 / 注册配对 / 无注入）。
+
+    能自动验的：纯函数的逐位行为、平台守卫与「无键鼠注入」的源码级约定、
+    handler 的注册 / 去重 / 注销配对、无头环境里调用一次不抛异常。
+    **真实输入法是否真的被切成英文只能在 GUI 里看**，无头环境测不了。
+    """
+    section("功能：打开 Blender 自动切英文输入法（2.20.0）")
+    ops_module = module.ops
+    ops_source = source_of(module, "ops.py")
+    init_source = source_of(module, "__init__.py")
+    ui_source = source_of(module, "ui.py")
+
+    # ---- 1. 纯函数：只清 native 位，其它位逐位不变 ----
+    mode = ops_module.english_ime_mode
+    check(ops_module.IME_CMODE_NATIVE == 0x0001,
+          "IME_CMODE_NATIVE 就是 0x0001", ops_module.IME_CMODE_NATIVE)
+    check(mode(0x0001) == 0x0000, "只置 native 位 -> 0（切英文）", hex(mode(0x0001)))
+    check(mode(0x0000) == 0x0000, "传 0 -> 0（保持英文）", mode(0x0000))
+    check(mode(0x0001 | 0x0004 | 0x0008) == (0x0004 | 0x0008),
+          "0x0004 / 0x0008 等其它位原样保留", hex(mode(0x0001 | 0x0004 | 0x0008)))
+    check(mode(0x0008 | 0x0010 | 0x0100) == (0x0008 | 0x0010 | 0x0100),
+          "全角 / 罗马字 / 无转换位也原样保留", hex(mode(0x0008 | 0x0010 | 0x0100)))
+    check(mode(0xFFFFFFFF) == 0xFFFFFFFE,
+          "传全 1 -> 0xFFFFFFFE（只掉 native 一位）", hex(mode(0xFFFFFFFF)))
+    check(mode(0x80000001) == 0x80000000, "最高位原样保留", hex(mode(0x80000001)))
+    check(mode(0x0001, 0x0001) == 0 and mode(0x0001, 0x00FF) == 0,
+          "句子状态不影响结果（英文 / 半角与句子模式无关）")
+    broken = 0
+    for value in range(0x10000):
+        result = mode(value)
+        if result != (value & 0xFFFE) or (result & 0x0001):
+            broken += 1
+    check(broken == 0,
+          "低 16 位 65536 个取值逐个核对：只清 native 位，其它位逐位相同", broken)
+
+    # ---- 2. 源码级约定：平台守卫 + 只用 ctypes 调 IME + 绝不注入按键 ----
+    switch_source = function_source(ops_source, "switch_ime_to_english")
+    check(bool(switch_source), "能按函数边界取到 switch_ime_to_english 的源码段")
+    check("sys.platform" in switch_source and "'win32'" in switch_source,
+          "有平台守卫：只有 sys.platform == 'win32' 才继续")
+    check(switch_source.find("ctypes.windll") > switch_source.find("sys.platform"),
+          "平台守卫在碰 ctypes.windll 之前（非 Windows 不会去加载 user32 / imm32）")
+    check("try:" in switch_source and "except Exception" in switch_source,
+          "整段包在 try / except 里（失败只返回说明，不抛异常）")
+    check("ctypes.windll.user32" in switch_source
+          and "ctypes.windll.imm32" in switch_source,
+          "只用 ctypes 调 user32 / imm32（不引第三方依赖）")
+    for api in ("ImmGetContext", "ImmGetConversionStatus",
+                "ImmSetConversionStatus", "ImmReleaseContext"):
+        check(api in switch_source, "用 imm32 的 {}".format(api))
+    check("GetForegroundWindow" in switch_source,
+          "hwnd 取自 user32.GetForegroundWindow()")
+    check("english_ime_mode" in switch_source,
+          "清 native 位走纯函数 english_ime_mode（逻辑只有一份）")
+    check("finally" in switch_source
+          and "ImmReleaseContext" in switch_source.split("finally")[-1],
+          "ImmReleaseContext 放在 finally 里（不会漏释放输入法上下文）")
+
+    # 硬性禁令：AST 判断"真的调用过什么"，注释 / 文档字符串里提到不算
+    called_names = set()
+    for node in ast.walk(ast.parse(ops_source)):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        while isinstance(target, ast.Attribute):
+            called_names.add(target.attr)
+            target = target.value
+        if isinstance(target, ast.Name):
+            called_names.add(target.id)
+    for forbidden in ("SendInput", "keybd_event", "PostMessage", "PostMessageW",
+                      "SendMessageW", "mouse_event", "SetWindowsHookEx",
+                      "WriteConsoleInput", "SetKeyboardState"):
+        check(forbidden not in called_names,
+              "没有键鼠注入：ops.py 里没有调用 {}".format(forbidden))
+    for foreign in ("win32api", "win32con", "pywintypes", "pynput",
+                    "import keyboard", "ctypes.oledll"):
+        check(foreign not in ops_source,
+              "没有引入第三方依赖 / 其它输入法库：{}".format(foreign))
+    check("winreg" not in ops_source, "没有改注册表（源码里没有 winreg）")
+
+    # ---- 3. 没有新增设置项 / 面板（默认总是执行）----
+    check("english_ime" not in ui_source,
+          "没有新增设置项 / 面板（ui.py 里没有英文输入法相关代码）")
+    register_ops_source = function_source(ops_source, "register_english_ime")
+    check(bool(register_ops_source), "能按函数边界取到 register_english_ime")
+    check("preferences" not in register_ops_source,
+          "注册入口不读偏好设置（没有开关，默认总是执行）")
+    check(abs(ops_module.ENGLISH_IME_DELAY - 0.3) < 1e-9,
+          "一次性定时器延时 0.3 秒（等窗口就绪）", ops_module.ENGLISH_IME_DELAY)
+
+    # ---- 4. 注册 / 注销在 __init__.py 里成对 ----
+    register_body = function_source(init_source, "register")
+    unregister_body = function_source(init_source, "unregister")
+    check("ops.register_english_ime()" in register_body,
+          "register() 里注册了自动英文输入法")
+    check("ops.unregister_english_ime()" in unregister_body,
+          "unregister() 里成对注销")
+    check(0 <= unregister_body.find("ops.unregister_english_ime()")
+          < unregister_body.find("ui.unregister_keymap()"),
+          "注销顺序与注册相反（先撤 handler 与定时器）")
+
+    # ---- 5. handler：注册 / 去重 / 注销 ----
+    handlers = bpy.app.handlers.load_post
+    callback = ops_module._english_ime_on_load
+    timer = ops_module._english_ime_timer
+    check(callback in handlers,
+          "bpy.app.handlers.load_post 里有自动英文输入法的回调")
+
+    def callback_count():
+        return sum(1 for item in handlers if item is callback)
+
+    ops_module.register_english_ime()
+    check(callback_count() == 1, "注册后恰好一份（不重复添加）", callback_count())
+    ops_module.register_english_ime()
+    ops_module.register_english_ime()
+    check(callback_count() == 1, "连续再注册两次仍然只有一份", callback_count())
+    check(bpy.app.timers.is_registered(timer),
+          "注册后有一个待执行的一次性定时器（等窗口就绪）")
+    check(ops_module.schedule_english_ime(60.0) is False
+          and bpy.app.timers.is_registered(timer),
+          "已经排过定时器时不叠加第二个")
+    check(ops_module._english_ime_on_load() is False
+          and bpy.app.timers.is_registered(timer),
+          "load_post 回调只负责重排一次性定时器（已排过就不重复排）")
+
+    ops_module.unregister_english_ime()
+    check(callback not in handlers, "unregister 后 handler 已从 load_post 移除")
+    check(not bpy.app.timers.is_registered(timer), "unregister 后定时器也撤掉了")
+    ops_module.unregister_english_ime()
+    check(callback not in handlers, "重复 unregister 安全（不抛异常，也不重复删）")
+
+    ops_module.register_english_ime()
+    check(callback_count() == 1,
+          "重新注册后回到「恰好一份」（注册 / 注销严格配对）", callback_count())
+
+    # ---- 6. 一次性回调 + 无头环境里调用不抛异常 ----
+    check(timer() is None,
+          "定时器回调返回 None（Blender 只调用一次，不会反复切输入法）")
+    outcome = None
+    failure = None
+    try:
+        outcome = ops_module.switch_ime_to_english()
+    except Exception as error:  # 这条绝不能发生
+        failure = error
+    check(failure is None, "无头环境里调用一次不抛异常", failure)
+    check(isinstance(outcome, str) and bool(outcome), "返回一行说明文字", outcome)
+    check(outcome.startswith(("跳过", "已经", "已切到", "输入法不接受")),
+          "结果是已定义的四种情形之一（不静默，也不假装成功）", outcome)
+    if not sys.platform.startswith("win"):
+        check(outcome == "跳过：非 Windows 平台",
+              "非 Windows 平台上直接跳过、不报错", outcome)
+
+
 # ---------------------------------------------------------------------- main
 
 
@@ -6980,6 +7134,7 @@ def main():
     run("拖动排序整条链（注册 / 方向 / 持久化）", test_panel_order_drag_chain, module)
     run("一键更新ZML_LAB（扫描 / 校验 / 守卫 / 计划）", test_zml_lab_update, module)
     run("ZML_LAB 同族改名更新（2.20.0）", test_zml_family_update, module)
+    run("打开 Blender 自动切英文输入法（2.20.0）", test_english_ime, module)
     run("算符 poll", test_poll)
     # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
     # 会清掉当前场景，所以后面只剩"卸载清理"这种不吃场景数据的用例

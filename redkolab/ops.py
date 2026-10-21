@@ -21,6 +21,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 import zipfile
@@ -3900,3 +3901,179 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         detail = "；".join(problems) if problems else "备份已还原，源压缩包已归位"
         self.report({'ERROR'}, "{}；已回滚：{}".format(reason, detail))
         return {'CANCELLED'}
+
+
+# --------------------------------------- 打开 Blender 自动切英文输入法（Windows）
+#
+# 背景：Windows 上默认输入法是中文时，Blender 一打开就在中文组字模式，空格 /
+# 数字 / 方向键会先被输入法吃掉。这里在启动（以及每次加载文件）之后，把**本窗口**
+# 的输入法转换状态切成英文 / 半角。
+#
+# 硬边界（都在下面的实现里守着）：
+#   * 只在 Windows 上做，其它平台直接跳过，不报错；
+#   * 只用 ctypes 调 user32 / imm32，不引入任何第三方依赖；
+#   * 不合成任何按键（SendInput / keybd_event / PostMessage 一律不用），
+#     不改注册表，也不改系统输入法设置；
+#   * 只清 IME_CMODE_NATIVE 这一位，其它位原样保留；
+#   * 任何失败都只 print 一行说明，绝不抛异常，绝不影响 Blender 启动。
+
+#: Windows IME 转换模式位：IME_CMODE_NATIVE（0x0001）。
+#: 置位 = 母语组字（中文输入法正在打汉字），清位 = 英文 / 半角（字母数字模式）。
+IME_CMODE_NATIVE = 0x0001
+
+#: 一次性定时器的延时长（秒）：等窗口真正就绪再切。
+ENGLISH_IME_DELAY = 0.3
+
+
+def english_ime_mode(conv, sentence=0):
+    """纯函数：返回「清掉 IME_CMODE_NATIVE 之后」的转换状态。
+
+    ``conv`` 是 ``ImmGetConversionStatus`` 写回来的转换状态（DWORD 位掩码），
+    ``sentence`` 是同一次调用写回的句子状态（大小写 / 全角等独立模式）。
+    句子模式与「中英文」无关，写回 ``ImmSetConversionStatus`` 时原样传回，
+    所以这里既不读也不改它。
+
+    返回值保证两件事：
+      1. ``result & IME_CMODE_NATIVE`` 一定为 0（必定是英文 / 半角）；
+      2. 除这一位之外，其余每一位与入参**逐位相同**（含 0 与全 1 的边界）。
+
+    纯函数：只做位运算，不碰 bpy / ctypes，可以无头测试。
+    """
+    _ = sentence  # 句子模式不需要改，原样保留（签名对称，调用方写回原值）
+    return (conv & ~IME_CMODE_NATIVE) & 0xFFFFFFFF
+
+
+def switch_ime_to_english():
+    """把当前 Blender 窗口的输入法切到英文 / 半角（Windows 专用，尽力而为）。
+
+    返回一行说明文字。**任何情况下都不抛异常**：它跑在 Blender 启动路径上，
+    出错也只能打印一行说明，绝不能影响启动。
+
+    做法（全程只是给**本窗口**发一次 IME 状态设置，不合成按键）：
+    ``GetForegroundWindow`` -> ``ImmGetContext`` -> ``ImmGetConversionStatus``
+    -> 清 ``IME_CMODE_NATIVE`` -> ``ImmSetConversionStatus`` -> ``ImmReleaseContext``
+    """
+    if sys.platform != 'win32':
+        # 非 Windows：直接跳过，不报错（也不去 import ctypes）
+        return "跳过：非 Windows 平台"
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        imm32 = ctypes.windll.imm32
+        # 必须显式声明 restype / argtypes：HIMC 是指针，ctypes 默认按 32 位 int
+        # 处理，64 位下句柄会被截断，之后每次调用都会失败。
+        imm32.ImmGetContext.restype = ctypes.c_void_p
+        imm32.ImmGetContext.argtypes = [wintypes.HWND]
+        imm32.ImmGetConversionStatus.restype = wintypes.BOOL
+        imm32.ImmGetConversionStatus.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD)]
+        imm32.ImmSetConversionStatus.restype = wintypes.BOOL
+        imm32.ImmSetConversionStatus.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD]
+        imm32.ImmReleaseContext.restype = wintypes.BOOL
+        imm32.ImmReleaseContext.argtypes = [wintypes.HWND, ctypes.c_void_p]
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "跳过：拿不到前台窗口"
+        process = wintypes.DWORD(0)
+        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process)):
+            return "跳过：读不到前台窗口的进程"
+        if int(process.value) != os.getpid():
+            # 启动时 Blender 的窗口不一定在前台（例如双击后立刻切走）。
+            # 这时切的是别人的输入法，宁可不切。
+            return "跳过：前台窗口不是 Blender"
+
+        himc = imm32.ImmGetContext(hwnd)
+        if not himc:
+            return "跳过：这个窗口没有输入法上下文（没装输入法 / 无 IME 窗口）"
+        try:
+            conv = wintypes.DWORD(0)
+            sentence = wintypes.DWORD(0)
+            if not imm32.ImmGetConversionStatus(
+                    himc, ctypes.byref(conv), ctypes.byref(sentence)):
+                return "跳过：读不到输入法转换状态"
+            current = int(conv.value)
+            target = english_ime_mode(current, int(sentence.value))
+            if target == current:
+                return "已经是英文 / 半角状态"
+            if not imm32.ImmSetConversionStatus(
+                    himc, wintypes.DWORD(target), sentence):
+                # 某些第三方输入法（以及部分远程桌面 / 输入法框架）会忽略
+                # IME 状态消息，只能如实说明，不重试、不注入按键。
+                return "输入法不接受设置（某些第三方输入法会忽略 IME 消息）"
+            return "已切到英文 / 半角状态"
+        finally:
+            imm32.ImmReleaseContext(hwnd, himc)
+    except Exception as error:
+        # 记不住任何东西，只报告一句：绝不抛异常、绝不影响 Blender 启动
+        return "跳过：{}".format(error)
+
+
+def _english_ime_timer():
+    """一次性定时器回调：窗口就绪后切一次英文。
+
+    返回 ``None`` = 不再排队（定时器只跑一次，不会反复切用户的输入法）。
+    """
+    try:
+        print("红红子lab - 自动英文输入法：{}".format(switch_ime_to_english()))
+    except Exception:
+        pass
+    return None
+
+
+def _english_ime_on_load(_dummy=None):
+    """``bpy.app.handlers.load_post`` 回调：每次加载文件后重新排一次性定时器。"""
+    return schedule_english_ime()
+
+
+def schedule_english_ime(delay=None):
+    """排一个一次性定时器，``delay`` 秒后尝试切英文；重复调用不会叠加。"""
+    if delay is None:
+        delay = ENGLISH_IME_DELAY
+    try:
+        if bpy.app.timers.is_registered(_english_ime_timer):
+            return False
+        bpy.app.timers.register(_english_ime_timer, first_interval=float(delay))
+        return True
+    except Exception as error:
+        print("红红子lab - 自动英文输入法：排定时器失败（{}）".format(error))
+        return False
+
+
+def register_english_ime():
+    """注册「打开 Blender 自动切英文输入法」（幂等：重复调用不会重复添加）。
+
+    handler 列表是全局的，同一个函数在里面只能出现一次，所以先查再加。
+    注册时排一次定时器（打开 Blender 就生效），之后每次 ``load_post`` 再排一次。
+    没有开关：默认总是执行，不新增设置项 / 面板。
+    """
+    try:
+        handlers = bpy.app.handlers.load_post
+        if _english_ime_on_load not in handlers:
+            handlers.append(_english_ime_on_load)
+    except Exception as error:
+        print("红红子lab - 自动英文输入法：注册 load_post 失败（{}）".format(error))
+    return schedule_english_ime()
+
+
+def unregister_english_ime():
+    """注销：移除 handler 并停掉还没跑的一次性定时器（与注册严格配对）。"""
+    try:
+        handlers = bpy.app.handlers.load_post
+        while _english_ime_on_load in handlers:
+            handlers.remove(_english_ime_on_load)
+    except Exception:
+        pass
+    try:
+        if bpy.app.timers.is_registered(_english_ime_timer):
+            bpy.app.timers.unregister(_english_ime_timer)
+    except Exception:
+        pass

@@ -706,6 +706,28 @@ Blender 的插件偏好设置（ZML_LAB 自己的快捷键设置就在里面）�
 > 本功能**不写** `userpref.blend`（绝不调用 `wm.save_userpref`）、**不改** keymap、
 > **不删**你的其它插件；对真实 addons 目录只做只读探测。
 
+### 打开 Blender 自动切英文输入法（Windows，自动）
+
+Windows 上默认输入法是中文时，Blender 一打开就是中文组字模式，空格 / 数字 / 方向键
+会先被输入法吃掉。本版会在**打开 Blender（以及每次加载文件）之后约 0.3 秒**，把
+**当前这块 Blender 窗口**的输入法转换状态切成**英文 / 半角**。
+
+* 没有开关、没有面板、没有设置项：**默认总是执行**
+* 只在 `sys.platform == 'win32'` 上做，其它平台**直接跳过**（不报错）
+* 用 `ctypes` 调 `user32` / `imm32`：`GetForegroundWindow` → `ImmGetContext`
+  → `ImmGetConversionStatus` → 清 `IME_CMODE_NATIVE`（`0x0001`）
+  → `ImmSetConversionStatus` → `ImmReleaseContext`
+* **只清 `IME_CMODE_NATIVE` 这一位**，其它位（全角 / 罗马字 / 软键盘等）原样保留
+* 不合成任何按键（`SendInput` / `keybd_event` / `PostMessage` 一律不用）、不改注册表、
+  不改系统输入法设置；只对**本窗口**发一次 IME 状态设置
+* 前台窗口不是 Blender、窗口没有输入法上下文、任何一步失败 —— 都只打印一行说明并跳过，
+  **绝不抛异常，绝不影响 Blender 启动**
+* 触发时机：`bpy.app.handlers.load_post`（每次加载文件后）+ **一次性** `bpy.app.timers`
+  延时 0.3 秒（等窗口就绪；回调只跑一次）。注册与注销在 `register()` / `unregister()` 里严格配对
+
+> **已知限制（API 的边界，不是 bug）**：某些第三方输入法（以及部分远程桌面 / 输入法框架）
+> 会忽略 IME 状态消息，这时输入法**不会**被切成英文，只能手动按 <kbd>Shift</kbd> 切换。
+
 ### 改快捷键
 
 **偏好设置 ▸ 插件 ▸ 红红子lab**：
@@ -1041,6 +1063,10 @@ powershell -ExecutionPolicy Bypass -File tools\deploy_local.ps1 -Target "C:\其�
   造型上依赖这些数据时请先备份文件，翻完觉得不对就 <kbd>Ctrl</kbd>+<kbd>Z</kbd>
 * **一键查看面朝向只切显示开关**：自动化只能验证开关值被正确改写，真实界面里是否真的渲染成
   蓝/红（以及颜色是否被你的主题/显卡设置影响）需要你在 GUI 里看一眼 —— 如实标注为未验证
+* **自动切英文输入法只在 Windows 上生效**，而且**真实输入法是否真的被切成英文只能在 GUI 里看**：
+  无头环境只能验证纯函数的逐位行为、平台守卫、handler 的注册 / 去重 / 注销配对，以及
+  「源码里没有键鼠注入」这类约定 —— 这一条如实标注为**未做无头验证**。
+  另外**某些第三方输入法会忽略 IME 状态消息**（API 限制），那时输入法不会切过去，只能手动按 <kbd>Shift</kbd>
 * 曲线的构建类修改器无法应用（Blender 的限制，见上文）
 * 「应用所有修改器」遇到形态键会丢失形态键（转换烘焙的固有代价）
 * 主题颜色按 8 位量化存储，写入值读回会有约 1/255 的偏差（Blender 本身的存储方式）
