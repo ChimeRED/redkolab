@@ -483,6 +483,21 @@ class HHZ_PT_main(bpy.types.Panel):
         layout.label(text="检测：闭合网格看体积 非闭合只报疑似", icon='INFO')
         layout.label(text="查看面朝向：朝外蓝 朝内红（再点一次收起）", icon='INFO')
 
+        # 刀具组：仍在同一个 column 里紧挨着翻面那一组（没有新增面板）。
+        # 两个按钮是**同一个算符**的两种目标模式 —— 选中的物体 / 当前高亮的集合
+        # （「组」= 集合，含子集合）。饼菜单 8 个方位已满，所以这里只在 N 面板。
+        column.separator()
+        try:
+            selected_cutters = column.operator(
+                "hhz.hide_cutters", text="一键隐藏刀具（选中物体）", icon='HIDE_ON')
+            selected_cutters.target_mode = 'SELECTED'
+            collection_cutters = column.operator(
+                "hhz.hide_cutters", text="一键隐藏刀具（当前集合）", icon='HIDE_ON')
+            collection_cutters.target_mode = 'COLLECTION'
+        except Exception as error:  # draw 绝不能让异常冒给 Blender
+            column.label(text="隐藏刀具按钮画不出来：{}".format(error), icon='ERROR')
+        layout.label(text="刀具只隐藏不删，恢复用 Alt+H", icon='INFO')
+
         layout.separator()
         if context.mode != 'OBJECT':
             layout.label(text="请先切回物体模式", icon='ERROR')

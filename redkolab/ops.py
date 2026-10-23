@@ -9,6 +9,7 @@
 * :class:`HHZ_OT_remove_all_modifiers`  一键删除所有修改器
 * :class:`HHZ_OT_flip_normals`          一键翻面（整体翻转网格所有面的朝向）
 * :class:`HHZ_OT_detect_flipped`        检测是否有物体整体翻面（只读，不改任何数据）
+* :class:`HHZ_OT_hide_cutters`          一键隐藏组里的所有刀具（被布尔引用的切割体，只隐藏不改数据）
 * :class:`HHZ_OT_select_active_camera`  一键选中当前相机（当前视角使用的相机，只改选择不改数据）
 * :class:`HHZ_OT_grayscale_filter`      灰度滤镜（切换色彩管理 Look，会一起影响最终渲染输出）
 
@@ -793,6 +794,339 @@ class HHZ_OT_detect_flipped(_BaseTargetsOperator):
         if counts[FACE_ORIENTATION_FLIPPED]:
             level = {'WARNING'}
         self.report(level, _join_notes([summary] + notes))
+        return {'FINISHED'}
+
+
+# ------------------------------------------------ 一键隐藏组里的所有刀具
+#
+# 需求原话是「一键隐藏组里面的所有刀具」。这里的「刀具」**不靠名字猜**：
+# HardOps / Boxcutter 那一类工作流里，刀具 = 被拿来布尔切割别的物体的那个物体，
+# 切完通常只剩线框显示。所以判据按可靠性排优先级：
+#
+#   A 被任何布尔修改器引用（含集合型布尔里的每个物体）—— 最可靠，同时记下「谁引用它」；
+#   B 线框显示（display_type == 'WIRE' 或 show_wire）且名字像刀具 —— 交叉验证；
+#   C 只靠名字 —— 兜底，报告里必须写明「仅按名字推断」，不许当成确定结论。
+#
+# 执行只调 ``obj.hide_set(True)``（当前视图层，等价于按 H）：不改显示类型、
+# 不删物体、不动修改器、不碰选择。
+
+#: 名字里出现这些词就算「像刀具」（小写比较，含中文；判据 B / C 共用）
+CUTTER_NAME_KEYWORDS = ("cutter", "bool", "刀具", "cut")
+
+#: 能当刀具的物体类型（其它类型一律跳过并计数）
+CUTTER_TYPES = ('MESH', 'CURVE')
+
+#: 判定来源（报告与真机测试都按这三个键核对依据）
+CUTTER_BY_MODIFIER = "modifier"
+CUTTER_BY_WIRE_NAME = "wire_name"
+CUTTER_BY_NAME_ONLY = "name_only"
+
+#: 判定来源 -> 统计里的计数键
+CUTTER_REASON_KEYS = {
+    CUTTER_BY_MODIFIER: "by_modifier",
+    CUTTER_BY_WIRE_NAME: "by_wire_name",
+    CUTTER_BY_NAME_ONLY: "by_name_only",
+}
+
+#: 两种目标模式（「组」= 集合；枚举 identifier 必须是纯 ASCII）
+CUTTER_TARGET_SELECTED = 'SELECTED'
+CUTTER_TARGET_COLLECTION = 'COLLECTION'
+
+#: 刀具算符最近一次的汇总（真机测试直接断言它，不去解析 report 文本）
+_LAST_CUTTER_RUN = {}
+
+
+def cutter_name_matches(name):
+    """名字里是否含刀具关键词 —— **纯函数**，不区分大小写。"""
+    text = (name or "").lower()
+    return any(token in text for token in CUTTER_NAME_KEYWORDS)
+
+
+def is_wire_display(obj):
+    """物体是否是线框显示（``display_type == 'WIRE'`` 或 ``show_wire``）—— 只读。"""
+    if getattr(obj, "display_type", "") == 'WIRE':
+        return True
+    return bool(getattr(obj, "show_wire", False))
+
+
+def is_hidden_object(obj):
+    """物体在当前视图层里是否已经被隐藏（``hide_get()``，退化到 ``hide_viewport``）。"""
+    getter = getattr(obj, "hide_get", None)
+    if callable(getter):
+        try:
+            return bool(getter())
+        except Exception:
+            pass
+    return bool(getattr(obj, "hide_viewport", False))
+
+
+def cutter_reference_map(holders):
+    """扫出「谁被布尔修改器引用」：返回 ``{被引用物体名: [引用者描述, ...]}``。
+
+    **只读**：只看 ``modifiers`` 里 ``type == 'BOOLEAN'`` 的项，不写任何数据。
+    ``operand_type == 'OBJECT'`` 取 ``mod.object``；``'COLLECTION'`` 取
+    ``mod.collection.objects`` 里的每个物体。引用者描述进报告，能看出依据。
+    """
+    mapping = {}
+    for holder in holders or ():
+        if holder is None:
+            continue
+        holder_name = getattr(holder, "name", "") or "?"
+        for modifier in getattr(holder, "modifiers", ()) or ():
+            if getattr(modifier, "type", "") != 'BOOLEAN':
+                continue
+            modifier_name = getattr(modifier, "name", "") or "?"
+            if getattr(modifier, "operand_type", 'OBJECT') == 'COLLECTION':
+                collection = getattr(modifier, "collection", None)
+                operands = list(getattr(collection, "objects", ()) or ())
+                label = "{} 的 {}（集合布尔）".format(holder_name, modifier_name)
+            else:
+                single = getattr(modifier, "object", None)
+                operands = [single] if single is not None else []
+                label = "{} 的 {}".format(holder_name, modifier_name)
+            for operand in operands:
+                key = getattr(operand, "name", None)
+                if not key:
+                    continue
+                labels = mapping.setdefault(key, [])
+                if label not in labels:
+                    labels.append(label)
+    return mapping
+
+
+def detect_cutters(objs, references=None):
+    """按优先级识别刀具 —— **纯函数**（不 import bpy、不写任何数据）。
+
+    优先级 A > B > C：
+
+    * A 被布尔修改器引用（``references`` 里登记了它）—— 最可靠；
+    * B 线框显示 **且** 名字含关键词 —— 交叉验证；
+    * C 只靠名字 —— 兜底，调用方必须在报告里写明「仅按名字推断」。
+
+    返回 ``(刀具列表, 统计)``：
+
+    * 刀具 = ``[{"object", "name", "reason", "referenced_by"}, ...]``，
+      ``reason`` 是 ``modifier`` / ``wire_name`` / ``name_only``；
+    * 统计 = ``{"total", "cutters", "by_modifier", "by_wire_name", "by_name_only",
+      "skipped_non_mesh", "skipped_hidden", "found"}``。
+
+    非 Mesh / Curve 的物体计入 ``skipped_non_mesh``；**已经隐藏的**刀具计入
+    ``skipped_hidden``（不会再 hide 一次，也不谎报成隐藏成功）。
+    """
+    stats = {
+        "total": 0,
+        "cutters": 0,
+        "by_modifier": 0,
+        "by_wire_name": 0,
+        "by_name_only": 0,
+        "skipped_non_mesh": 0,
+        "skipped_hidden": 0,
+    }
+    reference_map = references or {}
+    cutters = []
+    seen = set()
+    for obj in objs or ():
+        if obj is None:
+            continue
+        name = getattr(obj, "name", "") or ""
+        if name:
+            if name in seen:
+                continue
+            seen.add(name)
+        stats["total"] += 1
+        if getattr(obj, "type", "") not in CUTTER_TYPES:
+            stats["skipped_non_mesh"] += 1
+            continue
+
+        referenced_by = list(reference_map.get(name, ()) or ())
+        if referenced_by:
+            reason = CUTTER_BY_MODIFIER
+        elif cutter_name_matches(name) and is_wire_display(obj):
+            reason = CUTTER_BY_WIRE_NAME
+        elif cutter_name_matches(name):
+            reason = CUTTER_BY_NAME_ONLY
+        else:
+            continue
+
+        if is_hidden_object(obj):
+            stats["skipped_hidden"] += 1
+            continue
+
+        cutters.append({
+            "object": obj,
+            "name": name,
+            "reason": reason,
+            "referenced_by": referenced_by,
+        })
+        stats["cutters"] += 1
+        stats[CUTTER_REASON_KEYS[reason]] += 1
+
+    stats["found"] = bool(cutters)
+    return cutters, stats
+
+
+def describe_cutters_report(stats, failed=0):
+    """把识别 / 隐藏统计压成一行中文报告（隐藏成功数单独算，失败如实写）。"""
+    attempted = int(stats.get("cutters", 0))
+    hidden = max(attempted - int(failed or 0), 0)
+    text = "已隐藏 {} 个刀具：被布尔修改器引用 {} 个、线框+命名 {} 个、仅按名字 {} 个".format(
+        hidden, stats.get("by_modifier", 0), stats.get("by_wire_name", 0),
+        stats.get("by_name_only", 0))
+    notes = [
+        "跳过非网格 {} 个".format(stats.get("skipped_non_mesh", 0)),
+        "已在隐藏集合 {} 个".format(stats.get("skipped_hidden", 0)),
+        "失败 {} 个".format(int(failed or 0)),
+    ]
+    text = "{}；{}".format(text, "、".join(notes))
+    if stats.get("by_name_only"):
+        text = "{}；其中 {} 个仅按名字推断，不是确定结论".format(
+            text, stats["by_name_only"])
+    return text
+
+
+def collection_objects(collection, _seen=None):
+    """集合及其所有子集合里的物体（每个物体最多一次，防递归死循环）—— 只读。"""
+    if collection is None:
+        return []
+    seen = _seen if _seen is not None else set()
+    key = getattr(collection, "name", "?")
+    if key in seen:
+        return []
+    seen.add(key)
+
+    objects = []
+    names = set()
+    for obj in getattr(collection, "objects", ()) or ():
+        name = getattr(obj, "name", None)
+        if not name or name in names:
+            continue
+        names.add(name)
+        objects.append(obj)
+    for child in getattr(collection, "children", ()) or ():
+        for obj in collection_objects(child, seen):
+            name = getattr(obj, "name", "")
+            if name in names:
+                continue
+            names.add(name)
+            objects.append(obj)
+    return objects
+
+
+def cutter_target_objects(context, mode):
+    """按目标模式取 ``(物体列表, 目标描述)``。
+
+    * ``CUTTER_TARGET_SELECTED``：沿用既有目标机制（选中物体，没选中时是活动物体）；
+    * ``CUTTER_TARGET_COLLECTION``：当前高亮的集合（``context.collection``，也就是
+      Outliner 里选中的那一格）及其所有子集合 —— 「组」= 集合。
+    """
+    if mode == CUTTER_TARGET_COLLECTION:
+        collection = getattr(context, "collection", None)
+        if collection is None:
+            layer = getattr(getattr(context, "view_layer", None),
+                            "active_layer_collection", None)
+            collection = getattr(layer, "collection", None)
+        if collection is None:
+            return [], "当前集合"
+        return collection_objects(collection), "集合「{}」".format(collection.name)
+    return compat.get_target_objects(context), "选中物体"
+
+
+class HHZ_OT_hide_cutters(_BaseTargetsOperator):
+    """一键隐藏组里的所有刀具（同一个算符两种目标：选中物体 / 当前集合）。"""
+
+    bl_idname = "hhz.hide_cutters"
+    bl_label = "一键隐藏刀具"
+    bl_description = (
+        "把目标里被布尔切割用的刀具物体在当前视图层隐藏（等价于逐个按 H）："
+        "优先认被布尔修改器引用的物体，其次认线框显示且名字像刀具的物体，"
+        "两者都没命中时才仅按名字推断；只隐藏，不改显示类型、不删物体、不动修改器"
+    )
+
+    target_mode: bpy.props.EnumProperty(
+        name="目标",
+        description="刀具从哪里找：选中的物体，或当前高亮的集合（含子集合）",
+        items=(
+            (CUTTER_TARGET_SELECTED, "选中物体", "只在选中的物体里找刀具"),
+            (CUTTER_TARGET_COLLECTION, "当前集合", "在当前高亮的集合及其子集合里找刀具"),
+        ),
+        default=CUTTER_TARGET_SELECTED,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        # 「按集合」模式下即使什么都没选中也应该能点，所以 poll 放宽成
+        # 「物体模式 + 选中物体或当前集合里至少有一个物体」。
+        if getattr(context, "mode", "OBJECT") != "OBJECT":
+            return False
+        if compat.poll_objects(context):
+            return True
+        return bool(collection_objects(getattr(context, "collection", None)))
+
+    def execute(self, context):
+        global _LAST_CUTTER_RUN
+        targets, target_label = cutter_target_objects(context, self.target_mode)
+        if not targets:
+            _LAST_CUTTER_RUN = {
+                "mode": self.target_mode, "target": target_label, "cutters": 0,
+                "hidden": 0, "failed": 0, "by_modifier": 0, "by_wire_name": 0,
+                "by_name_only": 0, "skipped_non_mesh": 0, "skipped_hidden": 0,
+                "details": [], "failures": [],
+            }
+            self.report({'WARNING'}, "{}里没有可检查的物体".format(target_label))
+            return {'CANCELLED'}
+
+        # 布尔引用一律扫整个文件里的物体：刀具可能被别的集合里的主体引用，
+        # 只看目标集合会漏掉最可靠的判据 A。
+        references = cutter_reference_map(bpy.data.objects)
+        cutters, stats = detect_cutters(targets, references)
+
+        hidden = 0
+        failed = 0
+        failures = []
+        for item in cutters:
+            try:
+                item["object"].hide_set(True)
+            except Exception as error:
+                failed += 1
+                failures.append("{}（{}）".format(item["name"], error))
+                continue
+            hidden += 1
+
+        _LAST_CUTTER_RUN = {
+            "mode": self.target_mode,
+            "target": target_label,
+            "cutters": stats["cutters"],
+            "hidden": hidden,
+            "failed": failed,
+            "by_modifier": stats["by_modifier"],
+            "by_wire_name": stats["by_wire_name"],
+            "by_name_only": stats["by_name_only"],
+            "skipped_non_mesh": stats["skipped_non_mesh"],
+            "skipped_hidden": stats["skipped_hidden"],
+            "details": [{"name": item["name"], "reason": item["reason"],
+                         "referenced_by": list(item["referenced_by"])}
+                        for item in cutters],
+            "failures": failures,
+        }
+
+        if not cutters:
+            if stats["skipped_hidden"]:
+                text = "{}里的刀具已经全部隐藏（{} 个）".format(
+                    target_label, stats["skipped_hidden"])
+            else:
+                text = "{}里没有找到刀具（依据：布尔修改器引用 / 线框+命名）".format(
+                    target_label)
+            if stats["skipped_non_mesh"]:
+                text = "{}；跳过非网格 {} 个".format(text, stats["skipped_non_mesh"])
+            self.report({'INFO'}, text)
+            return {'CANCELLED'}
+
+        text = "{}；恢复：Alt+H".format(describe_cutters_report(stats, failed))
+        if failed and failures:
+            # 失败原因单独打一行，报告里只留计数（状态栏太短）
+            for line in failures:
+                print("[{} 刀具] 隐藏失败：{}".format(compat.ADDON_NAME, line))
+        self.report({'WARNING'} if failed else {'INFO'}, text)
         return {'FINISHED'}
 
 

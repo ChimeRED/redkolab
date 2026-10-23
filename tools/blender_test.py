@@ -1436,6 +1436,465 @@ def test_flip_and_detect_poll(module):
     reset_scene()
 
 
+# ------------------------------------------------ 一键隐藏刀具（2.22.0）
+
+
+class _FakeCollection(object):
+    """纯函数用例用的假集合（只有 objects / children 两个属性）。"""
+
+    def __init__(self, name, objects=None, children=None):
+        self.name = name
+        self.objects = list(objects or ())
+        self.children = list(children or ())
+
+
+class _FakeModifier(object):
+    """纯函数用例用的假修改器（只带 cutter_reference_map 会读的属性）。"""
+
+    def __init__(self, name, kind='BOOLEAN', operand_type='OBJECT',
+                 object=None, collection=None):
+        self.name = name
+        self.type = kind
+        self.operand_type = operand_type
+        self.object = object
+        self.collection = collection
+
+
+class _FakeHolder(object):
+    """纯函数用例用的假物体：带 modifiers（装作布尔修改器挂在它身上）。"""
+
+    def __init__(self, name, modifiers):
+        self.name = name
+        self.modifiers = list(modifiers)
+
+
+class _FakeObject(object):
+    """纯函数用例用的假物体：只带 detect_cutters 会读的属性，完全不需要 bpy。"""
+
+    def __init__(self, name, kind='MESH', display_type='SOLID',
+                 show_wire=False, hidden=False):
+        self.name = name
+        self.type = kind
+        self.display_type = display_type
+        self.show_wire = show_wire
+        self._hidden = hidden
+
+    def hide_get(self):
+        return self._hidden
+
+
+def _move_to_collection(obj, collection):
+    """把物体挪进指定集合（先 link 再 unlink 旧的，避免中途 0 用户）。"""
+    previous = [item for item in obj.users_collection if item is not collection]
+    collection.objects.link(obj)
+    for item in previous:
+        item.objects.unlink(obj)
+
+
+def _activate_collection(collection):
+    """把某个集合设成「当前高亮集合」（``context.collection`` 跟着变）。"""
+    def find(layer_collection):
+        if layer_collection.collection == collection:
+            return layer_collection
+        for child in layer_collection.children:
+            hit = find(child)
+            if hit is not None:
+                return hit
+        return None
+
+    layer = find(bpy.context.view_layer.layer_collection)
+    if layer is not None:
+        bpy.context.view_layer.active_layer_collection = layer
+    return layer
+
+
+def _bpy_references_in(source, function_name):
+    """函数体里**真的引用** ``bpy`` 的地方（文档字符串里提到 bpy 不算）。
+
+    纯函数用例用：AST 里出现 ``bpy`` 这个 Name 才算，注释 / docstring 里的字样不算。
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            hits = []
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Name) and inner.id == "bpy":
+                    hits.append(inner.lineno)
+            return hits
+    return []
+
+
+def test_hide_cutters_pure(module):
+    section("纯函数：刀具识别（判据 A 布尔引用 / B 线框+命名 / C 仅名字）")
+    ops = module.ops
+    detect = getattr(ops, "detect_cutters", None)
+    reference_map = getattr(ops, "cutter_reference_map", None)
+    report_text = getattr(ops, "describe_cutters_report", None)
+    collect_objects = getattr(ops, "collection_objects", None)
+    check(detect is not None, "ops.detect_cutters 纯函数存在")
+    check(reference_map is not None, "ops.cutter_reference_map 纯函数存在")
+    check(report_text is not None, "ops.describe_cutters_report 存在")
+    check(collect_objects is not None, "ops.collection_objects 存在")
+    if not all((detect, reference_map, report_text, collect_objects)):
+        return
+
+    ops_source = source_of(module, "ops.py")
+    check(not _bpy_references_in(ops_source, "detect_cutters"),
+          "detect_cutters 的函数体里没有出现 bpy（真的是纯函数，文档字符串不算）")
+    check(not _bpy_references_in(ops_source, "cutter_reference_map"),
+          "cutter_reference_map 的函数体里没有出现 bpy（只读属性）")
+
+    # ---- 判据 A：OBJECT 型布尔引用（最可靠，并记下「谁引用它」）----
+    referenced = _FakeObject("被引用切割体一")
+    body = _FakeHolder("主体", [_FakeModifier("布尔切割", object=referenced)])
+    references = reference_map([body])
+    check(references.get("被引用切割体一") == ["主体 的 布尔切割"],
+          "判据 A：OBJECT 型布尔引用被登记，并记下了引用者", references)
+    cutters, stats = detect([referenced], references)
+    check(len(cutters) == 1, "判据 A：被布尔修改器引用的物体被识别成刀具", cutters)
+    check(cutters[0]["reason"] == ops.CUTTER_BY_MODIFIER,
+          "判据 A：来源标记为 modifier", cutters[0]["reason"])
+    check(cutters[0]["referenced_by"] == ["主体 的 布尔切割"],
+          "判据 A：刀具条目里带着「谁引用它」", cutters[0]["referenced_by"])
+    check(stats["by_modifier"] == 1 and stats["by_wire_name"] == 0
+          and stats["by_name_only"] == 0, "判据 A：三个来源计数只有 A 加一", stats)
+
+    # ---- 判据 A：集合型布尔（一个集合里的两个物体都算被引用）----
+    left = _FakeObject("集合布尔刀具体甲")
+    right = _FakeObject("集合布尔刀具体乙")
+    collection_modifier = _FakeModifier(
+        "集合布尔", operand_type='COLLECTION',
+        collection=_FakeCollection("刀具集合", [left, right]))
+    references = reference_map([_FakeHolder("主体", [collection_modifier])])
+    check(set(references) == {"集合布尔刀具体甲", "集合布尔刀具体乙"},
+          "判据 A：集合型布尔把集合里的每个物体都登记成被引用", references)
+    check(all("集合布尔" in label for labels in references.values() for label in labels),
+          "判据 A：集合型布尔的引用者描述带「集合布尔」标记", references)
+    cutters, stats = detect([left, right], references)
+    check(len(cutters) == 2, "判据 A：集合型布尔引用的两个物体都被识别", len(cutters))
+    check(stats["by_modifier"] == 2, "判据 A：集合型布尔计数为 2", stats)
+    check({item["name"] for item in cutters} == {"集合布尔刀具体甲", "集合布尔刀具体乙"},
+          "判据 A：集合型布尔的刀具名额正确", [item["name"] for item in cutters])
+
+    # ---- 非布尔修改器不算引用（SUBSURF 之类不能误判）----
+    plain = _FakeObject("只有细分修改器的物体")
+    other = _FakeHolder("主体", [_FakeModifier("Subsurf", kind='SUBSURF', object=plain)])
+    check(reference_map([other]) == {}, "只有非布尔修改器时引用表为空（不会误判）")
+    check(detect([plain], {})[0] == [], "只有非布尔修改器时不被识别成刀具")
+
+    # ---- 判据 B：线框 + 名字（两种线框写法都认）----
+    wire_named = _FakeObject("Cutter_Wire", display_type='WIRE')
+    cutters, stats = detect([wire_named], {})
+    check(len(cutters) == 1 and cutters[0]["reason"] == ops.CUTTER_BY_WIRE_NAME,
+          "判据 B：线框显示 + 名字含 cutter 被识别（来源 wire_name）", cutters)
+    check(stats["by_wire_name"] == 1 and stats["by_modifier"] == 0,
+          "判据 B：计数只加在 by_wire_name", stats)
+    wire_flag = _FakeObject("BoolToolWire", show_wire=True)
+    cutters, stats = detect([wire_flag], {})
+    check(len(cutters) == 1 and cutters[0]["reason"] == ops.CUTTER_BY_WIRE_NAME,
+          "判据 B：show_wire == True 也算线框（不只认 display_type）", cutters)
+    chinese_keyword = _FakeObject("实体刀具甲", display_type='WIRE')
+    check(detect([chinese_keyword], {})[0][0]["reason"] == ops.CUTTER_BY_WIRE_NAME,
+          "判据 B：中文关键词「刀具」同样命中（不区分大小写 / 中英文）")
+
+    # ---- 判据 B 的反面：普通线框物体不得被识别 ----
+    plain_wire = _FakeObject("普通线框显示", display_type='WIRE')
+    cutters, stats = detect([plain_wire], {})
+    check(cutters == [], "普通线框物体（名字不含关键词、无布尔引用）不被识别成刀具",
+          [item["name"] for item in cutters])
+    check(stats["cutters"] == 0 and stats["skipped_non_mesh"] == 0,
+          "普通线框物体既不算刀具也不算非网格跳过", stats)
+
+    # ---- 判据 C：仅按名字（实体物体 + 名字含关键词）----
+    named_solid = _FakeObject("CutterSolidOnly")
+    cutters, stats = detect([named_solid], {})
+    check(len(cutters) == 1 and cutters[0]["reason"] == ops.CUTTER_BY_NAME_ONLY,
+          "判据 C：名字含 cutter 的实体物体只在兜底 C 出现（来源 name_only）", cutters)
+    text = report_text(stats)
+    check("仅按名字推断" in text and "不是确定结论" in text,
+          "判据 C：报告里明确标注「仅按名字推断，不是确定结论」", text)
+
+    # ---- 优先级：三条同时命中时归到 A ----
+    all_three = _FakeObject("CutterReferencedWire", display_type='WIRE')
+    references = reference_map([_FakeHolder("主体", [_FakeModifier("布尔", object=all_three)])])
+    cutters, stats = detect([all_three], references)
+    check(cutters[0]["reason"] == ops.CUTTER_BY_MODIFIER,
+          "三条判据同时命中时归到 A（最可靠的那个）", cutters[0])
+    check(stats["by_name_only"] == 0, "归到 A 之后不会重复计入其它来源", stats)
+
+    # ---- 排除：非网格类型计数跳过 ----
+    empty_object = _FakeObject("CutterEmptyHelper", kind='EMPTY')
+    light_object = _FakeObject("CutterLightHelper", kind='LIGHT')
+    cutters, stats = detect([empty_object, light_object], {})
+    check(cutters == [], "Empty / Light 这类非网格物体不会被当成刀具（即使名字像）",
+          [item["name"] for item in cutters])
+    check(stats["skipped_non_mesh"] == 2, "非网格物体计入「跳过非网格」", stats)
+    curve_object = _FakeObject("CutterCurve", kind='CURVE', display_type='WIRE')
+    check(len(detect([curve_object], {})[0]) == 1,
+          "Curve 仍是合法刀具类型（曲线也能当切割体）")
+
+    # ---- 排除：已经在隐藏集合里的刀具计数跳过，不谎报隐藏成功 ----
+    hidden_cutter = _FakeObject("CutterHidden", display_type='WIRE', hidden=True)
+    cutters, stats = detect([hidden_cutter], {})
+    check(cutters == [], "已隐藏的刀具不会再次进入待隐藏列表", cutters)
+    check(stats["skipped_hidden"] == 1 and stats["cutters"] == 0,
+          "已隐藏的刀具计入「已在隐藏集合」", stats)
+    text = report_text(stats, failed=0)
+    check("已在隐藏集合 1 个" in text, "报告里写明「已在隐藏集合 K 个」", text)
+
+    # ---- 报告文案：计数逐项对得上 + 没有中点号 ----
+    stats = {"total": 6, "cutters": 3, "by_modifier": 1, "by_wire_name": 1,
+             "by_name_only": 1, "skipped_non_mesh": 2, "skipped_hidden": 0}
+    text = report_text(stats, failed=1)
+    check("已隐藏 2 个刀具" in text, "报告：失败 1 个时隐藏数是 3-1=2", text)
+    check("被布尔修改器引用 1 个" in text and "线框+命名 1 个" in text
+          and "仅按名字 1 个" in text, "报告：三种依据的计数逐项写出来", text)
+    check("跳过非网格 2 个" in text and "已在隐藏集合 0 个" in text
+          and "失败 1 个" in text, "报告：跳过 / 已隐藏 / 失败三项都写出来", text)
+    check("\u00b7" not in text, "报告文案里没有中点号 U+00B7（避免字体缺字变乱码）")
+
+    # ---- collection_objects：递归子集合、不重复、防死循环 ----
+    child_collection = _FakeCollection("子组", [_FakeObject("子组刀具")])
+    parent_collection = _FakeCollection("父组", [_FakeObject("父组主体")], [child_collection])
+    names = [obj.name for obj in collect_objects(parent_collection)]
+    check(names == ["父组主体", "子组刀具"], "collection_objects 递归收子集合里的物体", names)
+    child_collection.children.append(parent_collection)  # 人为造环
+    names = [obj.name for obj in collect_objects(parent_collection)]
+    check(names == ["父组主体", "子组刀具"],
+          "集合关系成环时不死循环、也不重复（每个物体只出现一次）", names)
+    check(collect_objects(None) == [], "collection_objects 处理 None 时返回空列表")
+
+
+def test_hide_cutters(module):
+    section("功能：一键隐藏组里的所有刀具（选中物体 / 当前集合 两种目标）")
+    ops = module.ops
+    reset_scene()
+
+    # ---- 造场景：一个主体 + 三种判据各一个刀具 + 三个干扰物体 ----
+    body = add_cube("Body被切主体")
+    cutter_a = add_cube("Cutter布尔被引用")
+    cutter_b = add_cube("bool_cutter线框显示")
+    cutter_c = add_cube("Cutter实体只有名字")
+    plain_block = add_cube("普通实体块")
+    plain_wire = add_cube("普通线框显示")
+    light = make_light("CutterLightHelper")
+    empty = bpy.data.objects.new("CutterEmptyHelper", None)
+    bpy.context.collection.objects.link(empty)
+
+    cutter_b.display_type = 'WIRE'
+    plain_wire.display_type = 'WIRE'
+    boolean = body.modifiers.new("布尔切割", 'BOOLEAN')
+    boolean.operation = 'DIFFERENCE'
+    boolean.operand_type = 'OBJECT'
+    boolean.object = cutter_a
+
+    cutters = [cutter_a, cutter_b, cutter_c]
+    non_cutters = [body, plain_block, plain_wire, light, empty]
+    every_object = cutters + non_cutters
+
+    # ---- 选中模式 ----
+    select_only(every_object)
+    check(len(bpy.context.selected_objects) == len(every_object),
+          "跑之前 8 个物体全部被选中（三种判据的样本与干扰物体都在目标里）",
+          len(bpy.context.selected_objects))
+    result = bpy.ops.hhz.hide_cutters()
+    run = ops._LAST_CUTTER_RUN
+    check(result == {'FINISHED'}, "算符返回 FINISHED", result)
+    check(run.get("mode") == 'SELECTED', "默认目标是「选中物体」", run.get("mode"))
+
+    # 逐物体断言：只有刀具被 hide
+    check(cutter_a.hide_get() is True, "判据 A 的刀具被隐藏（hide_get() == True）")
+    check(cutter_b.hide_get() is True, "判据 B 的刀具被隐藏")
+    check(cutter_c.hide_get() is True, "判据 C 的刀具被隐藏")
+    check(body.hide_get() is False, "主体（非刀具）没有被隐藏")
+    check(plain_block.hide_get() is False, "普通实体块（非刀具）没有被隐藏")
+    check(plain_wire.hide_get() is False, "普通线框物体（非刀具）没有被隐藏")
+    check(light.hide_get() is False and empty.hide_get() is False,
+          "Empty / Light（非网格）没有被隐藏")
+    hidden_non_cutters = [obj.name for obj in non_cutters if obj.hide_get()]
+    check(not hidden_non_cutters, "非刀具一个都没被隐藏（逐物体核对 hide_get）",
+          hidden_non_cutters)
+    hidden_cutters = sorted(obj.name for obj in cutters if obj.hide_get())
+    check(hidden_cutters == sorted(obj.name for obj in cutters),
+          "三个刀具全部被隐藏（一个不少）", hidden_cutters)
+
+    # 统计与「谁引用它」
+    check(run.get("by_modifier") == 1 and run.get("by_wire_name") == 1
+          and run.get("by_name_only") == 1, "统计：A / B / C 各 1 个", run)
+    check(run.get("skipped_non_mesh") == 2, "统计：跳过非网格 2 个（Light + Empty）", run)
+    check(run.get("hidden") == 3 and run.get("failed") == 0,
+          "统计：成功隐藏 3 个、失败 0 个", run)
+    reasons = {item["name"]: item["reason"] for item in run.get("details", ())}
+    check(reasons.get(cutter_a.name) == ops.CUTTER_BY_MODIFIER
+          and reasons.get(cutter_b.name) == ops.CUTTER_BY_WIRE_NAME
+          and reasons.get(cutter_c.name) == ops.CUTTER_BY_NAME_ONLY,
+          "逐例结果：A / B / C 三个刀具的依据分别正确", reasons)
+    check(body.name not in reasons and plain_wire.name not in reasons,
+          "主体与普通线框物体没有被误收进刀具列表", sorted(reasons))
+    referenced_by = next((item["referenced_by"] for item in run.get("details", ())
+                          if item["name"] == cutter_a.name), [])
+    check(any(body.name in label for label in referenced_by),
+          "报告里记下了「谁引用它」（主体名出现在依据里）", referenced_by)
+
+    # 不做多余动作：显示类型 / 修改器 / 选择都不许动
+    check(cutter_b.display_type == 'WIRE' and plain_wire.display_type == 'WIRE',
+          "没有改任何物体的显示类型（线框仍是线框）")
+    check(len(body.modifiers) == 1 and body.modifiers[0].object is cutter_a,
+          "没有动布尔修改器（还挂在主体上、还指向同一个刀具）")
+    check(len(body.data.vertices) == 8 and len(cutter_a.data.vertices) == 8,
+          "没有删物体、也没有改几何（顶点数不变）")
+    still_selected = sorted(obj.name for obj in bpy.context.selected_objects)
+    check(body.name in still_selected and plain_block.name in still_selected,
+          "非刀具物体仍然被选中（Blender 自己会取消选中被隐藏的物体，那不是本算符改的）",
+          still_selected)
+
+    # ---- 幂等：连跑两次，隐藏结果完全一致 ----
+    before_flags = {obj.name: obj.hide_get() for obj in every_object}
+    result_again = bpy.ops.hhz.hide_cutters()
+    after_flags = {obj.name: obj.hide_get() for obj in every_object}
+    check(before_flags == after_flags, "连跑两次隐藏结果完全一致（幂等）", after_flags)
+    check(ops._LAST_CUTTER_RUN.get("hidden") == 0,
+          "第二次没有新隐藏任何物体", ops._LAST_CUTTER_RUN)
+    check(result_again == {'CANCELLED'},
+          "全部已隐藏时如实返回 CANCELLED（不谎报又隐藏了一次）", result_again)
+
+    # 复位后重跑：识别结果与隐藏集合必须和第一次一模一样
+    first_details = sorted((item["name"], item["reason"]) for item in run.get("details", ()))
+    for obj in cutters:
+        obj.hide_set(False)
+    select_only(every_object)
+    bpy.ops.hhz.hide_cutters()
+    second_details = sorted((item["name"], item["reason"])
+                            for item in ops._LAST_CUTTER_RUN.get("details", ()))
+    check(first_details == second_details, "复位后重跑：识别结果逐条一致", second_details)
+    check(sorted(obj.name for obj in cutters if obj.hide_get())
+          == sorted(obj.name for obj in cutters), "复位后重跑：同样的三个刀具被隐藏")
+
+    # ---- 集合模式：只处理当前集合（含子集合），集合外的物体不碰 ----
+    reset_scene()
+    body = add_cube("集合外主体")
+    outside_cutter = add_cube("CutCutter集合外")
+    outside_cutter.display_type = 'WIRE'
+    parent = bpy.data.collections.new("HHCutters父组")
+    bpy.context.scene.collection.children.link(parent)
+    child = bpy.data.collections.new("HHCutters子组")
+    parent.children.link(child)
+    cutter_in_parent = add_cube("CutCutter父组")
+    cutter_in_parent.display_type = 'WIRE'
+    _move_to_collection(cutter_in_parent, parent)
+    cutter_in_child = add_cube("CutCutter子组")
+    cutter_in_child.display_type = 'WIRE'
+    _move_to_collection(cutter_in_child, child)
+    boolean = body.modifiers.new("布尔切割", 'BOOLEAN')
+    boolean.operand_type = 'OBJECT'
+    boolean.object = cutter_in_parent
+
+    layer = _activate_collection(parent)
+    check(layer is not None, "测试集合能找到对应的 LayerCollection")
+    check(bpy.context.collection == parent, "context.collection 已指向当前高亮集合",
+          getattr(bpy.context.collection, "name", None))
+    select_only([])
+    check(not bpy.context.selected_objects, "集合模式下刻意不选中任何物体")
+    check(bpy.ops.hhz.hide_cutters.poll(),
+          "什么都没选中、但当前集合里有物体时 poll 仍为真（按集合可用）")
+
+    result = bpy.ops.hhz.hide_cutters(target_mode='COLLECTION')
+    run = ops._LAST_CUTTER_RUN
+    check(result == {'FINISHED'}, "集合模式返回 FINISHED", result)
+    check(run.get("mode") == 'COLLECTION', "目标模式记成 COLLECTION", run.get("mode"))
+    check(cutter_in_parent.hide_get() is True, "集合里的刀具被隐藏")
+    check(cutter_in_child.hide_get() is True, "子集合里的刀具也被隐藏（递归子集合）")
+    check(body.hide_get() is False, "集合外的主体没有被隐藏")
+    check(outside_cutter.hide_get() is False,
+          "集合外的线框刀具没有被隐藏（集合模式不会扫全场景）")
+    check(run.get("hidden") == 2, "集合模式隐藏了 2 个刀具", run)
+    check(run.get("by_modifier") == 1 and run.get("by_wire_name") == 1,
+          "集合模式里判据 A / B 各 1 个（A 的引用来自集合外的主体）", run)
+
+    # ---- 找不到刀具：友好提示 + CANCELLED，且不隐藏任何东西 ----
+    reset_scene()
+    plain = add_cube("完全没有切割体的普通块")
+    select_only([plain])
+    result = bpy.ops.hhz.hide_cutters()
+    check(result == {'CANCELLED'}, "找不到刀具时返回 CANCELLED", result)
+    check(plain.hide_get() is False, "找不到刀具时不隐藏任何东西")
+    check(ops._LAST_CUTTER_RUN.get("cutters") == 0 and ops._LAST_CUTTER_RUN.get("hidden") == 0,
+          "找不到刀具时汇总全是 0", ops._LAST_CUTTER_RUN)
+
+    operator_source = class_source(ops_source_of(module), "HHZ_OT_hide_cutters")
+    check("没有找到刀具" in operator_source and "依据：布尔修改器引用 / 线框+命名" in operator_source,
+          "找不到时的提示里写明了「依据：布尔修改器引用 / 线框+命名」")
+    check("CANCELLED" in operator_source, "找不到时确实返回 CANCELLED（源码级）")
+
+    # ---- 注册 / bl_options / 枚举 identifier / 面板 / 饼菜单 ----
+    operator = operator_class(module, "hide_cutters")
+    check(operator is not None, "算符 hhz.hide_cutters 已注册")
+    if operator is not None:
+        check(operator.bl_idname == "hhz.hide_cutters", "bl_idname 精确匹配",
+              operator.bl_idname)
+        check(set(operator.bl_options) >= {'REGISTER', 'UNDO'},
+              "bl_options 含 REGISTER 与 UNDO（可 Ctrl+Z 撤销）",
+              sorted(operator.bl_options))
+        check("_BaseTargetsOperator" in operator_source,
+              "复用既有的目标机制基类 _BaseTargetsOperator（没有另写一套）")
+        base_source = class_source(ops_source_of(module), "_BaseTargetsOperator")
+        check("'REGISTER', 'UNDO'" in base_source or '{"REGISTER", "UNDO"}' in base_source,
+              "撤销标记来自基类（源码级核对）")
+        check("hide_set(True)" in operator_source, "执行只调 hide_set(True)（等价按 H）")
+        check("hide_set(False)" not in operator_source,
+              "不会顺手把什么东西显示回来（只隐藏，不做反向动作）")
+        check("display_type" not in operator_source,
+              "不改显示类型（源码里没有 display_type 赋值）")
+        check("objects.remove" not in operator_source, "不删物体")
+        check("select_set" not in operator_source, "不碰选择")
+        check("modifiers.new" not in operator_source
+              and "modifiers.remove" not in operator_source, "不动修改器")
+
+    # 算符自己的属性不在 bl_rna.properties 里（那是「属性组」），要从 get_rna_type() 读
+    rna = bpy.ops.hhz.hide_cutters.get_rna_type()
+    identifiers = [item.identifier for item in rna.properties]
+    check("target_mode" in identifiers, "算符上有 target_mode 属性（两种目标模式）",
+          identifiers)
+    if "target_mode" in identifiers:
+        enum_ids = [item.identifier for item in rna.properties["target_mode"].enum_items]
+        check(enum_ids == ["SELECTED", "COLLECTION"],
+              "枚举项为 SELECTED / COLLECTION 且顺序固定", enum_ids)
+        check(all(re.match(r"^[A-Za-z0-9_]+$", item) for item in enum_ids),
+              "枚举 identifier 全是纯 ASCII（2.21.1 的教训）", enum_ids)
+
+    ui_source = source_of(module, "ui.py")
+    main_panel = class_source(ui_source, "HHZ_PT_main")
+    check(main_panel.count('"hhz.hide_cutters"') == 2,
+          "建模页主面板里有两个刀具按钮（同一个算符的两种目标模式）",
+          main_panel.count('"hhz.hide_cutters"'))
+    check("'SELECTED'" in main_panel and "'COLLECTION'" in main_panel,
+          "两个按钮分别把 target_mode 设成 SELECTED / COLLECTION")
+    check(0 <= main_panel.find("hhz.toggle_face_orientation") < main_panel.find("hhz.hide_cutters"),
+          "刀具按钮紧跟「翻面 / 检测 / 查看面朝向」那一组（同一个 column、没有新增面板）")
+    check("try:" in main_panel and "except Exception as error" in main_panel,
+          "面板 draw 里画刀具按钮包在 try/except 里（异常绝不冒给 Blender）")
+    check("\u00b7" not in main_panel, "刀具按钮那段的 UI 文本没有中点号 U+00B7")
+    check("hhz.hide_cutters" not in class_source(ui_source, "HHZ_MT_pie"),
+          "饼菜单 8 个方位已满：刀具不进饼菜单")
+
+    # ---- 收尾清理：测试建的集合删掉，不污染其它用例 ----
+    bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection
+    reset_scene()
+    for name in ("HHCutters父组", "HHCutters子组"):
+        collection = bpy.data.collections.get(name)
+        if collection is not None:
+            bpy.data.collections.remove(collection)
+    reset_scene()
+    check(bpy.data.collections.get("HHCutters父组") is None
+          and bpy.data.collections.get("HHCutters子组") is None,
+          "收尾清理：测试建的集合已删掉")
+    check(not [obj for obj in bpy.data.objects if "Cutter" in obj.name or "刀具" in obj.name],
+          "收尾清理：测试建的刀具物体已删掉")
+
+
+def ops_source_of(module):
+    return source_of(module, "ops.py")
+
+
 def test_poll():
     section("算符 poll（模式判定）")
     reset_scene()
@@ -7500,6 +7959,8 @@ def main():
     run("一键查看面朝向（3D 视口叠加层切换）", test_viewport_overlay_switch, module)
     run("算符 bl_options（翻面 / 检测可撤销）", test_flip_bl_options, module)
     run("算符 poll（翻面 / 检测）", test_flip_and_detect_poll, module)
+    run("纯函数：刀具识别（布尔引用 / 线框+命名 / 仅名字）", test_hide_cutters_pure, module)
+    run("一键隐藏刀具（选中物体 / 当前集合两种目标）", test_hide_cutters, module)
     run("检查并修复缺失文件", test_fix_missing_files, module)
     run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
