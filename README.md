@@ -1268,6 +1268,24 @@ powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump patch
 → 提交 → 打 `v<版本>` tag（如 `v2.12.1`）→ 推送（带重试）。
 任何一步不过就直接中止，不会把坏包推上去。加 `-DryRun` 可以只看检查结果不推送。
 
+**推送这一段是「非交互 + 有超时」的（2.22.1 起）** —— 2.22.0 发版时 tag 推送曾被 GCM 的
+「Select an account」窗口**挂住 18 分钟**，最后是手工用非交互凭据补推的。现在：
+
+* 推送前就设好 **`GCM_INTERACTIVE=never`** 与 **`GIT_TERMINAL_PROMPT=0`**，凭据助手拿不到凭据时
+  只会**失败**，不会弹窗；
+* **优先用便携版 `gh`** 当一次性凭据助手：
+  `git -c credential.helper= -c "credential.helper=!<gh 路径> auth git-credential" push …`
+  （`-c` 一次性生效，**绝不写 `.git/config`**；`credential.helper=` 空值先把旧的交互式助手清掉；
+  路径用正斜杠 —— `!` 助手是交给 sh 跑的，反斜杠会被当成转义符）。没有 `gh` 时退回普通 `git push`；
+* **单次尝试有 90 秒墙钟上限**，超时就 kill 并立即停止并给出下一步（总尝试仍然 **≤2** 次，
+  认证失败或超时**不重试**）；
+* **绝不强推**（源码扫描 + 推送参数 argv 双重守卫）、**绝不动已发布的 tag**。
+
+```powershell
+# 网络需要代理时（只作用于这一次推送）
+powershell -ExecutionPolicy Bypass -File tools\release.ps1 -Bump none -ProxyUrl http://127.0.0.1:7890
+```
+
 **本地插件 zip 库**默认是 `C:\build\Blender\4.0\4.0chajian`（真实物理路径；`D:\build\Blender`
 是指向 `C:\build\Blender` 的 Junction 目录联接，两种写法是**同一个目录**，不要再把它们当成两处）：
 每次发版会把新的 `redkolab-<版本>.zip` 复制进去，并删掉里面的旧版本

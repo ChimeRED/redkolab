@@ -255,10 +255,17 @@ function Get-PushCredentialArgs {
     # helper list, so a configured interactive helper (GCM) is not consulted at
     # all; then gh is added as the only helper. Both are "-c" values: they apply
     # to this invocation only and are never written to .git/config.
+    #
+    # The path must use FORWARD SLASHES: git runs a "!" helper through sh, and in
+    # sh a backslash is an escape character, so a Windows path written with
+    # backslashes arrives at sh as C:UsersRed04... (measured: the push died with
+    # "gh.exe: command not found"). A path with whitespace is already refused in
+    # Resolve-GhCredentialHelper, so no quoting is needed here either.
     if (-not $script:GhCredentialHelper) { return @() }
+    $helperPath = $script:GhCredentialHelper.Replace("\", "/")
     return @(
         "-c", "credential.helper=",
-        "-c", ("credential.helper=!" + $script:GhCredentialHelper + " auth git-credential")
+        "-c", ("credential.helper=!" + $helperPath + " auth git-credential")
     )
 }
 
