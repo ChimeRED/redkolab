@@ -1665,7 +1665,7 @@ def test_hide_cutters_pure(module):
 
 
 def test_hide_cutters(module):
-    section("功能：一键隐藏组里的所有刀具（选中物体 / 当前集合 两种目标）")
+    section("功能：一键隐藏组里的所有刀具（饼项按偏好设置 / 面板两种显式目标）")
     ops = module.ops
     reset_scene()
 
@@ -1699,7 +1699,10 @@ def test_hide_cutters(module):
     result = bpy.ops.hhz.hide_cutters()
     run = ops._LAST_CUTTER_RUN
     check(result == {'FINISHED'}, "算符返回 FINISHED", result)
-    check(run.get("mode") == 'SELECTED', "默认目标是「选中物体」", run.get("mode"))
+    check(run.get("mode") == 'PREF',
+          "不带参数调用时目标模式是默认的 PREF（按偏好设置）", run.get("mode"))
+    check(run.get("effective_mode") == 'SELECTED',
+          "PREF 解析成项目既有的目标机制（选中物体）", run.get("effective_mode"))
 
     # 逐物体断言：只有刀具被 hide
     check(cutter_a.hide_get() is True, "判据 A 的刀具被隐藏（hide_get() == True）")
@@ -1852,19 +1855,62 @@ def test_hide_cutters(module):
     # 算符自己的属性不在 bl_rna.properties 里（那是「属性组」），要从 get_rna_type() 读
     rna = bpy.ops.hhz.hide_cutters.get_rna_type()
     identifiers = [item.identifier for item in rna.properties]
-    check("target_mode" in identifiers, "算符上有 target_mode 属性（两种目标模式）",
+    check("target_mode" in identifiers, "算符上有 target_mode 属性（三种目标模式）",
           identifiers)
     if "target_mode" in identifiers:
         enum_ids = [item.identifier for item in rna.properties["target_mode"].enum_items]
-        check(enum_ids == ["SELECTED", "COLLECTION"],
-              "枚举项为 SELECTED / COLLECTION 且顺序固定", enum_ids)
+        check(enum_ids == ["PREF", "SELECTED", "COLLECTION"],
+              "枚举项为 PREF / SELECTED / COLLECTION 且顺序固定", enum_ids)
         check(all(re.match(r"^[A-Za-z0-9_]+$", item) for item in enum_ids),
               "枚举 identifier 全是纯 ASCII（2.21.1 的教训）", enum_ids)
+        check(rna.properties["target_mode"].default == 'PREF',
+              "target_mode 默认值是 PREF（饼项不传参数时按偏好走）",
+              rna.properties["target_mode"].default)
+
+    # ---- 饼项不带参数 == 按偏好走（PREF 回落到项目既有的目标机制）----
+    reset_scene()
+    pref_body = add_cube("PrefBody主体")
+    pref_tool = add_cube("PrefBoolTool线框")
+    pref_tool.display_type = 'WIRE'
+    pref_boolean = pref_body.modifiers.new("布尔切割", 'BOOLEAN')
+    pref_boolean.operand_type = 'OBJECT'
+    pref_boolean.object = pref_tool
+    select_only([pref_body, pref_tool])
+    bpy.ops.hhz.hide_cutters()
+    by_pref = ops._LAST_CUTTER_RUN
+    pref_names = sorted(item["name"] for item in by_pref.get("details", ()))
+    check(by_pref.get("mode") == 'PREF' and by_pref.get("effective_mode") == 'SELECTED',
+          "饼项那样不带参数调用：mode=PREF、effective_mode=SELECTED",
+          (by_pref.get("mode"), by_pref.get("effective_mode")))
+    pref_tool.hide_set(False)
+    select_only([pref_body, pref_tool])
+    bpy.ops.hhz.hide_cutters(target_mode='SELECTED')
+    by_explicit = ops._LAST_CUTTER_RUN
+    explicit_names = sorted(item["name"] for item in by_explicit.get("details", ()))
+    check(by_pref.get("mode") == 'PREF' and by_explicit.get("mode") == 'SELECTED',
+          "无参数调用记 PREF、显式调用记 SELECTED（两种调用都可用）",
+          (by_pref.get("mode"), by_explicit.get("mode")))
+    check(pref_names == explicit_names and pref_names == [pref_tool.name],
+          "无参数（按偏好）与显式 SELECTED 命中同一批刀具",
+          (pref_names, explicit_names))
+    check(by_pref.get("hidden") == by_explicit.get("hidden") == 1,
+          "两种调用的隐藏数量一致", (by_pref.get("hidden"), by_explicit.get("hidden")))
+    pref_targets, pref_label = ops.cutter_target_objects(bpy.context, ops.CUTTER_TARGET_PREF)
+    selected_targets, selected_label = ops.cutter_target_objects(bpy.context, 'SELECTED')
+    check([obj.name for obj in pref_targets] == [obj.name for obj in selected_targets]
+          and pref_label == selected_label,
+          "cutter_target_objects 的 PREF 分支就是既有目标机制（与 SELECTED 同一批）",
+          ([obj.name for obj in pref_targets], pref_label))
+    check(ops.cutter_effective_mode(ops.CUTTER_TARGET_PREF) == ops.CUTTER_TARGET_SELECTED
+          and ops.cutter_effective_mode(ops.CUTTER_TARGET_COLLECTION)
+          == ops.CUTTER_TARGET_COLLECTION,
+          "cutter_effective_mode：PREF -> SELECTED、COLLECTION 保持不变（纯函数）")
+    reset_scene()
 
     ui_source = source_of(module, "ui.py")
     main_panel = class_source(ui_source, "HHZ_PT_main")
     check(main_panel.count('"hhz.hide_cutters"') == 2,
-          "建模页主面板里有两个刀具按钮（同一个算符的两种目标模式）",
+          "建模页主面板里有两个刀具按钮（同一个算符的两种显式目标模式）",
           main_panel.count('"hhz.hide_cutters"'))
     check("'SELECTED'" in main_panel and "'COLLECTION'" in main_panel,
           "两个按钮分别把 target_mode 设成 SELECTED / COLLECTION")
@@ -1873,8 +1919,26 @@ def test_hide_cutters(module):
     check("try:" in main_panel and "except Exception as error" in main_panel,
           "面板 draw 里画刀具按钮包在 try/except 里（异常绝不冒给 Blender）")
     check("\u00b7" not in main_panel, "刀具按钮那段的 UI 文本没有中点号 U+00B7")
-    check("hhz.hide_cutters" not in class_source(ui_source, "HHZ_MT_pie"),
-          "饼菜单 8 个方位已满：刀具不进饼菜单")
+    pie_items = pie_item_sequence(ui_source)
+    pie_ops = [name for kind, name in pie_items if kind == "operator"]
+    check(len(pie_ops) == 8 and len(pie_items) == 8,
+          "饼菜单仍是 8 个算符 + 0 个占位项（刀具占的是槽位 5，不是新增）",
+          (len(pie_ops), len(pie_items)))
+    check(len(pie_ops) >= 6 and pie_ops[5] == "hhz.hide_cutters",
+          "饼菜单槽位 5（右上）就是 hhz.hide_cutters",
+          pie_ops[5] if len(pie_ops) > 5 else pie_ops)
+    check("grayscale_filter" not in " ".join(pie_ops),
+          "灰度滤镜不在饼菜单里（已挪到 N 面板 ▸ 建模）", pie_ops)
+    check("target_mode" not in pie_operator_keywords(ui_source, "hhz.hide_cutters"),
+          "饼菜单项调 hide_cutters 时**不传** target_mode（走 PREF / 偏好设置，按项目既有目标机制）",
+          pie_operator_keywords(ui_source, "hhz.hide_cutters"))
+    check(set(pie_operator_keywords(ui_source, "hhz.hide_cutters")) <= {"icon", "text"},
+          "饼菜单项只传图标 / 文字这类布局参数（没有任何算符属性）",
+          pie_operator_keywords(ui_source, "hhz.hide_cutters"))
+    panel_source = class_source(ui_source, "HHZ_PT_main")
+    panel_calls = re.findall(r"column\.operator\(\s*\"hhz\.hide_cutters\"", panel_source)
+    check(len(panel_calls) == 2,
+          "面板里那两个按钮仍然显式指定模式（画在同一个 column 里）", len(panel_calls))
 
     # ---- 收尾清理：测试建的集合删掉，不污染其它用例 ----
     bpy.context.view_layer.active_layer_collection = bpy.context.view_layer.layer_collection
@@ -5599,6 +5663,8 @@ def pie_operator_idnames(source):
 # 2.16.1 饼菜单方位表：槽位顺序就是方位顺序
 #   0=左(W) 1=右(E) 2=下(S) 3=上(N) 4=左上(NW) 5=右上(NE) 6=左下(SW) 7=右下(SE)
 # 2.18.0：右上（5）由空位改成「灰度滤镜」，8 个槽位全部填满，0 个空位。
+# 2.22.1：右上（5）由「灰度滤镜」换成「一键隐藏刀具」，灰度滤镜挪到 N 面板 ▸ 建模；
+# 其余 7 个槽位的位置与图标一字未动。
 PIE_SLOT_DIRECTIONS = ("左", "右", "下", "上", "左上", "右上", "左下", "右下")
 PIE_PLACEHOLDER = "__placeholder__"
 PIE_EMPTY_SLOTS = ()
@@ -5608,11 +5674,11 @@ PIE_EXPECTED_SLOTS = (
     "hhz.remove_all_materials",      # 2 下
     "hhz.stairs",                    # 3 上（保持不动）
     "hhz.select_active_camera",      # 4 左上（2.17.0 新增）
-    "hhz.grayscale_filter",          # 5 右上（2.18.0 新增，原来这里是空位）
+    "hhz.hide_cutters",              # 5 右上（2.22.1 起；2.18.0~2.22.0 是灰度滤镜）
     "hhz.remove_all_modifiers",      # 6 左下
     "hhz.toggle_face_orientation",   # 7 右下
 )
-#: 2.18.0 之前就在饼菜单里的 7 个算符，一个都不许少
+#: 2.18.0 之前就在饼菜单里的 7 个算符，一个都不许少（也就是除槽位 5 之外的 7 项）
 PIE_OPERATORS_BEFORE_2180 = (
     "hhz.apply_all_modifiers",
     "hhz.flip_normals",
@@ -5659,6 +5725,24 @@ def pie_item_sequence(source):
     return []
 
 
+def pie_operator_keywords(source, idname):
+    """饼菜单 draw() 里调用某个算符时传的关键字参数名（饼项应当一个都不传）。"""
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.ClassDef) and node.name == "HHZ_MT_pie"):
+            continue
+        found = []
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "operator"
+                    and inner.args
+                    and isinstance(inner.args[0], ast.Constant)
+                    and inner.args[0].value == idname):
+                found.extend(kw.arg for kw in inner.keywords if kw.arg)
+        return found
+    return []
+
+
 def class_operator_idnames(source, class_name):
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
@@ -5693,8 +5777,9 @@ def panels_with_parent_id(source):
 
 
 def test_pie_unchanged(module):
-    section("饼菜单方位（2.18.0：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
-            "选中当前相机=左上、灰度滤镜=右上、删除修改器=左下、查看面朝向=右下）")
+    section("饼菜单方位（2.22.1：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
+            "选中当前相机=左上、一键隐藏刀具=右上、删除修改器=左下、查看面朝向=右下；"
+            "灰度滤镜已挪到 N 面板 ▸ 建模）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
         source = handle.read()
@@ -5709,7 +5794,7 @@ def test_pie_unchanged(module):
 
     check(operators_in_order == [name for name in PIE_EXPECTED_SLOTS
                                  if name != PIE_PLACEHOLDER],
-          "算符顺序 == 2.18.0 目标方位顺序（左/右/下/上/左上/右上/左下/右下）",
+          "算符顺序 == 2.22.1 目标方位顺序（左/右/下/上/左上/右上/左下/右下）",
           operators_in_order)
     check(len(items) == len(PIE_EXPECTED_SLOTS),
           "饼菜单正好 {} 个槽位项（8 个算符 + 0 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
@@ -5737,9 +5822,11 @@ def test_pie_unchanged(module):
     check(len(slots) >= 5 and slots[4] == "hhz.select_active_camera",
           "「一键选中当前相机」在槽位 4（左上）",
           slots[4] if len(slots) > 4 else slots)
-    check(len(slots) >= 6 and slots[5] == "hhz.grayscale_filter",
-          "「灰度滤镜」在槽位 5（右上），原来是这里的空位",
+    check(len(slots) >= 6 and slots[5] == "hhz.hide_cutters",
+          "槽位 5（右上）= 一键隐藏刀具（2.22.1 起，原来这里是灰度滤镜）",
           slots[5] if len(slots) > 5 else slots)
+    check("hhz.grayscale_filter" not in operators_in_order,
+          "灰度滤镜已经不在饼菜单里（挪到 N 面板 ▸ 建模）", operators_in_order)
 
     # ---- 数量与集合：与顺序断言分开写 ----
     found = set(operators_in_order)
@@ -5752,24 +5839,26 @@ def test_pie_unchanged(module):
     added_before = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
     check(len(found) == 8, "饼菜单正好 8 个算符", sorted(found))
     check(found == expected_before | added_before
-          | {"hhz.select_active_camera", "hhz.grayscale_filter"},
-          "饼菜单 = 原有 6 项 + 一键选中当前相机 + 灰度滤镜", sorted(found))
+          | {"hhz.select_active_camera", "hhz.hide_cutters"},
+          "饼菜单 = 原有 6 项 + 一键选中当前相机 + 一键隐藏刀具", sorted(found))
     for idname in sorted(expected_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
     for idname in sorted(added_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
     check("hhz.select_active_camera" in found,
           "原有的 hhz.select_active_camera 在饼菜单里", sorted(found))
-    check("hhz.grayscale_filter" in found,
-          "新增的 hhz.grayscale_filter 在饼菜单里", sorted(found))
+    check("hhz.hide_cutters" in found,
+          "2.22.1 起 hhz.hide_cutters 在饼菜单里（槽位 5 右上）", sorted(found))
+    check("hhz.grayscale_filter" not in found,
+          "灰度滤镜不在饼菜单里（只剩 N 面板那一处按钮）", sorted(found))
     check(len(found & expected_before) == 4, "原有 4 项一个不少", sorted(found & expected_before))
     check(expected_before | added_before <= found, "原有 6 项一个不少（位置与集合都没丢）",
           sorted(found))
-    # 2.18.0 的「其余 7 项一字不动」：单独断言新表与原 7 项完全一致
+    # 2.22.1 的「其余 7 项一字不动」：单独断言新表去掉槽位 5 后与原 7 项完全一致
     before_counts = [name for name in operators_in_order
-                     if name != "hhz.grayscale_filter"]
+                     if name != "hhz.hide_cutters"]
     check(tuple(before_counts) == PIE_OPERATORS_BEFORE_2180,
-          "2.18.0 之前就在饼菜单里的 7 项位置与顺序一字未动",
+          "除槽位 5 之外的其余 7 项位置与顺序一字未动",
           before_counts)
     check(set(PIE_OPERATORS_BEFORE_2180) <= found, "原有 7 项一个不少（含重复算符）",
           sorted(found))
@@ -5785,6 +5874,13 @@ def test_pie_unchanged(module):
           "「检测是否有反面」在建模页主面板里（没有新增面板）", sorted(in_modeling))
     check("hhz.toggle_face_orientation" in in_modeling,
           "「一键查看面朝向」在建模页主面板里（与检测按钮相邻）", sorted(in_modeling))
+    check("hhz.grayscale_filter" in in_modeling,
+          "灰度滤镜按钮在建模页主面板里（与翻面那一组同一个 column）", sorted(in_modeling))
+    check('column.operator("hhz.grayscale_filter"' in source,
+          "灰度滤镜按钮画在同一个 column 里（没有新增面板）")
+    check(source.count('"hhz.grayscale_filter"') == 1,
+          "全插件只有一处画灰度滤镜按钮（没有出现两个）",
+          source.count('"hhz.grayscale_filter"'))
 
     in_settings_panel = class_operator_idnames(source, "HHZ_PT_settings")
     check("hhz.open_preferences" in in_settings_panel,
@@ -5801,6 +5897,16 @@ def test_pie_unchanged(module):
     check(flip_at < detect_at < toggle_at,
           "翻面 / 检测反面 / 查看面朝向依次相邻（同一区域，没新增面板）",
           (flip_at, detect_at, toggle_at))
+    # 2.22.1：灰度滤镜紧跟在查看面朝向之后，同一个 column、同一段护栏里
+    grayscale_at = main_class.find("hhz.grayscale_filter")
+    check(0 <= toggle_at < grayscale_at,
+          "灰度滤镜紧跟查看面朝向（同一 column，没新增面板）",
+          (toggle_at, grayscale_at))
+    guard_at = main_class.rfind("try:", 0, grayscale_at)
+    except_at = main_class.find("except Exception", grayscale_at)
+    check(0 <= guard_at < grayscale_at < except_at,
+          "灰度滤镜按钮画在 try/except 护栏里（draw 的异常不冒给 Blender）",
+          (guard_at, grayscale_at, except_at))
 
     # ---- 方位映射注释必须留在 draw() 旁边（防止后人改错）----
     pie_class = class_source(source, "HHZ_MT_pie")
@@ -5995,7 +6101,7 @@ GRAYSCALE_LOOK = "AgX - Greyscale"
 
 
 def test_grayscale_filter(module):
-    section("灰度滤镜（2.18.0：切换语义 + 无损还原 + 明确告知影响渲染）")
+    section("灰度滤镜（2.22.1：按钮在 N 面板 ▸ 建模；切换语义 + 无损还原 + 明确告知影响渲染）")
 
     # ---- 1. 注册 / bl_idname / bl_label / bl_options ----
     operator = operator_class(module, "grayscale_filter")
@@ -6015,6 +6121,27 @@ def test_grayscale_filter(module):
           "算符类已注册到 bpy.types")
     check(getattr(getattr(bpy.ops, "hhz", None), "grayscale_filter", None) is not None,
           "bpy.ops.hhz.grayscale_filter 可调用")
+
+    # ---- 1b. 2.22.1：按钮从饼菜单挪到 N 面板 ▸ 建模（只有一处）----
+    ui_source = source_of(module, "ui.py")
+    in_modeling = class_operator_idnames(ui_source, "HHZ_PT_main")
+    check("hhz.grayscale_filter" in in_modeling,
+          "灰度滤镜按钮在 N 面板 ▸ 建模页的主面板里（没有新增面板）", sorted(in_modeling))
+    panel_body = class_source(ui_source, "HHZ_PT_main")
+    check('column.operator("hhz.grayscale_filter"' in panel_body,
+          "灰度滤镜与「翻面 / 检测 / 查看面朝向 / 隐藏刀具」画在同一个 column 里")
+    grayscale_at = panel_body.find("hhz.grayscale_filter")
+    guard_at = panel_body.rfind("try:", 0, grayscale_at)
+    except_at = panel_body.find("except Exception", grayscale_at)
+    check(0 <= guard_at < grayscale_at < except_at,
+          "灰度滤镜按钮画在 try/except 护栏里（draw 的异常不冒给 Blender）",
+          (guard_at, grayscale_at, except_at))
+    check(ui_source.count('"hhz.grayscale_filter"') == 1,
+          "全插件只有一处画灰度滤镜按钮（不出现两个）",
+          ui_source.count('"hhz.grayscale_filter"'))
+    check("grayscale_filter" not in [name for kind, name in pie_item_sequence(ui_source)
+                                     if kind == "operator"],
+          "灰度滤镜已经不在饼菜单里（2.22.1 槽位 5 换成一键隐藏刀具）")
 
     # ---- 2. 实现声明与该算符的实测结论一致（静态读源码）----
     body = class_source(source_of(module, "ops.py"), "HHZ_OT_grayscale_filter")
@@ -7960,7 +8087,7 @@ def main():
     run("算符 bl_options（翻面 / 检测可撤销）", test_flip_bl_options, module)
     run("算符 poll（翻面 / 检测）", test_flip_and_detect_poll, module)
     run("纯函数：刀具识别（布尔引用 / 线框+命名 / 仅名字）", test_hide_cutters_pure, module)
-    run("一键隐藏刀具（选中物体 / 当前集合两种目标）", test_hide_cutters, module)
+    run("一键隐藏刀具（饼项按偏好 / 面板两种显式目标）", test_hide_cutters, module)
     run("检查并修复缺失文件", test_fix_missing_files, module)
     run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
@@ -7978,10 +8105,10 @@ def main():
     run("第 4 个预设「自定义预设」", test_custom_preset, module)
     run("颜色项两级短选择（可达性不变式）", test_target_selector, module)
     run("主题页 UI 约定（ZML_LAB）", test_theme_ui_conventions, module)
-    run("饼菜单方位（2.18.0 右上换成灰度滤镜）", test_pie_unchanged, module)
+    run("饼菜单方位（2.22.1 右上换成一键隐藏刀具、灰度滤镜挪到 N 面板）", test_pie_unchanged, module)
     run("纯函数：当前视角相机解析", test_view_camera_resolution, module)
     run("一键选中当前相机（饼菜单左上）", test_select_active_camera, module)
-    run("灰度滤镜（饼菜单右上）", test_grayscale_filter, module)
+    run("灰度滤镜（N 面板 ▸ 建模，只有一处）", test_grayscale_filter, module)
     run("分页（建模 / 工具 / 主题）", test_pages, module)
     run("页面布局（保存 / 使用）", test_layout, module)
     run("N 面板顺序（拖动排序）", test_panel_order, module)

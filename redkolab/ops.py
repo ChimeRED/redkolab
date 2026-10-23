@@ -828,7 +828,11 @@ CUTTER_REASON_KEYS = {
     CUTTER_BY_NAME_ONLY: "by_name_only",
 }
 
-#: 两种目标模式（「组」= 集合；枚举 identifier 必须是纯 ASCII）
+#: 三种目标模式（「组」= 集合；枚举 identifier 必须是纯 ASCII）
+#: ``PREF`` = 不显式指定目标，沿用项目既有的目标机制（偏好设置里的目标 /
+#: ``compat.get_target_objects``：选中物体，没选中时是活动物体）。饼菜单项
+#: **不传参数**，走的就是这一项 —— 与「应用修改器 / 删除材质」等饼项一致。
+CUTTER_TARGET_PREF = 'PREF'
 CUTTER_TARGET_SELECTED = 'SELECTED'
 CUTTER_TARGET_COLLECTION = 'COLLECTION'
 
@@ -1012,10 +1016,24 @@ def collection_objects(collection, _seen=None):
     return objects
 
 
+def cutter_effective_mode(mode):
+    """把「按偏好设置」（``PREF``）解析成项目既有目标机制对应的具体模式。
+
+    ``PREF`` 不是第三种「找刀具的地方」，而是「不覆盖既有目标机制」的意思：
+    它解析成 ``CUTTER_TARGET_SELECTED``，也就是 ``compat.get_target_objects``
+    那条路（偏好设置里的目标 / 选中物体，没选中时是活动物体）—— 和饼菜单里
+    「应用修改器 / 删除材质」这些不带参数的饼项走的是同一条路。
+    """
+    if mode == CUTTER_TARGET_COLLECTION:
+        return CUTTER_TARGET_COLLECTION
+    return CUTTER_TARGET_SELECTED
+
+
 def cutter_target_objects(context, mode):
     """按目标模式取 ``(物体列表, 目标描述)``。
 
-    * ``CUTTER_TARGET_SELECTED``：沿用既有目标机制（选中物体，没选中时是活动物体）；
+    * ``CUTTER_TARGET_PREF`` / ``CUTTER_TARGET_SELECTED``：沿用既有目标机制
+      （选中物体，没选中时是活动物体）；
     * ``CUTTER_TARGET_COLLECTION``：当前高亮的集合（``context.collection``，也就是
       Outliner 里选中的那一格）及其所有子集合 —— 「组」= 集合。
     """
@@ -1032,7 +1050,7 @@ def cutter_target_objects(context, mode):
 
 
 class HHZ_OT_hide_cutters(_BaseTargetsOperator):
-    """一键隐藏组里的所有刀具（同一个算符两种目标：选中物体 / 当前集合）。"""
+    """一键隐藏组里的所有刀具（同一个算符三种目标：按偏好设置 / 选中物体 / 当前集合）。"""
 
     bl_idname = "hhz.hide_cutters"
     bl_label = "一键隐藏刀具"
@@ -1044,12 +1062,14 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
 
     target_mode: bpy.props.EnumProperty(
         name="目标",
-        description="刀具从哪里找：选中的物体，或当前高亮的集合（含子集合）",
+        description="刀具从哪里找：沿用偏好设置里的目标（默认），或显式指定选中的物体 / 当前高亮的集合",
         items=(
+            (CUTTER_TARGET_PREF, "按偏好设置",
+             "沿用项目既有的目标机制：选中的物体，没选中时是活动物体（饼菜单项不传参数时用这一项）"),
             (CUTTER_TARGET_SELECTED, "选中物体", "只在选中的物体里找刀具"),
             (CUTTER_TARGET_COLLECTION, "当前集合", "在当前高亮的集合及其子集合里找刀具"),
         ),
-        default=CUTTER_TARGET_SELECTED,
+        default=CUTTER_TARGET_PREF,
     )
 
     @classmethod
@@ -1065,9 +1085,12 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
     def execute(self, context):
         global _LAST_CUTTER_RUN
         targets, target_label = cutter_target_objects(context, self.target_mode)
+        # 「按偏好设置」到底解析成了哪种模式，记下来供测试与报告核对。
+        effective = cutter_effective_mode(self.target_mode)
         if not targets:
             _LAST_CUTTER_RUN = {
-                "mode": self.target_mode, "target": target_label, "cutters": 0,
+                "mode": self.target_mode, "effective_mode": effective,
+                "target": target_label, "cutters": 0,
                 "hidden": 0, "failed": 0, "by_modifier": 0, "by_wire_name": 0,
                 "by_name_only": 0, "skipped_non_mesh": 0, "skipped_hidden": 0,
                 "details": [], "failures": [],
@@ -1094,6 +1117,7 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
 
         _LAST_CUTTER_RUN = {
             "mode": self.target_mode,
+            "effective_mode": effective,
             "target": target_label,
             "cutters": stats["cutters"],
             "hidden": hidden,

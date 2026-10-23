@@ -17,12 +17,16 @@
       6. real-Blender gate (tools/run_tests.ps1, default 4.0.2 / auto) - the
          release is aborted here if the add-on cannot be installed, enabled and
          pass its assertions, so a broken package can never reach a tag
-      7. commit, tag and push. Only 2 push attempts per ref, and an authentication
-         failure stops immediately (it is not retried): every attempt can pop a
-         GitHub "select an account" window, so blind retrying used to spam the
-         desktop with authorization prompts. The transfer uses -ProxyUrl only
-         when that switch is given, and even then the proxy is passed per
-         invocation - nothing is ever written to .git/config.
+      7. commit, tag and push. Only 2 push attempts per ref, each one under its own
+         wall-clock limit, and an authentication failure or a timeout stops
+         immediately (it is not retried). The transfer is always non-interactive:
+         GCM_INTERACTIVE=never and GIT_TERMINAL_PROMPT=0 are set before pushing, so
+         the credential helper fails instead of opening a "select an account"
+         window (one such window parked a release push for 18 minutes). When the
+         portable gh CLI is available it is used as a one-shot credential helper
+         (-c credential.helper=..., never written to .git/config); otherwise a
+         plain "git push" is used. The proxy is passed per invocation with -c only
+         when -ProxyUrl is given - nothing is ever written to .git/config.
 
     NOTE: this file is intentionally ASCII-only. Windows PowerShell 5.1 reads
     .ps1 files using the system code page, which mangles non-ASCII text and can
@@ -50,6 +54,13 @@ param(
     # command is byte-for-byte the one used before this parameter existed.
     [string]$ProxyUrl = "",
     [string]$Git = "",
+    # Non-interactive credential helper: the portable gh CLI. Empty (the default)
+    # means "look for %LOCALAPPDATA%\redkolab-tools\gh\bin\gh.exe and use it if it
+    # exists"; when nothing is found a plain "git push" is used.
+    [string]$Gh = "",
+    # Wall-clock limit for ONE push attempt, in seconds. An attempt that exceeds it
+    # is killed and the release stops (see the .DESCRIPTION block).
+    [ValidateRange(15, 600)][int]$PushTimeoutSeconds = 90,
     [string]$Python = "",
     # Local add-on zip library: every release is copied there, replacing older versions.
     # Real physical path; D:\build\Blender is a junction to C:\build\Blender (same folder).
@@ -202,11 +213,151 @@ function Get-ProxyArgs {
     return @("-c", ("http.proxy=" + $ProxyUrl), "-c", ("https.proxy=" + $ProxyUrl))
 }
 
-function Format-ProxyPrefix {
-    # Renders the very same per-invocation flags for the -DryRun preview, so the
-    # printed command line is what would really run.
-    if (-not $ProxyUrl) { return "" }
-    return ("-c http.proxy=" + $ProxyUrl + " -c https.proxy=" + $ProxyUrl + " ")
+# --- non-interactive push: no credential window, no unbounded wait -------------
+# A release push must never be parked behind an interactive authorization window.
+# On the 2.22.0 release the tag push sat in the GCM "select an account" window for
+# 18 minutes and only completed after the tag was re-pushed by hand with
+# non-interactive credentials. Three things prevent a repeat:
+#   1. GCM_INTERACTIVE=never + GIT_TERMINAL_PROMPT=0: the credential helper fails
+#      instead of opening a window, and git never waits for a typed username.
+#   2. the portable gh CLI is preferred as a one-shot credential helper, so a
+#      token is available without any prompt at all.
+#   3. every attempt runs under a wall-clock limit and is killed when it expires.
+$env:GCM_INTERACTIVE = "never"
+$env:GIT_TERMINAL_PROMPT = "0"
+
+$script:GhCredentialHelper = ""
+
+function Resolve-GhCredentialHelper {
+    # Picks the non-interactive credential source. gh keeps its own token, so
+    # "gh auth git-credential" never prompts. Returns "" when gh is missing, and
+    # also when its path contains whitespace: git runs a "!" helper through the
+    # shell, so such a path cannot be passed safely from here - the normal git
+    # credential setup is used instead (still non-interactive, see above).
+    param([string]$Explicit)
+    $candidates = @()
+    if ($Explicit) { $candidates += $Explicit }
+    $candidates += (Join-Path $portableRoot "gh\bin\gh.exe")
+    foreach ($path in $candidates) {
+        if (-not $path) { continue }
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        if ($path -match "\s") {
+            Write-Host "note: gh was found but its path contains whitespace; the one-shot credential helper is skipped and the normal git credential setup is used" -ForegroundColor Yellow
+            return ""
+        }
+        return $path
+    }
+    return ""
+}
+
+function Get-PushCredentialArgs {
+    # One-shot flags for a single push. The empty helper value first RESETS the
+    # helper list, so a configured interactive helper (GCM) is not consulted at
+    # all; then gh is added as the only helper. Both are "-c" values: they apply
+    # to this invocation only and are never written to .git/config.
+    if (-not $script:GhCredentialHelper) { return @() }
+    return @(
+        "-c", "credential.helper=",
+        "-c", ("credential.helper=!" + $script:GhCredentialHelper + " auth git-credential")
+    )
+}
+
+function Format-PushCommand {
+    # Renders exactly the argv that would be executed, for the -DryRun preview and
+    # for error messages, so the printed command line is what really runs.
+    param([string[]]$Arguments)
+    $parts = @("git")
+    foreach ($item in $Arguments) {
+        if ($item -match "\s") {
+            $parts += ('"' + $item + '"')
+        } else {
+            $parts += $item
+        }
+    }
+    return ($parts -join " ")
+}
+
+function Assert-SafePushArguments {
+    # The source scan (Find-ForcePush) only sees literal "git ... push ..." lines;
+    # this checks the argument array that is really handed to git, so a flag that
+    # overwrites history is refused no matter how the array was assembled. The
+    # banned markers are assembled at runtime so this file does not carry them.
+    param([string[]]$Arguments)
+    $banned = @(("--" + "force"), ("--" + "force" + "-with-lease"), "-f")
+    foreach ($item in $Arguments) {
+        $token = ("$item").ToLowerInvariant()
+        if ($token.StartsWith("+")) {
+            throw "refusing to continue: a push argument starting with '+' would overwrite the remote side. Nothing here is allowed to rewrite history; a failed transfer must stay failed."
+        }
+        foreach ($marker in $banned) {
+            if ($token -eq $marker -or $token.StartsWith($marker + "=")) {
+                throw ("refusing to continue: a history-overwriting argument was rejected before running git: {0}. Such arguments are never allowed here." -f $item)
+            }
+        }
+    }
+}
+
+function Invoke-PushAttempt {
+    # Runs exactly one push under a wall-clock limit. A real System.Diagnostics
+    # process is used (not a plain "&") because only it can be killed: a stuck TLS
+    # handshake, or a helper that ignores the never-interactive setting, would
+    # otherwise block the release forever. Start-Process -PassThru was tried first
+    # and rejected: on this PowerShell 5.1 build it returns an EMPTY ExitCode even
+    # after a blocking WaitForExit, which would hide every failure behind an
+    # "exit=" with no number (exit codes must always be checked).
+    param([string[]]$Arguments, [int]$TimeoutSeconds)
+
+    $quoted = @()
+    foreach ($item in $Arguments) {
+        if ($item -match "\s") {
+            $quoted += ('"' + $item + '"')
+        } else {
+            $quoted += $item
+        }
+    }
+
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $gitExe
+    $info.Arguments = ($quoted -join " ")
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    # An empty stdin pipe plus GIT_TERMINAL_PROMPT=0 means git cannot even try to
+    # ask for a username.
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $info.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+
+    $result = @{ ExitCode = -1; TimedOut = $false; Lines = @(); Seconds = 0 }
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    $started = Get-Date
+    try {
+        $process.Start() | Out-Null
+        # Read asynchronously: a full pipe buffer would deadlock the child.
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $finished = $process.WaitForExit($TimeoutSeconds * 1000)
+        $result.Seconds = [int]((Get-Date) - $started).TotalSeconds
+        if (-not $finished) {
+            $result.TimedOut = $true
+            try { $process.Kill() } catch { }
+            try { $process.WaitForExit(5000) | Out-Null } catch { }
+            $result.Lines = @(
+                ("killed after {0}s: no response (the attempt was waiting on a credential window or a stuck connection)" -f $TimeoutSeconds)
+            )
+            return $result
+        }
+        $result.ExitCode = $process.ExitCode
+        $lines = @()
+        if ($stdoutTask.Wait(5000)) { $lines += @($stdoutTask.Result -split "`r?`n") }
+        if ($stderrTask.Wait(5000)) { $lines += @($stderrTask.Result -split "`r?`n") }
+        $result.Lines = @($lines | Where-Object { $_ -and $_.Trim() })
+        return $result
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
 }
 
 function Get-SystemProxyHint {
@@ -265,10 +416,12 @@ function Test-AuthFailure {
 }
 
 function Invoke-GitPush {
-    # Attempts: 2 (not 6). Each attempt can trigger an authorization window, so the
-    # retry budget is deliberately tiny and every attempt reports its exit code and
-    # the first stderr line instead of one vague "failed".
+    # Attempts: 2 (not 6), each with its own wall-clock limit. Every attempt could
+    # still reach a credential helper, so the retry budget stays tiny. An
+    # authentication failure or a timeout stops immediately (it is not retried):
+    # retrying those only repeats the same wait.
     param([string]$Reference, [int]$Attempts = 2)
+
     $forbidden = @(Find-ForcePush)
     if ($forbidden.Count -gt 0) {
         throw ("refusing to continue: history-overwriting arguments were found in this script: " + ($forbidden -join " | ") + " - such arguments are never allowed here; a failed transfer must stay failed.")
@@ -276,29 +429,45 @@ function Invoke-GitPush {
     if ($Reference.StartsWith("+")) {
         throw "refusing to continue: the refspec argument starts with '+', which overwrites the remote side. Use a normal refspec and let a failure stay a failure."
     }
-    $proxyArgs = @(Get-ProxyArgs)
+
+    $arguments = @()
+    $arguments += @(Get-PushCredentialArgs)
+    $arguments += @(Get-ProxyArgs)
+    $arguments += @("push")
+    $arguments += @($Remote)
+    $arguments += @($Reference)
+    Assert-SafePushArguments -Arguments $arguments
+
+    Write-Host ("push command: " + (Format-PushCommand -Arguments $arguments)) -ForegroundColor Cyan
+    Write-Host ("non-interactive: GCM_INTERACTIVE=never, GIT_TERMINAL_PROMPT=0, per-attempt timeout {0}s, at most {1} attempt(s)" -f $PushTimeoutSeconds, $Attempts) -ForegroundColor Cyan
+
     for ($i = 1; $i -le $Attempts; $i++) {
-        $ErrorActionPreference = "Continue"
-        $lines = @(& $gitExe @proxyArgs push $Remote $Reference 2>&1 | ForEach-Object { "$_" })
-        $code = $LASTEXITCODE
-        $ErrorActionPreference = "Stop"
-        foreach ($line in $lines) { Write-Host ("  push: " + $line) }
-        if ($code -eq 0) { return }
+        $result = Invoke-PushAttempt -Arguments $arguments -TimeoutSeconds $PushTimeoutSeconds
+        foreach ($line in $result.Lines) { Write-Host ("  push: " + $line) }
+        if (-not $result.TimedOut -and $result.ExitCode -eq 0) { return }
         $first = ""
-        foreach ($line in $lines) {
+        foreach ($line in $result.Lines) {
             if ($line -and $line.Trim()) { $first = $line.Trim(); break }
         }
-        Write-Host ("push {0} failed (attempt {1}/{2}, exit={3}): {4}" -f $Reference, $i, $Attempts, $code, $first) -ForegroundColor Yellow
-        if (Test-AuthFailure ($lines -join "`n")) {
-            throw ("GitHub authentication failed (exit={0}) on 'git push {1}'. Not retrying: every attempt pops another authorization window. How to fix: (1) if a window asks you to select an account, pick the right one; (2) or push through the local proxy: powershell -ExecutionPolicy Bypass -File tools\release.ps1 -ProxyUrl http://127.0.0.1:7890 (add -Bump none if the version is already bumped); (3) stale cached credential: cmdkey /delete:git:https://github.com then retry. Nothing was forced and the remote was left as it was." -f $code, $Reference)
+        if ($result.TimedOut) {
+            throw ("git push {0} timed out after {1}s and was killed (attempt {2}/{3}). Stopping here: a hung attempt is waiting for something it will not get, and retrying only repeats the wait. How to fix: (1) push through the local proxy: powershell -ExecutionPolicy Bypass -File tools\release.ps1 -ProxyUrl http://127.0.0.1:7890 (add -Bump none if the version is already bumped); (2) check the non-interactive credential source works: gh auth status; (3) check the connection to github.com. Nothing was forced and the remote was left as it was." -f $Reference, $PushTimeoutSeconds, $i, $Attempts)
+        }
+        Write-Host ("push {0} failed (attempt {1}/{2}, exit={3}, {4}s): {5}" -f $Reference, $i, $Attempts, $result.ExitCode, $result.Seconds, $first) -ForegroundColor Yellow
+        if (Test-AuthFailure ($result.Lines -join "`n")) {
+            throw ("GitHub authentication failed (exit={0}) on 'git push {1}'. Not retrying: every attempt could pop another authorization window, and this run is already non-interactive (GCM_INTERACTIVE=never). How to fix: (1) if a window asks you to select an account, pick the right one; (2) push through the local proxy: powershell -ExecutionPolicy Bypass -File tools\release.ps1 -ProxyUrl http://127.0.0.1:7890 (add -Bump none if the version is already bumped); (3) check the non-interactive credential source: gh auth status; (4) stale cached credential: cmdkey /delete:git:https://github.com then retry. Nothing was forced and the remote was left as it was." -f $result.ExitCode, $Reference)
         }
         if ($i -lt $Attempts) {
-            Write-Host ("retrying in 3s ({0} attempt(s) total: every attempt may trigger an auth prompt)" -f $Attempts) -ForegroundColor Yellow
+            Write-Host ("retrying in 3s (at most {0} attempts total; every attempt runs under a {1}s timeout)" -f $Attempts, $PushTimeoutSeconds) -ForegroundColor Yellow
             Start-Sleep -Seconds 3
         }
     }
-    throw ("git push {0} failed after {1} attempts. Nothing was forced and the remote was left as it was. If it is a network problem, retry with -ProxyUrl http://127.0.0.1:7890" -f $Reference, $Attempts)
+    throw ("git push {0} failed after {1} attempts (each with a {2}s timeout). Nothing was forced and the remote was left as it was. If it is a network problem, retry with -ProxyUrl http://127.0.0.1:7890" -f $Reference, $Attempts, $PushTimeoutSeconds)
 }
+# --- PUSH-POLICY-END ---
+# Everything above this marker is definitions only. The marker lets a throwaway
+# harness dot-source exactly this push policy (helpers + Invoke-GitPush) and drive
+# it against a fake git executable, so the timeout / non-interactive / one-shot
+# credential arguments can be exercised without publishing a release.
 
 # --- 1. clean tree ----------------------------------------------------------
 $status = & $gitExe status --porcelain
@@ -400,6 +569,14 @@ if ($DryRun) {
 # --- 6. commit / tag / push -------------------------------------------------
 $branch = (& $gitExe rev-parse --abbrev-ref HEAD).Trim()
 
+# Non-interactive credential source for the transfer (see the helpers above).
+$script:GhCredentialHelper = Resolve-GhCredentialHelper -Explicit $Gh
+if ($script:GhCredentialHelper) {
+    Write-Host ("credential helper for the transfer: " + $script:GhCredentialHelper + " (one-shot -c, non-interactive)") -ForegroundColor Cyan
+} else {
+    Write-Host "no portable gh CLI found: using the normal git credential setup (GCM_INTERACTIVE=never still prevents an interactive window)" -ForegroundColor Yellow
+}
+
 # The proxy is used for the transfer only. Say which one (if any) up front so a
 # -DryRun preview shows exactly what the real run would use.
 if ($ProxyUrl) {
@@ -412,15 +589,21 @@ if ($ProxyUrl) {
 }
 
 if ($DryRun) {
+    $previewArgs = @()
+    $previewArgs += @(Get-PushCredentialArgs)
+    $previewArgs += @(Get-ProxyArgs)
+    $previewArgs += @("push")
+    $branchArgs = @($previewArgs) + @($Remote, $branch)
+    $tagArgs = @($previewArgs) + @($Remote, $tag)
     Write-Host ""
     Write-Host "DryRun: all checks passed, nothing was committed or pushed." -ForegroundColor Yellow
     Write-Host "Would run:"
     Write-Host "  git add -A"
     Write-Host "  git commit -m `"release: $tag`""
     Write-Host "  git tag -a $tag"
-    $proxyPrefix = Format-ProxyPrefix
-    Write-Host ("  git {0}push {1} {2}" -f $proxyPrefix, $Remote, $branch)
-    Write-Host ("  git {0}push {1} {2}" -f $proxyPrefix, $Remote, $tag)
+    Write-Host ("  " + (Format-PushCommand -Arguments $branchArgs))
+    Write-Host ("  " + (Format-PushCommand -Arguments $tagArgs))
+    Write-Host ("  (each push: GCM_INTERACTIVE=never, GIT_TERMINAL_PROMPT=0, timeout {0}s, at most 2 attempts; -c values are per invocation, nothing is written to .git/config)" -f $PushTimeoutSeconds)
     exit 0
 }
 
@@ -430,6 +613,10 @@ if ($Bump -ne "none" -or (& $gitExe status --porcelain)) {
     if ($LASTEXITCODE -ne 0) { throw "commit failed" }
 }
 
+# An already released tag is never moved: a local tag with this name aborts the
+# release here, and even if a copy exists only on the remote, "git push <tag>" is
+# rejected by the remote without rewriting it (this script never passes a flag
+# that could change that).
 $existing = & $gitExe tag --list $tag
 if ($existing) { throw "tag $tag already exists" }
 

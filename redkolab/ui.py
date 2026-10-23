@@ -439,12 +439,16 @@ class HHZ_MT_pie(bpy.types.Menu):
         # 2.18.0：右上（5）原来是空位占位项 pie.separator()，现在换成「灰度滤镜」，
         # **8 个方位全部填满，0 个空位**。以后要加东西就得先腾一个槽位出来
         # （饼菜单只有 8 个方位）；少顶一个占位项会让后面的按钮整体前移、跑位。
+        # 2.22.1：槽位 5 由「灰度滤镜」换成「一键隐藏刀具」（灰度滤镜挪到 N 面板 ▸ 建模），
+        # 其余 7 个槽位的位置与图标一字未动。饼项**不传 target_mode**：算符默认
+        # 'PREF' = 沿用项目既有的目标机制（偏好设置里的目标 / 选中物体），
+        # 与「应用修改器 / 删除材质」这些饼项完全一致。
         pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')       # 0 左
         pie.operator("hhz.flip_normals", icon='NORMALS_FACE')         # 1 右
         pie.operator("hhz.remove_all_materials", icon='MATERIAL')     # 2 下
         pie.operator("hhz.stairs", icon='MOD_ARRAY')                  # 3 上（需求：保持不动）
         pie.operator("hhz.select_active_camera", icon='CAMERA_DATA')  # 4 左上
-        pie.operator("hhz.grayscale_filter", icon='COLOR')            # 5 右上（2.18.0 新增，原为空位）
+        pie.operator("hhz.hide_cutters", icon='HIDE_ON')              # 5 右上（2.22.1 起）
         pie.operator("hhz.remove_all_modifiers", icon='TRASH')        # 6 左下
         pie.operator("hhz.toggle_face_orientation", icon='OVERLAY')   # 7 右下
 
@@ -475,17 +479,25 @@ class HHZ_PT_main(bpy.types.Panel):
         column.operator("hhz.stairs", icon='MOD_ARRAY')
         layout.label(text="一键楼梯：鼠标换方向 滚轮改节数", icon='INFO')
 
-        # 翻面 / 检测反面 / 查看面朝向放在同一个 column 里、按钮相邻（没有新增面板）
+        # 翻面 / 检测反面 / 查看面朝向放在同一个 column 里、按钮相邻（没有新增面板）。
+        # 2.22.1：灰度滤镜从饼菜单右上（槽位 5）挪到这里 —— 同一个 column、紧挨着一组，
+        # **不新增面板**，而且全插件只有这一处画灰度滤镜按钮。
         column.separator()
-        column.operator("hhz.flip_normals", icon='NORMALS_FACE')
-        column.operator("hhz.detect_flipped", icon='INFO')
-        column.operator("hhz.toggle_face_orientation", icon='OVERLAY')
+        try:
+            column.operator("hhz.flip_normals", icon='NORMALS_FACE')
+            column.operator("hhz.detect_flipped", icon='INFO')
+            column.operator("hhz.toggle_face_orientation", icon='OVERLAY')
+            column.operator("hhz.grayscale_filter", icon='COLOR')
+        except Exception as error:  # draw 绝不能让异常冒给 Blender
+            column.label(text="建模按钮画不出来：{}".format(error), icon='ERROR')
         layout.label(text="检测：闭合网格看体积 非闭合只报疑似", icon='INFO')
         layout.label(text="查看面朝向：朝外蓝 朝内红（再点一次收起）", icon='INFO')
+        layout.label(text="灰度滤镜：会一起影响最终渲染输出（再点一次还原）", icon='INFO')
 
         # 刀具组：仍在同一个 column 里紧挨着翻面那一组（没有新增面板）。
-        # 两个按钮是**同一个算符**的两种目标模式 —— 选中的物体 / 当前高亮的集合
-        # （「组」= 集合，含子集合）。饼菜单 8 个方位已满，所以这里只在 N 面板。
+        # 两个按钮是**同一个算符**的两种**显式**目标模式 —— 选中的物体 / 当前高亮的集合
+        # （「组」= 集合，含子集合）。饼菜单右上那一格调同一个算符但**不传参数**：
+        # 算符默认 'PREF'，回落到项目既有的目标机制（按偏好设置）。
         column.separator()
         try:
             selected_cutters = column.operator(
