@@ -10,6 +10,7 @@
 * :class:`HHZ_OT_flip_normals`          一键翻面（整体翻转网格所有面的朝向）
 * :class:`HHZ_OT_detect_flipped`        检测是否有物体整体翻面（只读，不改任何数据）
 * :class:`HHZ_OT_hide_cutters`          一键隐藏组里的所有刀具（被布尔引用的切割体，只隐藏不改数据）
+* :class:`HHZ_OT_show_cutters`          把刀具变回正常物体（实体显示 + 可见 + 可渲染，判据同上）
 * :class:`HHZ_OT_select_active_camera`  一键选中当前相机（当前视角使用的相机，只改选择不改数据）
 * :class:`HHZ_OT_grayscale_filter`      灰度滤镜（切换色彩管理 Look，会一起影响最终渲染输出）
 
@@ -836,6 +837,15 @@ CUTTER_TARGET_PREF = 'PREF'
 CUTTER_TARGET_SELECTED = 'SELECTED'
 CUTTER_TARGET_COLLECTION = 'COLLECTION'
 
+#: 两个刀具算符（一键隐藏 / 恢复正常物体）共用的枚举项 —— **一份定义、两处使用**，
+#: 保证「恢复」与「隐藏」的目标模式、选项顺序、文案完全一致，不会各写一套后分叉。
+CUTTER_TARGET_ITEMS = (
+    (CUTTER_TARGET_PREF, "按偏好设置",
+     "沿用项目既有的目标机制：选中的物体，没选中时是活动物体（饼菜单项不传参数时用这一项）"),
+    (CUTTER_TARGET_SELECTED, "选中物体", "只在选中的物体里找刀具"),
+    (CUTTER_TARGET_COLLECTION, "当前集合", "在当前高亮的集合及其子集合里找刀具"),
+)
+
 #: 刀具算符最近一次的汇总（真机测试直接断言它，不去解析 report 文本）
 _LAST_CUTTER_RUN = {}
 
@@ -898,7 +908,7 @@ def cutter_reference_map(holders):
     return mapping
 
 
-def detect_cutters(objs, references=None):
+def detect_cutters(objs, references=None, include_hidden=False):
     """按优先级识别刀具 —— **纯函数**（不 import bpy、不写任何数据）。
 
     优先级 A > B > C：
@@ -906,6 +916,11 @@ def detect_cutters(objs, references=None):
     * A 被布尔修改器引用（``references`` 里登记了它）—— 最可靠；
     * B 线框显示 **且** 名字含关键词 —— 交叉验证；
     * C 只靠名字 —— 兜底，调用方必须在报告里写明「仅按名字推断」。
+
+    ``include_hidden`` 只影响「已经在隐藏集合里的物体要不要算」：
+    一键隐藏（默认 ``False``）把它们计入 ``skipped_hidden`` 并跳过；
+    一键恢复正常物体传 ``True`` —— 因为「已经藏起来」正是恢复要处理的状态，
+    跳过它们等于永远恢复不到东西。A / B / C 三条判据本身**一个字没变**。
 
     返回 ``(刀具列表, 统计)``：
 
@@ -915,7 +930,8 @@ def detect_cutters(objs, references=None):
       "skipped_non_mesh", "skipped_hidden", "found"}``。
 
     非 Mesh / Curve 的物体计入 ``skipped_non_mesh``；**已经隐藏的**刀具计入
-    ``skipped_hidden``（不会再 hide 一次，也不谎报成隐藏成功）。
+    ``skipped_hidden``（``include_hidden`` 为假时不会再 hide 一次，也不谎报成
+    隐藏成功）。
     """
     stats = {
         "total": 0,
@@ -954,7 +970,8 @@ def detect_cutters(objs, references=None):
 
         if is_hidden_object(obj):
             stats["skipped_hidden"] += 1
-            continue
+            if not include_hidden:
+                continue
 
         cutters.append({
             "object": obj,
@@ -1049,6 +1066,135 @@ def cutter_target_objects(context, mode):
     return compat.get_target_objects(context), "选中物体"
 
 
+def hidden_view_layer_objects(context):
+    """当前视图层里被隐藏的物体 —— **只读**（只是列出来，不改任何可见性）。"""
+    layer = getattr(context, "view_layer", None)
+    objects = getattr(layer, "objects", None)
+    if objects is None:
+        return []
+    found = []
+    for obj in objects:
+        if obj is None:
+            continue
+        if is_hidden_object(obj):
+            found.append(obj)
+    return found
+
+
+def cutter_targets_poll(context):
+    """刀具两个算符（一键隐藏 / 一键恢复正常物体）共用的 poll —— 一份逻辑，两处使用。
+
+    「物体模式 + 至少有一个能下手的目标」：
+    选中物体，或当前高亮集合里有物体，或当前视图层里有被隐藏的物体。
+    最后一项是给「恢复」用的：刀具被藏起来之后没有任何选中物体，按钮也必须能点。
+    """
+    if getattr(context, "mode", "OBJECT") != "OBJECT":
+        return False
+    if compat.poll_objects(context):
+        return True
+    if collection_objects(getattr(context, "collection", None)):
+        return True
+    return bool(hidden_view_layer_objects(context))
+
+
+def _merge_objects(*groups):
+    """按物体名去重合并若干组物体（先出现的顺序保留）。"""
+    merged = []
+    seen = set()
+    for group in groups or ():
+        for obj in group or ():
+            if obj is None:
+                continue
+            key = getattr(obj, "name", None)
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            merged.append(obj)
+    return merged
+
+
+def cutter_restore_targets(context, mode):
+    """「恢复正常刀具」的目标 ``(物体列表, 目标描述)``。
+
+    * ``COLLECTION``：与一键隐藏**完全一样**（当前高亮的集合及子集合；集合成员本来
+      就包含隐藏的物体，不需要额外补）；
+    * ``PREF`` / ``SELECTED``：先走 ``compat.get_target_objects``（选中物体 / 活动物体），
+      再把**当前视图层里被隐藏的物体**补进来。原因是实测事实：``hide_set(True)``
+      会让物体取消选中（4.0.2 与 5.2.2 一致），只按「选中」找就永远找不到刚藏起来
+      的那批刀具 —— 那样这个按钮对用户等于没用。
+    """
+    targets, label = cutter_target_objects(context, mode)
+    if mode == CUTTER_TARGET_COLLECTION:
+        return list(targets), label
+    hidden = hidden_view_layer_objects(context)
+    if not hidden:
+        return list(targets), label
+    return _merge_objects(targets, hidden), "{} + 视图层里隐藏的物体".format(label)
+
+
+def cutter_render_blockers(context, cutters):
+    """如实列出「物体已经恢复、但集合层面还是渲染不出来」的情况 —— **只读**。
+
+    两种情况：所在集合被设为不渲染（``collection.hide_render``）、或者物体根本不
+    在当前视图层（被集合排除）。**只报告、绝不修改集合设置** —— 改
+    ``collection.hide_render`` 等于擅自替用户重配整个场景的渲染。
+    """
+    blockers = []
+    for item in cutters or ():
+        obj = item.get("object")
+        if obj is None:
+            continue
+        names = []
+        for collection in getattr(obj, "users_collection", ()) or ():
+            if getattr(collection, "hide_render", False):
+                name = getattr(collection, "name", "?") or "?"
+                if name not in names:
+                    names.append(name)
+        in_layer = compat.object_in_view_layer(context, obj)
+        if not names and in_layer:
+            continue
+        blockers.append({
+            "name": item.get("name") or getattr(obj, "name", "?") or "?",
+            "collections": names,
+            "in_view_layer": in_layer,
+        })
+    return blockers
+
+
+def describe_restore_cutters_report(counts, blockers):
+    """把「恢复正常物体」的统计压成一行中文报告（集合不可渲染要**逐个点名**）。"""
+    text = ("已恢复 {} 个刀具为正常物体：改实体显示 {} 个、已是实体 {} 个、"
+            "开启渲染 {} 个；跳过非网格 {} 个、失败 {} 个").format(
+        int(counts.get("restored", 0) or 0),
+        int(counts.get("textured", 0) or 0),
+        int(counts.get("already_textured", 0) or 0),
+        int(counts.get("render_on", 0) or 0),
+        int(counts.get("skipped_non_mesh", 0) or 0),
+        int(counts.get("failed", 0) or 0),
+    )
+    blockers = list(blockers or ())
+    if not blockers:
+        return text
+
+    names = []
+    for item in blockers:
+        for name in item.get("collections") or ():
+            if name not in names:
+                names.append(name)
+    details = []
+    if names:
+        details.append("集合「{}」被设为不渲染".format("」「".join(names)))
+    out_of_layer = [item.get("name") or "?" for item in blockers
+                    if not item.get("in_view_layer", True)]
+    if out_of_layer:
+        details.append("不在当前视图层：{}".format("、".join(out_of_layer)))
+    if not details:
+        return text
+    return "{}；另有 {} 个刀具所在集合不可渲染（{}），需单独处理".format(
+        text, len(blockers), "；".join(details))
+
+
 class HHZ_OT_hide_cutters(_BaseTargetsOperator):
     """一键隐藏组里的所有刀具（同一个算符三种目标：按偏好设置 / 选中物体 / 当前集合）。"""
 
@@ -1063,24 +1209,15 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
     target_mode: bpy.props.EnumProperty(
         name="目标",
         description="刀具从哪里找：沿用偏好设置里的目标（默认），或显式指定选中的物体 / 当前高亮的集合",
-        items=(
-            (CUTTER_TARGET_PREF, "按偏好设置",
-             "沿用项目既有的目标机制：选中的物体，没选中时是活动物体（饼菜单项不传参数时用这一项）"),
-            (CUTTER_TARGET_SELECTED, "选中物体", "只在选中的物体里找刀具"),
-            (CUTTER_TARGET_COLLECTION, "当前集合", "在当前高亮的集合及其子集合里找刀具"),
-        ),
+        items=CUTTER_TARGET_ITEMS,
         default=CUTTER_TARGET_PREF,
     )
 
     @classmethod
     def poll(cls, context):
-        # 「按集合」模式下即使什么都没选中也应该能点，所以 poll 放宽成
-        # 「物体模式 + 选中物体或当前集合里至少有一个物体」。
-        if getattr(context, "mode", "OBJECT") != "OBJECT":
-            return False
-        if compat.poll_objects(context):
-            return True
-        return bool(collection_objects(getattr(context, "collection", None)))
+        # 与「一键恢复正常刀具」共用同一个 poll（cutter_targets_poll）：
+        # 「按集合」模式下即使什么都没选中也应该能点。
+        return cutter_targets_poll(context)
 
     def execute(self, context):
         global _LAST_CUTTER_RUN
@@ -1089,6 +1226,7 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
         effective = cutter_effective_mode(self.target_mode)
         if not targets:
             _LAST_CUTTER_RUN = {
+                "kind": "hide",
                 "mode": self.target_mode, "effective_mode": effective,
                 "target": target_label, "cutters": 0,
                 "hidden": 0, "failed": 0, "by_modifier": 0, "by_wire_name": 0,
@@ -1116,6 +1254,7 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
             hidden += 1
 
         _LAST_CUTTER_RUN = {
+            "kind": "hide",
             "mode": self.target_mode,
             "effective_mode": effective,
             "target": target_label,
@@ -1151,6 +1290,176 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
             for line in failures:
                 print("[{} 刀具] 隐藏失败：{}".format(compat.ADDON_NAME, line))
         self.report({'WARNING'} if failed else {'INFO'}, text)
+        return {'FINISHED'}
+
+
+class HHZ_OT_show_cutters(_BaseTargetsOperator):
+    """一键把刀具变回正常物体（实体显示 + 可见 + 可渲染）。
+
+    判据与「一键隐藏刀具」是**同一套**：``cutter_reference_map`` 扫布尔引用，
+    ``detect_cutters`` 按 A / B / C 优先级认刀具 —— 不是另写一套识别逻辑。
+    只做五件事：``display_type = 'TEXTURED'``、``show_wire = False``、
+    ``hide_set(False)``、``hide_viewport = False``、``hide_render = False``；
+    不应用 / 不改布尔修改器、不删物体、不改选择、不动材质。
+    """
+
+    bl_idname = "hhz.show_cutters"
+    bl_label = "刀具恢复正常物体"
+    bl_description = (
+        "把目标里被布尔切割用的刀具物体变回正常物体（实体显示、关掉线框、取消隐藏、"
+        "允许渲染）：判据与「一键隐藏刀具」完全相同：优先认被布尔修改器引用的物体，"
+        "其次认线框显示且名字像刀具的物体，两者都没命中时才仅按名字推断；"
+        "只改显示与可见性，不应用也不改布尔修改器、不删物体、不改选择、不动材质"
+    )
+
+    target_mode: bpy.props.EnumProperty(
+        name="目标",
+        description="刀具从哪里找：沿用偏好设置里的目标（默认），或显式指定选中的物体 / 当前高亮的集合",
+        items=CUTTER_TARGET_ITEMS,
+        default=CUTTER_TARGET_PREF,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        # 与「一键隐藏刀具」共用同一个 poll（cutter_targets_poll）
+        return cutter_targets_poll(context)
+
+    def execute(self, context):
+        global _LAST_CUTTER_RUN
+        targets, target_label = cutter_restore_targets(context, self.target_mode)
+        effective = cutter_effective_mode(self.target_mode)
+        if not targets:
+            _LAST_CUTTER_RUN = {
+                "kind": "show",
+                "mode": self.target_mode, "effective_mode": effective,
+                "target": target_label, "cutters": 0, "restored": 0,
+                "textured": 0, "already_textured": 0, "render_on": 0, "failed": 0,
+                "by_modifier": 0, "by_wire_name": 0, "by_name_only": 0,
+                "skipped_non_mesh": 0, "skipped_hidden": 0,
+                "details": [], "failures": [], "blockers": [],
+                "blocked_collections": [], "report": "",
+            }
+            self.report({'WARNING'}, "{}里没有可检查的物体".format(target_label))
+            return {'CANCELLED'}
+
+        # 与隐藏完全相同的判据：布尔引用扫整个文件（刀具可能被别的集合里的主体引用），
+        # 识别函数也是同一个 detect_cutters，只是把「已隐藏」的也算进来。
+        references = cutter_reference_map(bpy.data.objects)
+        cutters, stats = detect_cutters(targets, references, include_hidden=True)
+
+        restored = 0
+        textured = 0
+        already_textured = 0
+        render_on = 0
+        failed = 0
+        failures = []
+        details = []
+        for item in cutters:
+            obj = item["object"]
+            was_textured = getattr(obj, "display_type", "") == 'TEXTURED'
+            was_render = not bool(getattr(obj, "hide_render", False))
+            try:
+                # 只做这五件事，别的什么都不碰
+                obj.display_type = 'TEXTURED'
+                obj.show_wire = False
+                obj.hide_set(False)
+                obj.hide_viewport = False
+                obj.hide_render = False
+            except Exception as error:
+                failed += 1
+                failures.append("{}（{}）".format(item["name"], error))
+                details.append({"name": item["name"], "reason": item["reason"],
+                                "referenced_by": list(item["referenced_by"]),
+                                "ok": False, "error": str(error),
+                                "already_textured": was_textured,
+                                "render_enabled": False})
+                continue
+            restored += 1
+            if was_textured:
+                already_textured += 1
+            else:
+                textured += 1
+            if not was_render:
+                render_on += 1
+            details.append({"name": item["name"], "reason": item["reason"],
+                            "referenced_by": list(item["referenced_by"]),
+                            "ok": True, "already_textured": was_textured,
+                            "render_enabled": not was_render})
+
+        # 集合层面的问题只能如实报告，绝不擅自改集合设置
+        blockers = cutter_render_blockers(context, cutters)
+        counts = {
+            "restored": restored,
+            "textured": textured,
+            "already_textured": already_textured,
+            "render_on": render_on,
+            "skipped_non_mesh": stats["skipped_non_mesh"],
+            "failed": failed,
+        }
+
+        if not cutters:
+            if stats["skipped_non_mesh"]:
+                text = ("{}里没有找到刀具（依据：布尔修改器引用 / 线框+命名）；"
+                        "跳过非网格 {} 个".format(
+                            target_label, stats["skipped_non_mesh"]))
+            else:
+                text = "{}里没有找到刀具（依据：布尔修改器引用 / 线框+命名）".format(
+                    target_label)
+            _LAST_CUTTER_RUN = {
+                "kind": "show", "mode": self.target_mode,
+                "effective_mode": effective, "target": target_label,
+                "cutters": 0, "restored": 0, "textured": 0,
+                "already_textured": 0, "render_on": 0, "failed": 0,
+                "by_modifier": 0, "by_wire_name": 0, "by_name_only": 0,
+                "skipped_non_mesh": stats["skipped_non_mesh"], "skipped_hidden": 0,
+                "details": [], "failures": [], "blockers": [],
+                "blocked_collections": [], "report": text,
+            }
+            self.report({'INFO'}, text)
+            return {'CANCELLED'}
+
+        text = describe_restore_cutters_report(counts, blockers)
+        blocked_collections = []
+        for blocker in blockers:
+            for name in blocker["collections"]:
+                if name not in blocked_collections:
+                    blocked_collections.append(name)
+
+        _LAST_CUTTER_RUN = {
+            "kind": "show",
+            "mode": self.target_mode,
+            "effective_mode": effective,
+            "target": target_label,
+            "cutters": stats["cutters"],
+            "restored": restored,
+            "textured": textured,
+            "already_textured": already_textured,
+            "render_on": render_on,
+            "failed": failed,
+            "by_modifier": stats["by_modifier"],
+            "by_wire_name": stats["by_wire_name"],
+            "by_name_only": stats["by_name_only"],
+            "skipped_non_mesh": stats["skipped_non_mesh"],
+            "skipped_hidden": stats["skipped_hidden"],
+            "details": details,
+            "failures": failures,
+            "blockers": blockers,
+            "blocked_collections": blocked_collections,
+            "report": text,
+        }
+
+        if failures:
+            for line in failures:
+                print("[{} 刀具] 恢复失败：{}".format(compat.ADDON_NAME, line))
+        for blocker in blockers:
+            if blocker["collections"]:
+                print("[{} 刀具] 物体已恢复，但其所在集合「{}」被设为不渲染，需单独处理：{}"
+                      .format(compat.ADDON_NAME,
+                              "」「".join(blocker["collections"]), blocker["name"]))
+            else:
+                print("[{} 刀具] 物体已恢复，但不在当前视图层，需单独处理：{}"
+                      .format(compat.ADDON_NAME, blocker["name"]))
+        self.report({'WARNING'} if (failed or blockers) else {'INFO'}, text)
         return {'FINISHED'}
 
 

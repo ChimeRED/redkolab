@@ -443,6 +443,9 @@ class HHZ_MT_pie(bpy.types.Menu):
         # 其余 7 个槽位的位置与图标一字未动。饼项**不传 target_mode**：算符默认
         # 'PREF' = 沿用项目既有的目标机制（偏好设置里的目标 / 选中物体），
         # 与「应用修改器 / 删除材质」这些饼项完全一致。
+        # 2.23.0：槽位 7（右下）由「一键查看面朝向」换成「一键恢复正常刀具」
+        # （面朝向仍在 N 面板 ▸ 建模页，只是不再占饼菜单槽位）；其余 7 个槽位
+        # 的位置与图标一字未动。同样**不传 target_mode**（走 PREF）。
         pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')       # 0 左
         pie.operator("hhz.flip_normals", icon='NORMALS_FACE')         # 1 右
         pie.operator("hhz.remove_all_materials", icon='MATERIAL')     # 2 下
@@ -450,7 +453,7 @@ class HHZ_MT_pie(bpy.types.Menu):
         pie.operator("hhz.select_active_camera", icon='CAMERA_DATA')  # 4 左上
         pie.operator("hhz.hide_cutters", icon='HIDE_ON')              # 5 右上（2.22.1 起）
         pie.operator("hhz.remove_all_modifiers", icon='TRASH')        # 6 左下
-        pie.operator("hhz.toggle_face_orientation", icon='OVERLAY')   # 7 右下
+        pie.operator("hhz.show_cutters", icon='MESH_CUBE')            # 7 右下（2.23.0 起）
 
 
 # ------------------------------------------------------------------- N 面板
@@ -498,6 +501,9 @@ class HHZ_PT_main(bpy.types.Panel):
         # 两个按钮是**同一个算符**的两种**显式**目标模式 —— 选中的物体 / 当前高亮的集合
         # （「组」= 集合，含子集合）。饼菜单右上那一格调同一个算符但**不传参数**：
         # 算符默认 'PREF'，回落到项目既有的目标机制（按偏好设置）。
+        # 2.23.0：旁边加一个「恢复刀具为正常物体」按钮 —— 同一个 column、不新增面板。
+        # 它**不传 target_mode**（走 PREF）：恢复的候选除了选中物体，还会自动带上
+        # 当前视图层里隐藏的物体，所以刚被藏起来的那批刀具也能一把恢复。
         column.separator()
         try:
             selected_cutters = column.operator(
@@ -506,9 +512,11 @@ class HHZ_PT_main(bpy.types.Panel):
             collection_cutters = column.operator(
                 "hhz.hide_cutters", text="一键隐藏刀具（当前集合）", icon='HIDE_ON')
             collection_cutters.target_mode = 'COLLECTION'
+            column.operator(
+                "hhz.show_cutters", text="恢复刀具为正常物体", icon='MESH_CUBE')
         except Exception as error:  # draw 绝不能让异常冒给 Blender
-            column.label(text="隐藏刀具按钮画不出来：{}".format(error), icon='ERROR')
-        layout.label(text="刀具只隐藏不删，恢复用 Alt+H", icon='INFO')
+            column.label(text="隐藏 / 恢复刀具按钮画不出来：{}".format(error), icon='ERROR')
+        layout.label(text="刀具只隐藏不删，恢复用 Alt+H，或用上面那个恢复按钮", icon='INFO')
 
         layout.separator()
         if context.mode != 'OBJECT':

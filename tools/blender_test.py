@@ -1955,6 +1955,594 @@ def test_hide_cutters(module):
           "收尾清理：测试建的刀具物体已删掉")
 
 
+def test_show_cutters_pure(module):
+    section("纯函数：刀具恢复（同一套判据 + 集合不可渲染如实报告、只读）")
+    ops = module.ops
+    detect = getattr(ops, "detect_cutters", None)
+    describe = getattr(ops, "describe_restore_cutters_report", None)
+    blockers_of = getattr(ops, "cutter_render_blockers", None)
+    check(detect is not None and describe is not None and blockers_of is not None,
+          "detect_cutters / describe_restore_cutters_report / cutter_render_blockers 都存在")
+    if not all((detect, describe, blockers_of)):
+        return
+
+    ops_source = source_of(module, "ops.py")
+    check(not _bpy_references_in(ops_source, "describe_restore_cutters_report"),
+          "describe_restore_cutters_report 的函数体里没有出现 bpy（纯函数）")
+    check(not _bpy_references_in(ops_source, "cutter_render_blockers"),
+          "cutter_render_blockers 的函数体里没有出现 bpy（只读属性）")
+
+    # ---- include_hidden：默认跳过已隐藏的刀具；恢复时必须带上它们 ----
+    shown = _FakeObject("Cutter恢复已隐藏", display_type='WIRE', hidden=True)
+    cutters, stats = detect([shown], {})
+    check(cutters == [] and stats["skipped_hidden"] == 1,
+          "默认（隐藏算符用）：已隐藏的刀具仍被跳过、计入 skipped_hidden", stats)
+    cutters, stats = detect([shown], {}, include_hidden=True)
+    check(len(cutters) == 1 and cutters[0]["name"] == shown.name,
+          "include_hidden=True（恢复算符用）：已隐藏的刀具也进识别结果", cutters)
+    check(cutters[0]["reason"] == ops.CUTTER_BY_WIRE_NAME,
+          "include_hidden 不改变判据本身（仍然是线框+命名 = B）", cutters[0]["reason"])
+    check(stats["by_wire_name"] == 1 and stats["skipped_hidden"] == 1,
+          "统计仍然如实记下「本来就在隐藏集合里」的个数", stats)
+    visible = _FakeObject("Cutter可见线框", display_type='WIRE')
+    cutters, stats = detect([shown, visible], {}, include_hidden=True)
+    check(len(cutters) == 2 and stats["cutters"] == 2,
+          "可见 + 已隐藏的刀具一起被识别（不重复、不丢）", [i["name"] for i in cutters])
+    check(stats["skipped_hidden"] == 1,
+          "只有真隐藏的那一个计入 skipped_hidden", stats)
+
+    # ---- 报告文案：七项计数逐项写出来 + 没有中点号 ----
+    counts = {"restored": 3, "textured": 1, "already_textured": 2,
+              "render_on": 1, "skipped_non_mesh": 2, "failed": 0}
+    text = describe(counts, [])
+    check(text.startswith("已恢复 3 个刀具为正常物体"),
+          "报告以「已恢复 N 个刀具为正常物体」开头", text)
+    check("改实体显示 1 个" in text and "已是实体 2 个" in text and "开启渲染 1 个" in text,
+          "报告：改实体 / 已是实体 / 开启渲染三项计数写出来", text)
+    check("跳过非网格 2 个" in text and "失败 0 个" in text,
+          "报告：跳过非网格 / 失败两项计数写出来", text)
+    check("不可渲染" not in text and "需单独处理" not in text,
+          "没有集合问题时报告里不提集合", text)
+    check("\u00b7" not in text, "报告文案里没有中点号 U+00B7（避免字体缺字变乱码）")
+
+    blocked = [
+        {"name": "刀一", "collections": ["不渲染组"], "in_view_layer": True},
+        {"name": "刀二", "collections": ["不渲染组", "另一个不渲染组"], "in_view_layer": True},
+    ]
+    text = describe(counts, blocked)
+    check("另有 2 个刀具所在集合不可渲染" in text,
+          "报告：额外写出「另有 K 个刀具所在集合不可渲染」", text)
+    check("不渲染组" in text and "另一个不渲染组" in text,
+          "报告：不可渲染的集合名字逐个点名（去重）", text)
+    check("需单独处理" in text, "报告：写明「需单独处理」（不谎报成已解决）", text)
+    check("\u00b7" not in text, "带集合问题的报告里也没有中点号 U+00B7")
+    text = describe(counts, [{"name": "刀三", "collections": [], "in_view_layer": False}])
+    check("不在当前视图层" in text and "刀三" in text,
+          "报告：不在视图层的物体也点名", text)
+
+    # ---- cutter_render_blockers：只读、按物体给、不碰集合设置 ----
+    class _BlockCollection(object):
+        def __init__(self, name, hide_render=False):
+            self.name = name
+            self.hide_render = hide_render
+
+    class _BlockObject(object):
+        def __init__(self, name, collections):
+            self.name = name
+            self.users_collection = list(collections)
+
+    class _BlockContext(object):
+        def __init__(self, names):
+            self.view_layer = type("_Layer", (), {"objects": set(names)})()
+
+    ok_object = _BlockObject("正常刀", [_BlockCollection("正常组")])
+    bad_object = _BlockObject("坏集合刀", [_BlockCollection("坏组", True)])
+    context = _BlockContext(["正常刀", "坏集合刀"])
+    found = blockers_of(context, [{"object": ok_object, "name": "正常刀"},
+                                  {"object": bad_object, "name": "坏集合刀"}])
+    check(len(found) == 1 and found[0]["collections"] == ["坏组"],
+          "只报告「所在集合被设为不渲染」的那个刀具", found)
+    check(found[0]["name"] == "坏集合刀" and found[0]["in_view_layer"] is True,
+          "blockers 条目里带着物体名与「是否在视图层」", found[0])
+    check(blockers_of(context, [{"object": ok_object, "name": "正常刀"}]) == [],
+          "集合都正常时 blockers 为空（不制造假警报）")
+    excluded = blockers_of(_BlockContext([]), [{"object": ok_object, "name": "正常刀"}])
+    check(len(excluded) == 1 and excluded[0]["in_view_layer"] is False
+          and excluded[0]["collections"] == [],
+          "物体不在当前视图层时也如实报告", excluded)
+    check(bad_object.users_collection[0].hide_render is True,
+          "cutter_render_blockers 只读：集合的 hide_render 一点没被改动")
+    blocker_source = function_source(ops_source, "cutter_render_blockers")
+    check("hide_render =" not in blocker_source and "hide_render=" not in blocker_source,
+          "源码级：cutter_render_blockers 里没有任何 hide_render 赋值（只读）")
+
+    # ---- 目标合并：按名字去重 ----
+    merge = getattr(ops, "_merge_objects", None)
+    check(merge is not None, "ops._merge_objects 存在")
+    if merge is not None:
+        first = _FakeObject("合并甲")
+        second = _FakeObject("合并乙")
+        merged = merge([first], [second, first], None)
+        check([obj.name for obj in merged] == ["合并甲", "合并乙"],
+              "目标合并按名字去重、保持先出现的顺序", [obj.name for obj in merged])
+        check(merge(None, []) == [], "_merge_objects 处理 None / 空输入时返回空列表")
+
+
+def test_show_cutters(module):
+    section("功能：一键把刀具变回正常物体（往返对称 + 同一套判据 + 集合不可渲染如实报告）")
+    ops = module.ops
+    reset_scene()
+
+    def snapshot(objects):
+        return {obj.name: (obj.hide_get(), obj.hide_viewport, obj.hide_render,
+                           obj.display_type, obj.show_wire)
+                for obj in objects}
+
+    def reset_active_collection():
+        bpy.context.view_layer.active_layer_collection = (
+            bpy.context.view_layer.layer_collection)
+
+    # ================= 往返对称：隐藏 -> 恢复（PREF，不重新选中） =================
+    reset_active_collection()
+    body = add_cube("ShowBody被切主体")
+    cutter_a = add_cube("ShowCutter布尔被引用")
+    cutter_b = add_cube("Show_cutter线框显示")
+    cutter_c = add_cube("ShowCutter实体只有名字")
+    plain_block = add_cube("另普通实体块")
+    plain_wire = add_cube("另普通线框显示")
+    light = make_light("ShowCutterLightHelper")
+    empty = bpy.data.objects.new("ShowCutterEmptyHelper", None)
+    bpy.context.collection.objects.link(empty)
+
+    cutter_b.display_type = 'WIRE'
+    cutter_b.show_wire = True          # 判据 B 的第二种写法；恢复后必须变 False
+    plain_wire.display_type = 'WIRE'
+    cutter_c.hide_render = True        # 本来就没开渲染；恢复时必须打开（相机可渲染）
+    boolean = body.modifiers.new("布尔切割", 'BOOLEAN')
+    boolean.operation = 'DIFFERENCE'
+    boolean.operand_type = 'OBJECT'
+    boolean.object = cutter_a
+
+    cutters = [cutter_a, cutter_b, cutter_c]
+    non_cutters = [body, plain_block, plain_wire, light, empty]
+    every_object = cutters + non_cutters
+    before_non_cutters = snapshot(non_cutters)
+
+    select_only(every_object)
+    hide_result = bpy.ops.hhz.hide_cutters()
+    hide_run = ops._LAST_CUTTER_RUN
+    check(hide_result == {'FINISHED'}, "往返第一步：隐藏刀具返回 FINISHED", hide_result)
+    check(hide_run.get("kind") == "hide", "汇总里标记了这次是「隐藏」",
+          hide_run.get("kind"))
+    hidden_now = sorted(obj.name for obj in cutters if obj.hide_get())
+    check(hidden_now == sorted(obj.name for obj in cutters),
+          "往返第一步：三个刀具全部隐藏（hide_get() == True）", hidden_now)
+    check(not [obj.name for obj in non_cutters if obj.hide_get()],
+          "往返第一步：非刀具一个都没被隐藏",
+          [obj.name for obj in non_cutters if obj.hide_get()])
+    check(sorted(item["name"] for item in hide_run.get("details", ()))
+          == sorted(obj.name for obj in cutters),
+          "往返第一步：识别出的就是那三个刀具", hide_run.get("details"))
+
+    # 隐藏会把物体取消选中（实测 4.0.2 / 5.2.2 一致）。这里刻意**不重新选中**，
+    # 验证「恢复」能靠 PREF + 当前视图层里隐藏的物体把它们找回来。
+    check(not [obj.name for obj in cutters if obj in bpy.context.selected_objects],
+          "隐藏之后三把刀具都不在选中里（Blender 自己取消的，不是插件改的）",
+          [obj.name for obj in bpy.context.selected_objects])
+
+    show_result = bpy.ops.hhz.show_cutters()
+    show_run = ops._LAST_CUTTER_RUN
+    check(show_result == {'FINISHED'}, "往返第二步：恢复返回 FINISHED", show_result)
+    check(show_run.get("kind") == "show", "汇总里标记了这次是「恢复」",
+          show_run.get("kind"))
+    check(show_run.get("mode") == 'PREF' and show_run.get("effective_mode") == 'SELECTED',
+          "不带参数调用 = 默认 PREF，解析成项目既有的目标机制（选中物体）",
+          (show_run.get("mode"), show_run.get("effective_mode")))
+    check("视图层里隐藏的物体" in (show_run.get("target") or ""),
+          "目标描述里写明额外带了「视图层里隐藏的物体」", show_run.get("target"))
+
+    # ---- 逐物体逐项：五项全部恢复 ----
+    for obj in cutters:
+        check(obj.hide_get() is False,
+              "往返第二步：{} 当前视图层已可见（hide_get() == False）".format(obj.name),
+              obj.hide_get())
+        check(obj.hide_viewport is False,
+              "往返第二步：{} hide_viewport == False".format(obj.name),
+              obj.hide_viewport)
+        check(obj.hide_render is False,
+              "往返第二步：{} hide_render == False（相机可渲染）".format(obj.name),
+              obj.hide_render)
+        check(obj.display_type == 'TEXTURED',
+              "往返第二步：{} display_type == TEXTURED（实体显示）".format(obj.name),
+              obj.display_type)
+        check(obj.show_wire is False,
+              "往返第二步：{} show_wire == False".format(obj.name), obj.show_wire)
+
+    # ---- 逐物体：非刀具五项与跑之前逐项相同（没有误伤） ----
+    after_non_cutters = snapshot(non_cutters)
+    changed = {name: (before_non_cutters[name], after_non_cutters[name])
+               for name in before_non_cutters
+               if before_non_cutters[name] != after_non_cutters[name]}
+    check(before_non_cutters == after_non_cutters,
+          "非刀具的这五项与跑之前逐项相同（说明没误伤）", changed)
+    for obj in non_cutters:
+        before = before_non_cutters[obj.name]
+        after = after_non_cutters[obj.name]
+        check(before == after,
+              "非刀具 {} 的五项逐项未变（隐藏 / 视口 / 渲染 / 显示类型 / 线框）".format(
+                  obj.name), (before, after))
+    check(plain_wire.display_type == 'WIRE',
+          "非刀具里的线框物体仍然是线框（没有把它也改成实体）",
+          plain_wire.display_type)
+    check(plain_block.display_type == 'TEXTURED' and plain_block.show_wire is False
+          and plain_block.hide_render is False,
+          "普通实体块的三项本来就是正常值、没有被改坏", snapshot([plain_block]))
+
+    # ---- 计数与报告 ----
+    check(show_run.get("restored") == 3,
+          "恢复计数：3 个刀具全部恢复", show_run.get("restored"))
+    check(show_run.get("textured") == 1 and show_run.get("already_textured") == 2,
+          "恢复计数：改实体显示 1 个、已是实体 2 个",
+          (show_run.get("textured"), show_run.get("already_textured")))
+    check(show_run.get("render_on") == 1,
+          "恢复计数：开启渲染 1 个（本来就 hide_render 的那个）",
+          show_run.get("render_on"))
+    check(show_run.get("failed") == 0, "恢复计数：失败 0 个", show_run.get("failed"))
+    check(show_run.get("skipped_non_mesh") == 2,
+          "恢复计数：跳过非网格 2 个（Light + Empty）",
+          show_run.get("skipped_non_mesh"))
+    check(not show_run.get("blockers"),
+          "这个场景没有「集合不可渲染」的问题", show_run.get("blockers"))
+    report = show_run.get("report") or ""
+    check("已恢复 3 个刀具为正常物体" in report,
+          "报告写明「已恢复 3 个刀具为正常物体」", report)
+    check("改实体显示 1 个" in report and "已是实体 2 个" in report
+          and "开启渲染 1 个" in report,
+          "报告：改实体 / 已是实体 / 开启渲染三项都在", report)
+    check("跳过非网格 2 个" in report and "失败 0 个" in report,
+          "报告：跳过非网格 / 失败两项都在", report)
+    check("\u00b7" not in report, "报告里没有中点号 U+00B7")
+
+    details = {item["name"]: item for item in show_run.get("details", ())}
+    check(details.get(cutter_a.name, {}).get("reason") == ops.CUTTER_BY_MODIFIER,
+          "恢复时判据 A 的刀具依据仍记为 modifier",
+          details.get(cutter_a.name, {}).get("reason"))
+    check(details.get(cutter_b.name, {}).get("reason") == ops.CUTTER_BY_WIRE_NAME,
+          "恢复时判据 B 的刀具依据仍记为 wire_name",
+          details.get(cutter_b.name, {}).get("reason"))
+    check(details.get(cutter_c.name, {}).get("reason") == ops.CUTTER_BY_NAME_ONLY,
+          "恢复时判据 C 的刀具依据仍记为 name_only",
+          details.get(cutter_c.name, {}).get("reason"))
+
+    # ---- 判据复用（运行期）：同一场景同一批物体 ----
+    hide_names = sorted(item["name"] for item in hide_run.get("details", ()))
+    show_names = sorted(item["name"] for item in show_run.get("details", ()))
+    check(hide_names == show_names == sorted(obj.name for obj in cutters),
+          "同一场景下「隐藏」与「恢复」识别出同一批物体（逐名一致）",
+          (hide_names, show_names))
+    hide_reasons = sorted((item["name"], item["reason"])
+                          for item in hide_run.get("details", ()))
+    show_reasons = sorted((item["name"], item["reason"])
+                          for item in show_run.get("details", ()))
+    check(hide_reasons == show_reasons,
+          "同一批物体的依据（A / B / C）也逐条一致", (hide_reasons, show_reasons))
+    check(hide_run.get("by_modifier") == show_run.get("by_modifier")
+          and hide_run.get("by_wire_name") == show_run.get("by_wire_name")
+          and hide_run.get("by_name_only") == show_run.get("by_name_only"),
+          "三种依据的计数两次完全一致",
+          (hide_run.get("by_modifier"), show_run.get("by_modifier")))
+
+    # ---- 判据复用（源码级 / AST）----
+    ops_source = ops_source_of(module)
+    hide_src = class_source(ops_source, "HHZ_OT_hide_cutters")
+    show_src = class_source(ops_source, "HHZ_OT_show_cutters")
+    check(bool(hide_src) and bool(show_src),
+          "能按类边界取到两个刀具算符的源码段")
+    check("detect_cutters(" in hide_src and "detect_cutters(" in show_src,
+          "源码级：两个算符都调用同一个 detect_cutters（没有各写一套判据）")
+    check("cutter_reference_map(" in hide_src and "cutter_reference_map(" in show_src,
+          "源码级：布尔引用映射也是同一个 cutter_reference_map")
+    check("cutter_target_objects(" in hide_src,
+          "隐藏算符的目标解析走既有的 cutter_target_objects")
+    restore_source = function_source(ops_source, "cutter_restore_targets")
+    check("cutter_target_objects(" in restore_source,
+          "恢复算符的目标解析同样回落到 cutter_target_objects"
+          "（PREF 仍落到 compat.get_target_objects，不另开一条路）", restore_source[:80])
+    check("compat.get_target_objects(" in function_source(ops_source,
+                                                          "cutter_target_objects"),
+          "cutter_target_objects 内部就是 compat.get_target_objects（既有目标机制）")
+    check("include_hidden=True" in show_src,
+          "恢复算符显式要求把已隐藏的刀具也算进来（隐藏正是要恢复的状态）")
+    check("include_hidden" not in hide_src,
+          "隐藏算符不带 include_hidden（保持「已隐藏就跳过」的原有语义）")
+    check("cutter_name_matches(" not in show_src and "is_wire_display(" not in show_src,
+          "恢复算符没有自己再写一套判据（不直接调 cutter_name_matches / is_wire_display）")
+    check("cutter_targets_poll(" in hide_src and "cutter_targets_poll(" in show_src,
+          "两个算符共用同一个 poll（cutter_targets_poll）")
+
+    # ---- 纯函数层面 / AST 级：两个类里真的**调用**了同一个函数（不是只在注释里提到）----
+    def class_call_names(class_name):
+        called = set()
+        for node in ast.walk(ast.parse(ops_source)):
+            if not (isinstance(node, ast.ClassDef) and node.name == class_name):
+                continue
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Call):
+                    continue
+                func = inner.func
+                if isinstance(func, ast.Name):
+                    called.add(func.id)
+                elif isinstance(func, ast.Attribute):
+                    called.add(func.attr)
+        return called
+
+    hide_calls = class_call_names("HHZ_OT_hide_cutters")
+    show_calls = class_call_names("HHZ_OT_show_cutters")
+    check("detect_cutters" in hide_calls and "detect_cutters" in show_calls,
+          "AST：两个类的函数体里都真的调用了 detect_cutters（不是只在注释里提到）",
+          (sorted(hide_calls & {"detect_cutters"}), sorted(show_calls & {"detect_cutters"})))
+    check("cutter_reference_map" in hide_calls and "cutter_reference_map" in show_calls,
+          "AST：两个类都真的调用了 cutter_reference_map",
+          (sorted(hide_calls & {"cutter_reference_map"}),
+           sorted(show_calls & {"cutter_reference_map"})))
+    check("cutter_target_objects" in hide_calls,
+          "AST：隐藏类真的调用了 cutter_target_objects", sorted(hide_calls))
+    check("cutter_restore_targets" in show_calls
+          and "cutter_target_objects" in function_source(ops_source,
+                                                         "cutter_restore_targets"),
+          "AST：恢复类通过 cutter_restore_targets 走同一套目标解析",
+          sorted(show_calls))
+
+    # ---- 只做这五件事，别的都不做 ----
+    for wanted in ("display_type = 'TEXTURED'", "show_wire = False", "hide_set(False)",
+                   "hide_viewport = False", "hide_render = False"):
+        check(wanted in show_src, "恢复算符里写了「{}」".format(wanted), wanted)
+    for forbidden in ("objects.remove", "select_set", "modifiers.new", "modifiers.remove",
+                      "modifier_apply", "batch_remove", "hide_set(True)", "material"):
+        check(forbidden not in show_src,
+              "恢复算符不做「{}」".format(forbidden), forbidden)
+    check("try:" in show_src and "except Exception as error" in show_src,
+          "逐物体动作包在 try/except 里（单个失败不拖垮整批）")
+    check("_BaseTargetsOperator" in show_src,
+          "复用既有的目标机制基类 _BaseTargetsOperator（没有另写一套）")
+
+    # ---- 注册 / bl_options / bl_label / 枚举 ----
+    operator = operator_class(module, "show_cutters")
+    check(operator is not None, "算符 hhz.show_cutters 已注册")
+    if operator is not None:
+        check(operator.bl_idname == "hhz.show_cutters", "bl_idname 精确匹配",
+              operator.bl_idname)
+        check(operator.bl_label == "刀具恢复正常物体",
+              "bl_label 是「刀具恢复正常物体」", operator.bl_label)
+        check("刀具" in operator.bl_label
+              and ("正常" in operator.bl_label or "实体" in operator.bl_label),
+              "bl_label 同时含「刀具」与「正常 / 实体」", operator.bl_label)
+        check("\u00b7" not in operator.bl_label, "bl_label 里没有中点号 U+00B7")
+        check(set(operator.bl_options) >= {'REGISTER', 'UNDO'},
+              "bl_options 含 REGISTER 与 UNDO（可 Ctrl+Z 撤销）",
+              sorted(operator.bl_options))
+
+    rna = bpy.ops.hhz.show_cutters.get_rna_type()
+    identifiers = [item.identifier for item in rna.properties]
+    check("target_mode" in identifiers, "算符上有 target_mode 属性（三种目标模式）",
+          identifiers)
+    if "target_mode" in identifiers:
+        enum_ids = [item.identifier for item in rna.properties["target_mode"].enum_items]
+        enum_labels = [item.name for item in rna.properties["target_mode"].enum_items]
+        check(enum_ids == ["PREF", "SELECTED", "COLLECTION"],
+              "枚举项为 PREF / SELECTED / COLLECTION 且顺序固定", enum_ids)
+        check(all(re.match(r"^[A-Za-z0-9_]+$", item) for item in enum_ids),
+              "枚举 identifier 全是纯 ASCII", enum_ids)
+        check(rna.properties["target_mode"].default == 'PREF',
+              "target_mode 默认值是 PREF（饼项不传参数时按偏好走）",
+              rna.properties["target_mode"].default)
+        hide_rna = bpy.ops.hhz.hide_cutters.get_rna_type()
+        hide_ids = [item.identifier
+                    for item in hide_rna.properties["target_mode"].enum_items]
+        hide_labels = [item.name
+                       for item in hide_rna.properties["target_mode"].enum_items]
+        check(enum_ids == hide_ids and enum_labels == hide_labels,
+              "恢复与隐藏的 target_mode 枚举 identifier / 文案完全一致（同一份定义）",
+              (enum_ids, hide_ids))
+        check(not [item for item in enum_ids
+                   if not re.match(r"^[\x20-\x7e]+$", item)],
+              "枚举 identifier 里没有非 ASCII 字符", enum_ids)
+
+    # ================= 模式 2：SELECTED =================
+    reset_scene()
+    reset_active_collection()
+    selected_a = add_cube("SelCutter甲")
+    selected_b = add_cube("SelCutter乙")
+    selected_plain = add_cube("Sel普通块")
+    selected_a.display_type = 'WIRE'
+    selected_b.display_type = 'WIRE'
+    selected_plain.display_type = 'SOLID'
+    select_only([selected_a, selected_b, selected_plain])
+    selected_result = bpy.ops.hhz.show_cutters(target_mode='SELECTED')
+    selected_run = ops._LAST_CUTTER_RUN
+    check(selected_result == {'FINISHED'}, "SELECTED 模式返回 FINISHED", selected_result)
+    check(selected_run.get("mode") == 'SELECTED', "目标模式记成 SELECTED",
+          selected_run.get("mode"))
+    check(selected_run.get("restored") == 2, "SELECTED 模式恢复了 2 个刀具",
+          selected_run.get("restored"))
+    check(selected_a.display_type == 'TEXTURED'
+          and selected_b.display_type == 'TEXTURED',
+          "SELECTED 模式：选中的两个刀具都变回实体显示",
+          (selected_a.display_type, selected_b.display_type))
+    check(selected_plain.display_type == 'SOLID',
+          "SELECTED 模式：选中的普通块没被碰（仍是 SOLID）",
+          selected_plain.display_type)
+    pref_targets, pref_label = ops.cutter_restore_targets(
+        bpy.context, ops.CUTTER_TARGET_PREF)
+    selected_targets, selected_label = ops.cutter_restore_targets(
+        bpy.context, 'SELECTED')
+    check([obj.name for obj in pref_targets] == [obj.name for obj in selected_targets],
+          "有选中时 PREF 与 SELECTED 的目标是同一批物体",
+          ([obj.name for obj in pref_targets], [obj.name for obj in selected_targets]))
+    check(pref_label == selected_label, "两种模式的目标描述文本一致",
+          (pref_label, selected_label))
+    check(ops.cutter_effective_mode(ops.CUTTER_TARGET_PREF) == ops.CUTTER_TARGET_SELECTED
+          and ops.cutter_effective_mode(ops.CUTTER_TARGET_COLLECTION)
+          == ops.CUTTER_TARGET_COLLECTION,
+          "cutter_effective_mode：PREF -> SELECTED、COLLECTION 保持不变（纯函数）")
+
+    # ================= 模式 3：COLLECTION（隐藏 -> 恢复 也走一遍） =================
+    reset_scene()
+    reset_active_collection()
+    parent = bpy.data.collections.new("ShowCutters父组")
+    bpy.context.scene.collection.children.link(parent)
+    child = bpy.data.collections.new("ShowCutters子组")
+    parent.children.link(child)
+    coll_a = add_cube("ShowColl父组刀具")
+    coll_a.display_type = 'WIRE'
+    _move_to_collection(coll_a, parent)
+    coll_b = add_cube("ShowColl子组刀具")
+    coll_b.display_type = 'WIRE'
+    _move_to_collection(coll_b, child)
+    outside = add_cube("ShowColl集合外刀具")
+    outside.display_type = 'WIRE'
+    layer = _activate_collection(parent)
+    check(layer is not None, "测试集合能找到对应的 LayerCollection")
+    select_only([])
+    bpy.ops.hhz.hide_cutters(target_mode='COLLECTION')
+    check(coll_a.hide_get() is True and coll_b.hide_get() is True,
+          "集合模式往返第一步：父子集合里的刀具都被隐藏")
+    check(outside.hide_get() is False, "集合模式往返第一步：集合外的刀具没被隐藏")
+    check(bpy.ops.hhz.show_cutters.poll(),
+          "什么都没选中、但集合里有物体 / 有隐藏物体时 poll 仍为真（恢复按钮不会白白置灰）")
+    collection_result = bpy.ops.hhz.show_cutters(target_mode='COLLECTION')
+    collection_run = ops._LAST_CUTTER_RUN
+    check(collection_result == {'FINISHED'}, "COLLECTION 模式返回 FINISHED",
+          collection_result)
+    check(collection_run.get("mode") == 'COLLECTION', "目标模式记成 COLLECTION",
+          collection_run.get("mode"))
+    check(coll_a.hide_get() is False and coll_a.display_type == 'TEXTURED'
+          and coll_b.hide_get() is False and coll_b.display_type == 'TEXTURED',
+          "COLLECTION 模式：父集合与子集合里的刀具都恢复成实体",
+          (coll_a.display_type, coll_b.display_type))
+    check(outside.hide_get() is False and outside.display_type == 'WIRE',
+          "COLLECTION 模式：集合外的刀具没被碰（仍是线框）", outside.display_type)
+    check(collection_run.get("restored") == 2, "COLLECTION 模式恢复了 2 个刀具",
+          collection_run.get("restored"))
+    check(collection_run.get("by_modifier") == 0 and collection_run.get("by_wire_name") == 2,
+          "COLLECTION 模式里两个刀具都是判据 B（线框+命名）", collection_run)
+
+    # ================= 集合不可渲染：如实点名、且不改集合 =================
+    reset_scene()
+    reset_active_collection()
+    blocked_collection = bpy.data.collections.new("ShowCutters不渲染组")
+    bpy.context.scene.collection.children.link(blocked_collection)
+    blocked = add_cube("ShowCutter集合不渲染甲")
+    _move_to_collection(blocked, blocked_collection)
+    blocked.display_type = 'WIRE'
+    blocked_collection.hide_render = True
+    select_only([blocked])
+    blocked_result = bpy.ops.hhz.show_cutters()
+    blocked_run = ops._LAST_CUTTER_RUN
+    check(blocked_result == {'FINISHED'},
+          "集合不可渲染时物体本身仍然被恢复（返回 FINISHED）", blocked_result)
+    check(blocked.display_type == 'TEXTURED' and blocked.hide_render is False
+          and blocked.hide_get() is False,
+          "物体本身的五项被恢复了（display_type / hide_render / hide_get）",
+          (blocked.display_type, blocked.hide_render, blocked.hide_get()))
+    check(blocked_collection.hide_render is True,
+          "集合的 hide_render 没有被改动（仍是 True，绝不擅自改集合）",
+          blocked_collection.hide_render)
+    blocked_report = blocked_run.get("report") or ""
+    check("ShowCutters不渲染组" in blocked_report,
+          "报告里点名了那个被设为不渲染的集合", blocked_report)
+    check("不可渲染" in blocked_report and "需单独处理" in blocked_report,
+          "报告里写明「不可渲染」与「需单独处理」（不谎报成已解决）", blocked_report)
+    check(blocked_run.get("blocked_collections") == ["ShowCutters不渲染组"],
+          "汇总里记下了不可渲染的集合名（去重后的列表）",
+          blocked_run.get("blocked_collections"))
+    check(len(blocked_run.get("blockers", ())) == 1
+          and blocked_run["blockers"][0]["in_view_layer"] is True,
+          "blockers 里记了物体 / 集合 / 是否在视图层", blocked_run.get("blockers"))
+    check(blocked_run.get("restored") == 1, "恢复计数仍然是 1（如实）",
+          blocked_run.get("restored"))
+
+    # ================= 一个都没找到：友好提示 + CANCELLED + 什么都不改 =================
+    reset_scene()
+    reset_active_collection()
+    plain_only = add_cube("完全没切割体的普通块")
+    plain_only.display_type = 'SOLID'
+    select_only([plain_only])
+    before_plain = snapshot([plain_only])
+    none_result = bpy.ops.hhz.show_cutters()
+    none_run = ops._LAST_CUTTER_RUN
+    check(none_result == {'CANCELLED'}, "找不到刀具时返回 CANCELLED", none_result)
+    check(none_run.get("kind") == "show" and none_run.get("cutters") == 0
+          and none_run.get("restored") == 0,
+          "找不到刀具时汇总全是 0", none_run)
+    check("没有找到刀具" in (none_run.get("report") or ""),
+          "找不到刀具时给出友好提示", none_run.get("report"))
+    check(snapshot([plain_only]) == before_plain,
+          "找不到刀具时一个属性都没改", snapshot([plain_only]))
+    check("没有找到刀具" in show_src
+          and "依据：布尔修改器引用 / 线框+命名" in show_src,
+          "源码级：找不到时的提示写明了「依据：布尔修改器引用 / 线框+命名」")
+    check("CANCELLED" in show_src, "源码级：找不到时确实返回 CANCELLED")
+
+    # ================= N 面板：同一 column 旁边加一个恢复按钮 =================
+    ui_source = source_of(module, "ui.py")
+    main_panel = class_source(ui_source, "HHZ_PT_main")
+    check(main_panel.count('"hhz.show_cutters"') == 1,
+          "建模页主面板里正好一个恢复刀具按钮（没有重复）",
+          main_panel.count('"hhz.show_cutters"'))
+    check(main_panel.count('"hhz.hide_cutters"') == 2,
+          "隐藏刀具那两个按钮原样保留",
+          main_panel.count('"hhz.hide_cutters"'))
+    hide_at = main_panel.find('"hhz.hide_cutters"')
+    show_at = main_panel.find('"hhz.show_cutters"')
+    check(0 <= hide_at < show_at,
+          "恢复按钮排在隐藏刀具那一组之后（同一段、同一个 column）",
+          (hide_at, show_at))
+    guard_at = main_panel.rfind("try:", 0, hide_at)
+    except_at = main_panel.find("except Exception", show_at)
+    check(0 <= guard_at < hide_at < show_at < except_at,
+          "隐藏与恢复按钮画在同一个 try/except 护栏里（draw 的异常不冒给 Blender）",
+          (guard_at, hide_at, show_at, except_at))
+    check(re.search(r"column\.operator\(\s*\"hhz\.show_cutters\"", main_panel) is not None,
+          "恢复按钮画在 column 里（与隐藏刀具同一个 column）")
+    check(re.search(r"column\.operator\(\s*\"hhz\.hide_cutters\"", main_panel) is not None,
+          "隐藏按钮也仍然画在 column 里")
+    panel_classes = re.findall(r"class (HHZ_PT_\w+)\(bpy\.types\.Panel\)", ui_source)
+    check(len(panel_classes) == 6,
+          "ui.py 里仍然是 6 个面板类（没有为恢复按钮新增面板）", panel_classes)
+    pie_ops = [name for kind, name in pie_item_sequence(ui_source) if kind == "operator"]
+    check(len(pie_ops) == 8,
+          "饼菜单仍是 8 个算符（恢复刀具占的是槽位 7，不是新增）", pie_ops)
+    check(len(pie_ops) >= 8 and pie_ops[7] == "hhz.show_cutters",
+          "饼菜单槽位 7（右下）就是 hhz.show_cutters",
+          pie_ops[7] if len(pie_ops) > 7 else pie_ops)
+    check("hhz.toggle_face_orientation" not in pie_ops,
+          "「一键查看面朝向」已经不在饼菜单里", pie_ops)
+    check("target_mode" not in pie_operator_keywords(ui_source, "hhz.show_cutters"),
+          "饼菜单项调 show_cutters 时**不传** target_mode（走 PREF）",
+          pie_operator_keywords(ui_source, "hhz.show_cutters"))
+    check(set(pie_operator_keywords(ui_source, "hhz.show_cutters")) <= {"icon", "text"},
+          "饼菜单项只传图标 / 文字这类布局参数（没有任何算符属性）",
+          pie_operator_keywords(ui_source, "hhz.show_cutters"))
+    check("\u00b7" not in main_panel, "刀具按钮那段的 UI 文本没有中点号 U+00B7")
+
+    # ================= 收尾清理 =================
+    reset_active_collection()
+    reset_scene()
+    for name in ("ShowCutters父组", "ShowCutters子组", "ShowCutters不渲染组"):
+        collection = bpy.data.collections.get(name)
+        if collection is not None:
+            bpy.data.collections.remove(collection)
+    reset_scene()
+    check(bpy.data.collections.get("ShowCutters父组") is None
+          and bpy.data.collections.get("ShowCutters子组") is None
+          and bpy.data.collections.get("ShowCutters不渲染组") is None,
+          "收尾清理：测试建的集合已删掉")
+    check(not [obj for obj in bpy.data.objects
+               if "Cutter" in obj.name or "刀具" in obj.name],
+          "收尾清理：测试建的刀具物体已删掉")
+
+
 def ops_source_of(module):
     return source_of(module, "ops.py")
 
@@ -5665,6 +6253,8 @@ def pie_operator_idnames(source):
 # 2.18.0：右上（5）由空位改成「灰度滤镜」，8 个槽位全部填满，0 个空位。
 # 2.22.1：右上（5）由「灰度滤镜」换成「一键隐藏刀具」，灰度滤镜挪到 N 面板 ▸ 建模；
 # 其余 7 个槽位的位置与图标一字未动。
+# 2.23.0：右下（7）由「一键查看面朝向」换成「一键恢复正常刀具」—— 面朝向从饼菜单
+# 移除（它仍在 N 面板 ▸ 建模页）；其余 7 个槽位的位置与图标一字未动。
 PIE_SLOT_DIRECTIONS = ("左", "右", "下", "上", "左上", "右上", "左下", "右下")
 PIE_PLACEHOLDER = "__placeholder__"
 PIE_EMPTY_SLOTS = ()
@@ -5676,17 +6266,28 @@ PIE_EXPECTED_SLOTS = (
     "hhz.select_active_camera",      # 4 左上（2.17.0 新增）
     "hhz.hide_cutters",              # 5 右上（2.22.1 起；2.18.0~2.22.0 是灰度滤镜）
     "hhz.remove_all_modifiers",      # 6 左下
-    "hhz.toggle_face_orientation",   # 7 右下
+    "hhz.show_cutters",              # 7 右下（2.23.0 起；之前是「一键查看面朝向」）
 )
-#: 2.18.0 之前就在饼菜单里的 7 个算符，一个都不许少（也就是除槽位 5 之外的 7 项）
-PIE_OPERATORS_BEFORE_2180 = (
+#: 2.23.0 起逐槽位的图标。除槽位 7 之外必须与 2.22.1 一字不动。
+PIE_EXPECTED_ICONS = (
+    "MODIFIER",        # 0 左
+    "NORMALS_FACE",    # 1 右
+    "MATERIAL",        # 2 下
+    "MOD_ARRAY",       # 3 上
+    "CAMERA_DATA",     # 4 左上
+    "HIDE_ON",         # 5 右上
+    "TRASH",           # 6 左下
+    "MESH_CUBE",       # 7 右下（2.23.0 起）
+)
+#: 2.23.0 的饼菜单里除槽位 7 之外的 7 项（位置与图标一字未动）
+PIE_OPERATORS_BEFORE_2230 = (
     "hhz.apply_all_modifiers",
     "hhz.flip_normals",
     "hhz.remove_all_materials",
     "hhz.stairs",
     "hhz.select_active_camera",
+    "hhz.hide_cutters",
     "hhz.remove_all_modifiers",
-    "hhz.toggle_face_orientation",
 )
 
 
@@ -5743,6 +6344,40 @@ def pie_operator_keywords(source, idname):
     return []
 
 
+def _pie_calls_in_body(body):
+    """按源码顺序收集一段函数体里的 (算符 idname, icon) —— 与 _pie_items_in_body 同序。"""
+    found = []
+    for statement in body:
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+            call = statement.value
+            func = call.func
+            if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                    and func.attr == "operator" and call.args
+                    and isinstance(call.args[0], ast.Constant)):
+                icon = None
+                for keyword in call.keywords:
+                    if keyword.arg == "icon" and isinstance(keyword.value, ast.Constant):
+                        icon = keyword.value.value
+                found.append((call.args[0].value, icon))
+        elif isinstance(statement, ast.If):
+            found.extend(_pie_calls_in_body(statement.body))
+            found.extend(_pie_calls_in_body(statement.orelse))
+        elif isinstance(statement, (ast.For, ast.While)):
+            found.extend(_pie_calls_in_body(statement.body))
+    return found
+
+
+def pie_operator_icons(source):
+    """``HHZ_MT_pie.draw()`` 里逐槽位的 ``(算符 idname, icon)``（顺序 = 方位顺序）。"""
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.ClassDef) and node.name == "HHZ_MT_pie"):
+            continue
+        for statement in node.body:
+            if isinstance(statement, ast.FunctionDef) and statement.name == "draw":
+                return _pie_calls_in_body(statement.body)
+    return []
+
+
 def class_operator_idnames(source, class_name):
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
@@ -5777,9 +6412,9 @@ def panels_with_parent_id(source):
 
 
 def test_pie_unchanged(module):
-    section("饼菜单方位（2.22.1：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
-            "选中当前相机=左上、一键隐藏刀具=右上、删除修改器=左下、查看面朝向=右下；"
-            "灰度滤镜已挪到 N 面板 ▸ 建模）")
+    section("饼菜单方位（2.23.0：应用修改器=左、翻面=右、删除材质=下、楼梯=上、"
+            "选中当前相机=左上、一键隐藏刀具=右上、删除修改器=左下、恢复正常刀具=右下；"
+            "查看面朝向已从饼菜单移除、仍在 N 面板 ▸ 建模页）")
     ui_path = os.path.join(os.path.dirname(os.path.abspath(module.__file__)), "ui.py")
     with open(ui_path, encoding="utf-8") as handle:
         source = handle.read()
@@ -5794,7 +6429,7 @@ def test_pie_unchanged(module):
 
     check(operators_in_order == [name for name in PIE_EXPECTED_SLOTS
                                  if name != PIE_PLACEHOLDER],
-          "算符顺序 == 2.22.1 目标方位顺序（左/右/下/上/左上/右上/左下/右下）",
+          "算符顺序 == 2.23.0 目标方位顺序（左/右/下/上/左上/右上/左下/右下）",
           operators_in_order)
     check(len(items) == len(PIE_EXPECTED_SLOTS),
           "饼菜单正好 {} 个槽位项（8 个算符 + 0 个空位占位项）".format(len(PIE_EXPECTED_SLOTS)),
@@ -5825,8 +6460,34 @@ def test_pie_unchanged(module):
     check(len(slots) >= 6 and slots[5] == "hhz.hide_cutters",
           "槽位 5（右上）= 一键隐藏刀具（2.22.1 起，原来这里是灰度滤镜）",
           slots[5] if len(slots) > 5 else slots)
+    check(len(slots) >= 8 and slots[7] == "hhz.show_cutters",
+          "槽位 7（右下）= 一键恢复正常刀具（2.23.0 起，原来这里是查看面朝向）",
+          slots[7] if len(slots) > 7 else slots)
     check("hhz.grayscale_filter" not in operators_in_order,
           "灰度滤镜已经不在饼菜单里（挪到 N 面板 ▸ 建模）", operators_in_order)
+
+    # ---- 逐槽图标：除槽位 7 之外必须与 2.22.1 一字不动 ----
+    icons = pie_operator_icons(source)
+    icon_names = [icon for _idname, icon in icons]
+    check(len(icons) == len(PIE_EXPECTED_SLOTS),
+          "饼菜单每个算符都写了 icon（{} 项）".format(len(PIE_EXPECTED_ICONS)),
+          icon_names)
+    check(icon_names == list(PIE_EXPECTED_ICONS),
+          "逐槽图标 == 2.23.0 目标表（只有槽位 7 换成 MESH_CUBE，其余一字未动）",
+          icon_names)
+    for index in range(min(len(icons), len(PIE_EXPECTED_ICONS))):
+        check(icons[index][0] == PIE_EXPECTED_SLOTS[index]
+              and icons[index][1] == PIE_EXPECTED_ICONS[index],
+              "槽位 {}（{}）= {} icon={}".format(
+                  index, PIE_SLOT_DIRECTIONS[index], PIE_EXPECTED_SLOTS[index],
+                  PIE_EXPECTED_ICONS[index]),
+              icons[index])
+    check([icon for _idname, icon in icons[:7]] == list(PIE_EXPECTED_ICONS[:7]),
+          "槽位 0~6（其余 7 项）的图标与 2.22.1 完全一致（一字未动）",
+          [icon for _idname, icon in icons[:7]])
+    check(icons[7][1] == "MESH_CUBE" if len(icons) > 7 else False,
+          "槽位 7 的图标是 MESH_CUBE（4.0.2 与 5.2.2 都存在，test_icons 也会查）",
+          icons[7] if len(icons) > 7 else icons)
 
     # ---- 数量与集合：与顺序断言分开写 ----
     found = set(operators_in_order)
@@ -5836,11 +6497,12 @@ def test_pie_unchanged(module):
         "hhz.remove_all_modifiers",
         "hhz.stairs",
     }
-    added_before = {"hhz.flip_normals", "hhz.toggle_face_orientation"}
+    added_before = {"hhz.flip_normals"}
     check(len(found) == 8, "饼菜单正好 8 个算符", sorted(found))
     check(found == expected_before | added_before
-          | {"hhz.select_active_camera", "hhz.hide_cutters"},
-          "饼菜单 = 原有 6 项 + 一键选中当前相机 + 一键隐藏刀具", sorted(found))
+          | {"hhz.select_active_camera", "hhz.hide_cutters", "hhz.show_cutters"},
+          "饼菜单 = 原有 5 项 + 翻面 + 一键选中当前相机 + 一键隐藏刀具 + 一键恢复正常刀具",
+          sorted(found))
     for idname in sorted(expected_before):
         check(idname in found, "原有的 {} 仍在饼菜单里".format(idname), sorted(found))
     for idname in sorted(added_before):
@@ -5848,19 +6510,23 @@ def test_pie_unchanged(module):
     check("hhz.select_active_camera" in found,
           "原有的 hhz.select_active_camera 在饼菜单里", sorted(found))
     check("hhz.hide_cutters" in found,
-          "2.22.1 起 hhz.hide_cutters 在饼菜单里（槽位 5 右上）", sorted(found))
+          "hhz.hide_cutters 在饼菜单里（槽位 5 右上）", sorted(found))
+    check("hhz.show_cutters" in found,
+          "2.23.0 起 hhz.show_cutters 在饼菜单里（槽位 7 右下）", sorted(found))
+    check("hhz.toggle_face_orientation" not in found,
+          "「一键查看面朝向」已经从饼菜单移除（不在任何槽位里）", sorted(found))
     check("hhz.grayscale_filter" not in found,
           "灰度滤镜不在饼菜单里（只剩 N 面板那一处按钮）", sorted(found))
     check(len(found & expected_before) == 4, "原有 4 项一个不少", sorted(found & expected_before))
-    check(expected_before | added_before <= found, "原有 6 项一个不少（位置与集合都没丢）",
+    check(expected_before | added_before <= found, "原有 5 项一个不少（位置与集合都没丢）",
           sorted(found))
-    # 2.22.1 的「其余 7 项一字不动」：单独断言新表去掉槽位 5 后与原 7 项完全一致
+    # 2.23.0 的「其余 7 项一字不动」：单独断言新表去掉槽位 7 后与原 7 项完全一致
     before_counts = [name for name in operators_in_order
-                     if name != "hhz.hide_cutters"]
-    check(tuple(before_counts) == PIE_OPERATORS_BEFORE_2180,
-          "除槽位 5 之外的其余 7 项位置与顺序一字未动",
+                     if name != "hhz.show_cutters"]
+    check(tuple(before_counts) == PIE_OPERATORS_BEFORE_2230,
+          "除槽位 7 之外的其余 7 项位置与顺序一字未动",
           before_counts)
-    check(set(PIE_OPERATORS_BEFORE_2180) <= found, "原有 7 项一个不少（含重复算符）",
+    check(set(PIE_OPERATORS_BEFORE_2230) <= found, "原有 7 项一个不少（含重复算符）",
           sorted(found))
 
     # ---- 既有意图保持：检测反面不进饼菜单 ----
@@ -5874,6 +6540,12 @@ def test_pie_unchanged(module):
           "「检测是否有反面」在建模页主面板里（没有新增面板）", sorted(in_modeling))
     check("hhz.toggle_face_orientation" in in_modeling,
           "「一键查看面朝向」在建模页主面板里（与检测按钮相邻）", sorted(in_modeling))
+    check(source.count('"hhz.toggle_face_orientation"') == 1,
+          "全插件只有一处画「查看面朝向」按钮（就是 N 面板 ▸ 建模页那一处）",
+          source.count('"hhz.toggle_face_orientation"'))
+    check("hhz.show_cutters" in in_modeling,
+          "「恢复正常刀具」在建模页主面板里（与隐藏刀具同一 column，没有新增面板）",
+          sorted(in_modeling))
     check("hhz.grayscale_filter" in in_modeling,
           "灰度滤镜按钮在建模页主面板里（与翻面那一组同一个 column）", sorted(in_modeling))
     check('column.operator("hhz.grayscale_filter"' in source,
@@ -5914,6 +6586,10 @@ def test_pie_unchanged(module):
           "draw() 附近写明了方位映射 0=左 … 7=右下")
     check("空位" in pie_class or "占位" in pie_class,
           "draw() 附近写明了空位要用占位项顶住（2.18.0 起 8 个方位已填满）")
+    check("\u00b7" not in pie_class, "饼菜单源码段里没有中点号 U+00B7")
+    check("\u00b7" not in main_class, "建模页主面板源码段里没有中点号 U+00B7")
+    check("2.23.0" in pie_class,
+          "draw() 附近写明了 2.23.0 这次槽位 7 的替换（便于后人追溯）")
 
 
 def test_view_camera_resolution(module):
@@ -8088,6 +8764,8 @@ def main():
     run("算符 poll（翻面 / 检测）", test_flip_and_detect_poll, module)
     run("纯函数：刀具识别（布尔引用 / 线框+命名 / 仅名字）", test_hide_cutters_pure, module)
     run("一键隐藏刀具（饼项按偏好 / 面板两种显式目标）", test_hide_cutters, module)
+    run("纯函数：刀具恢复（同一套判据 / 集合不可渲染只读报告）", test_show_cutters_pure, module)
+    run("一键恢复正常刀具（往返对称 / 三种目标 / 集合不可渲染）", test_show_cutters, module)
     run("检查并修复缺失文件", test_fix_missing_files, module)
     run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
@@ -8105,7 +8783,7 @@ def main():
     run("第 4 个预设「自定义预设」", test_custom_preset, module)
     run("颜色项两级短选择（可达性不变式）", test_target_selector, module)
     run("主题页 UI 约定（ZML_LAB）", test_theme_ui_conventions, module)
-    run("饼菜单方位（2.22.1 右上换成一键隐藏刀具、灰度滤镜挪到 N 面板）", test_pie_unchanged, module)
+    run("饼菜单方位（2.23.0 右下换成恢复刀具、面朝向只留 N 面板）", test_pie_unchanged, module)
     run("纯函数：当前视角相机解析", test_view_camera_resolution, module)
     run("一键选中当前相机（饼菜单左上）", test_select_active_camera, module)
     run("灰度滤镜（N 面板 ▸ 建模，只有一处）", test_grayscale_filter, module)
