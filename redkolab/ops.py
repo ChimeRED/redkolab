@@ -849,6 +849,21 @@ CUTTER_TARGET_ITEMS = (
 #: 刀具算符最近一次的汇总（真机测试直接断言它，不去解析 report 文本）
 _LAST_CUTTER_RUN = {}
 
+#: 物体属性 ▸ 射线可见性 的六项开关（`(RNA 属性名, 中文名)`）。
+#:
+#: 2.23.1 修的真实缺陷：HardOps / Boxcutter 造出来的刀具这些标志**常常是关的**
+#: （尤其 `visible_camera`），而「刀具恢复正常物体」2.23.0 之前只改显示类型 /
+#: 隐藏 / `hide_render` —— 在 Cycles 里相机**依然拍不到**它，用户实测确认。
+#: 所以恢复动作里补上「六项全部设为 True」这一步。
+CUTTER_RAY_VISIBILITY_FLAGS = (
+    ("visible_camera", "摄像机"),
+    ("visible_diffuse", "漫射"),
+    ("visible_glossy", "光泽"),
+    ("visible_transmission", "透射"),
+    ("visible_volume_scatter", "体积散射"),
+    ("visible_shadow", "阴影"),
+)
+
 
 def cutter_name_matches(name):
     """名字里是否含刀具关键词 —— **纯函数**，不区分大小写。"""
@@ -1133,6 +1148,124 @@ def cutter_restore_targets(context, mode):
     return _merge_objects(targets, hidden), "{} + 视图层里隐藏的物体".format(label)
 
 
+def empty_ray_visibility_summary():
+    """没跑任何刀具时的射线可见性空汇总（早退分支与报告共用，避免各写一份）。
+
+    每次返回**新的**字典 —— 共用同一个可变字典会让两次运行的计数互相污染。
+    """
+    return {
+        "flags": 0,
+        "opened": 0,
+        "objects": 0,
+        "objects_with_blocking": 0,
+        "unsupported": [],
+        "failed": [],
+    }
+
+
+def cutter_ray_visibility(obj):
+    """把单个物体的射线可见性六项全部设为 ``True`` —— **先读原值、写后读回校验**。
+
+    逐项处理，某一项在目标版本上不存在（``hasattr`` 为假）就记进 ``unsupported``
+    并跳过，**不让一个缺失属性把整批拖崩**，也不谎报成「已打开」。
+
+    返回字典：
+
+    * ``flags``       实际处理（该版本存在）的标志项数；
+    * ``opened``      本来关着、这次打开且**读回确实是 True** 的属性名（就是「遮挡标志」）；
+    * ``already``     本来就已是 ``True`` 的属性名；
+    * ``unsupported`` 该版本上不存在的属性名；
+    * ``failed``      写入抛异常或读回不是 ``True`` 的属性名。
+
+    只在这六个开关上写，不碰物体任何别的属性（判定「谁算刀具」仍由
+    ``detect_cutters`` 负责，本函数只认传进来的物体）。
+    """
+    opened = []
+    already = []
+    unsupported = []
+    failed = []
+    for attribute, _label in CUTTER_RAY_VISIBILITY_FLAGS:
+        if not hasattr(obj, attribute):
+            unsupported.append(attribute)
+            continue
+        try:
+            was_on = bool(getattr(obj, attribute))
+        except Exception:
+            failed.append(attribute)
+            continue
+        if was_on:
+            already.append(attribute)
+        try:
+            setattr(obj, attribute, True)
+        except Exception:
+            failed.append(attribute)
+            continue
+        try:
+            readback = getattr(obj, attribute)
+        except Exception:
+            failed.append(attribute)
+            continue
+        if readback is not True:
+            failed.append(attribute)
+            continue
+        if not was_on:
+            opened.append(attribute)
+    return {
+        "name": getattr(obj, "name", "?") or "?",
+        "flags": len(opened) + len(already),
+        "opened": opened,
+        "already": already,
+        "unsupported": unsupported,
+        "failed": failed,
+    }
+
+
+def summarize_cutter_ray_visibility(results):
+    """把逐个物体的射线可见性结果压成一份汇总 —— **纯函数**（不 import bpy）。
+
+    ``opened`` 是"原本关着、这次被打开"的**项**总数（报告里的 Y）；
+    ``objects_with_blocking`` 是"至少有一项原本关着"的**物体**数（报告里的 X）。
+    ``unsupported`` / ``failed`` 按属性名去重，报告里好逐个点名。
+    """
+    summary = empty_ray_visibility_summary()
+    for result in results or ():
+        if not result:
+            continue
+        summary["objects"] += 1
+        summary["flags"] += int(result.get("flags", 0) or 0)
+        opened = list(result.get("opened") or ())
+        summary["opened"] += len(opened)
+        if opened:
+            summary["objects_with_blocking"] += 1
+        for key in ("unsupported", "failed"):
+            for attribute in result.get(key) or ():
+                if attribute not in summary[key]:
+                    summary[key].append(attribute)
+    return summary
+
+
+def describe_ray_visibility(summary):
+    """「射线可见性已全开」那一段的中文报告 —— **纯函数**（不 import bpy）。
+
+    形如「射线可见性已全开（其中 2 个原本有 9 项遮挡标志）」；有属性缺失 / 写入
+    失败时**如实追加**，不假装全部打开。UI 文案里没有中点号 U+00B7。
+    """
+    summary = summary or {}
+    text = "射线可见性已全开（其中 {} 个原本有 {} 项遮挡标志）".format(
+        int(summary.get("objects_with_blocking", 0) or 0),
+        int(summary.get("opened", 0) or 0),
+    )
+    unsupported = list(summary.get("unsupported") or ())
+    if unsupported:
+        text = "{}；{} 项在该版本上不存在，已跳过（{}）".format(
+            text, len(unsupported), "、".join(unsupported))
+    failed = list(summary.get("failed") or ())
+    if failed:
+        text = "{}；{} 项写入失败（{}）".format(
+            text, len(failed), "、".join(failed))
+    return text
+
+
 def cutter_render_blockers(context, cutters):
     """如实列出「物体已经恢复、但集合层面还是渲染不出来」的情况 —— **只读**。
 
@@ -1163,7 +1296,12 @@ def cutter_render_blockers(context, cutters):
 
 
 def describe_restore_cutters_report(counts, blockers):
-    """把「恢复正常物体」的统计压成一行中文报告（集合不可渲染要**逐个点名**）。"""
+    """把「恢复正常物体」的统计压成一行中文报告（集合不可渲染要**逐个点名**）。
+
+    2.23.1 起：``counts`` 里带 ``ray``（射线可见性汇总）时，末尾再追加一段
+    「射线可见性已全开（其中 X 个原本有 Y 项遮挡标志）」。不带 ``ray`` 时输出与
+    2.23.0 **逐字相同**（纯函数用例可以只测计数部分）。
+    """
     text = ("已恢复 {} 个刀具为正常物体：改实体显示 {} 个、已是实体 {} 个、"
             "开启渲染 {} 个；跳过非网格 {} 个、失败 {} 个").format(
         int(counts.get("restored", 0) or 0),
@@ -1174,25 +1312,26 @@ def describe_restore_cutters_report(counts, blockers):
         int(counts.get("failed", 0) or 0),
     )
     blockers = list(blockers or ())
-    if not blockers:
-        return text
-
-    names = []
-    for item in blockers:
-        for name in item.get("collections") or ():
-            if name not in names:
-                names.append(name)
-    details = []
-    if names:
-        details.append("集合「{}」被设为不渲染".format("」「".join(names)))
-    out_of_layer = [item.get("name") or "?" for item in blockers
-                    if not item.get("in_view_layer", True)]
-    if out_of_layer:
-        details.append("不在当前视图层：{}".format("、".join(out_of_layer)))
-    if not details:
-        return text
-    return "{}；另有 {} 个刀具所在集合不可渲染（{}），需单独处理".format(
-        text, len(blockers), "；".join(details))
+    if blockers:
+        names = []
+        for item in blockers:
+            for name in item.get("collections") or ():
+                if name not in names:
+                    names.append(name)
+        details = []
+        if names:
+            details.append("集合「{}」被设为不渲染".format("」「".join(names)))
+        out_of_layer = [item.get("name") or "?" for item in blockers
+                        if not item.get("in_view_layer", True)]
+        if out_of_layer:
+            details.append("不在当前视图层：{}".format("、".join(out_of_layer)))
+        if details:
+            text = "{}；另有 {} 个刀具所在集合不可渲染（{}），需单独处理".format(
+                text, len(blockers), "；".join(details))
+    ray = counts.get("ray")
+    if ray is not None:
+        text = "{}；{}".format(text, describe_ray_visibility(ray))
+    return text
 
 
 class HHZ_OT_hide_cutters(_BaseTargetsOperator):
@@ -1294,12 +1433,14 @@ class HHZ_OT_hide_cutters(_BaseTargetsOperator):
 
 
 class HHZ_OT_show_cutters(_BaseTargetsOperator):
-    """一键把刀具变回正常物体（实体显示 + 可见 + 可渲染）。
+    """一键把刀具变回正常物体（实体显示 + 可见 + 可渲染 + 射线可见性全开）。
 
     判据与「一键隐藏刀具」是**同一套**：``cutter_reference_map`` 扫布尔引用，
     ``detect_cutters`` 按 A / B / C 优先级认刀具 —— 不是另写一套识别逻辑。
-    只做五件事：``display_type = 'TEXTURED'``、``show_wire = False``、
-    ``hide_set(False)``、``hide_viewport = False``、``hide_render = False``；
+    只做六件事：``display_type = 'TEXTURED'``、``show_wire = False``、
+    ``hide_set(False)``、``hide_viewport = False``、``hide_render = False``、
+    射线可见性六项全设为 ``True``（2.23.1 补上最后一件 —— 少了它刀具有可能在
+    Cycles 里相机依然拍不到）；
     不应用 / 不改布尔修改器、不删物体、不改选择、不动材质。
     """
 
@@ -1307,9 +1448,9 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
     bl_label = "刀具恢复正常物体"
     bl_description = (
         "把目标里被布尔切割用的刀具物体变回正常物体（实体显示、关掉线框、取消隐藏、"
-        "允许渲染）：判据与「一键隐藏刀具」完全相同：优先认被布尔修改器引用的物体，"
-        "其次认线框显示且名字像刀具的物体，两者都没命中时才仅按名字推断；"
-        "只改显示与可见性，不应用也不改布尔修改器、不删物体、不改选择、不动材质"
+        "允许渲染、射线可见性六项全开）：判据与「一键隐藏刀具」完全相同：优先认被布尔"
+        "修改器引用的物体，其次认线框显示且名字像刀具的物体，两者都没命中时才仅按名字"
+        "推断；只改显示与可见性，不应用也不改布尔修改器、不删物体、不改选择、不动材质"
     )
 
     target_mode: bpy.props.EnumProperty(
@@ -1338,6 +1479,10 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
                 "skipped_non_mesh": 0, "skipped_hidden": 0,
                 "details": [], "failures": [], "blockers": [],
                 "blocked_collections": [], "report": "",
+                "ray": empty_ray_visibility_summary(),
+                "ray_flags": 0, "ray_opened": 0,
+                "ray_objects_with_blocking": 0,
+                "ray_unsupported": [], "ray_failed": [],
             }
             self.report({'WARNING'}, "{}里没有可检查的物体".format(target_label))
             return {'CANCELLED'}
@@ -1354,6 +1499,7 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
         failed = 0
         failures = []
         details = []
+        ray_results = []
         for item in cutters:
             obj = item["object"]
             was_textured = getattr(obj, "display_type", "") == 'TEXTURED'
@@ -1381,13 +1527,26 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
                 textured += 1
             if not was_render:
                 render_on += 1
+            # 2.23.1 补的第六件事：射线可见性六项全开。
+            # 只对**已识别为刀具**、上面五项已恢复成功的物体做 —— 非刀具进不到这里。
+            # cutter_ray_visibility 内部逐项 hasattr / 读原值 / 写 / 读回校验，
+            # 单个属性缺失或写入失败只计入自己的清单，不拖垮整批。
+            try:
+                ray = cutter_ray_visibility(obj)
+            except Exception as error:
+                ray = {"name": item["name"], "flags": 0, "opened": [], "already": [],
+                       "unsupported": [], "failed": ["cutter_ray_visibility:{}".format(error)]}
+            ray["name"] = item["name"]
+            ray_results.append(ray)
             details.append({"name": item["name"], "reason": item["reason"],
                             "referenced_by": list(item["referenced_by"]),
                             "ok": True, "already_textured": was_textured,
-                            "render_enabled": not was_render})
+                            "render_enabled": not was_render,
+                            "ray": ray})
 
         # 集合层面的问题只能如实报告，绝不擅自改集合设置
         blockers = cutter_render_blockers(context, cutters)
+        ray_summary = summarize_cutter_ray_visibility(ray_results)
         counts = {
             "restored": restored,
             "textured": textured,
@@ -1395,6 +1554,7 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
             "render_on": render_on,
             "skipped_non_mesh": stats["skipped_non_mesh"],
             "failed": failed,
+            "ray": ray_summary,
         }
 
         if not cutters:
@@ -1414,6 +1574,10 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
                 "skipped_non_mesh": stats["skipped_non_mesh"], "skipped_hidden": 0,
                 "details": [], "failures": [], "blockers": [],
                 "blocked_collections": [], "report": text,
+                "ray": empty_ray_visibility_summary(),
+                "ray_flags": 0, "ray_opened": 0,
+                "ray_objects_with_blocking": 0,
+                "ray_unsupported": [], "ray_failed": [],
             }
             self.report({'INFO'}, text)
             return {'CANCELLED'}
@@ -1446,11 +1610,23 @@ class HHZ_OT_show_cutters(_BaseTargetsOperator):
             "blockers": blockers,
             "blocked_collections": blocked_collections,
             "report": text,
+            "ray": ray_summary,
+            "ray_flags": ray_summary["flags"],
+            "ray_opened": ray_summary["opened"],
+            "ray_objects_with_blocking": ray_summary["objects_with_blocking"],
+            "ray_unsupported": list(ray_summary["unsupported"]),
+            "ray_failed": list(ray_summary["failed"]),
         }
 
         if failures:
             for line in failures:
                 print("[{} 刀具] 恢复失败：{}".format(compat.ADDON_NAME, line))
+        if ray_summary["unsupported"]:
+            print("[{} 刀具] 射线可见性：这些属性在该 Blender 版本上不存在，已跳过：{}"
+                  .format(compat.ADDON_NAME, "、".join(ray_summary["unsupported"])))
+        if ray_summary["failed"]:
+            print("[{} 刀具] 射线可见性：这些属性写入后读回不是 True，需单独处理：{}"
+                  .format(compat.ADDON_NAME, "、".join(ray_summary["failed"])))
         for blocker in blockers:
             if blocker["collections"]:
                 print("[{} 刀具] 物体已恢复，但其所在集合「{}」被设为不渲染，需单独处理：{}"

@@ -2068,6 +2068,201 @@ def test_show_cutters_pure(module):
         check(merge(None, []) == [], "_merge_objects 处理 None / 空输入时返回空列表")
 
 
+#: 射线可见性的六项 RNA 属性名 —— 测试里**独立抄一份**当预期值（不读插件常量当答案，
+#: 否则把常量改错也测不出来）。顺序与用户配图里的「摄像机 / 漫射 / 光泽 / 透射 /
+#: 体积散射 / 阴影」一致。
+_RAY_FLAG_NAMES = (
+    "visible_camera",
+    "visible_diffuse",
+    "visible_glossy",
+    "visible_transmission",
+    "visible_volume_scatter",
+    "visible_shadow",
+)
+
+
+class _FakeRayObject(object):
+    """纯函数用例用的假物体：只带射线可见性六项，完全不需要 bpy。
+
+    ``missing`` 里的属性**根本不创建**（模拟目标版本上不存在，``hasattr`` 为假）；
+    ``broken`` 里的属性**写入即抛异常**（模拟只读 / 库数据）。
+    """
+
+    def __init__(self, name, values=None, missing=(), broken=()):
+        object.__setattr__(self, "_broken", set(broken))
+        object.__setattr__(self, "_ready", False)
+        self.name = name
+        mapping = dict(values or {})
+        for attribute in _RAY_FLAG_NAMES:
+            if attribute in set(missing):
+                continue
+            object.__setattr__(self, attribute, bool(mapping.get(attribute, True)))
+        object.__setattr__(self, "_ready", True)
+
+    def __setattr__(self, name, value):
+        if getattr(self, "_ready", False) and name in self._broken:
+            raise AttributeError("只读属性（模拟库数据）")
+        object.__setattr__(self, name, value)
+
+
+def test_ray_visibility_pure(module):
+    section("纯函数：射线可见性六项（读原值 / 写后读回 / 缺失跳过 / 汇总与报告）")
+    ops = module.ops
+    apply_flags = getattr(ops, "cutter_ray_visibility", None)
+    summarize = getattr(ops, "summarize_cutter_ray_visibility", None)
+    describe_ray = getattr(ops, "describe_ray_visibility", None)
+    describe_restore = getattr(ops, "describe_restore_cutters_report", None)
+    empty_summary = getattr(ops, "empty_ray_visibility_summary", None)
+    declared = getattr(ops, "CUTTER_RAY_VISIBILITY_FLAGS", None)
+    check(all((apply_flags, summarize, describe_ray, describe_restore, empty_summary,
+               declared is not None)),
+          "cutter_ray_visibility / summarize_cutter_ray_visibility / "
+          "describe_ray_visibility / empty_ray_visibility_summary 都存在")
+    if not all((apply_flags, summarize, describe_ray, describe_restore, empty_summary,
+                declared is not None)):
+        return
+
+    check([name for name, _label in declared] == list(_RAY_FLAG_NAMES),
+          "六项清单就是摄像机 / 漫射 / 光泽 / 透射 / 体积散射 / 阴影，顺序一致",
+          [name for name, _label in declared])
+    check([label for _name, label in declared]
+          == ["摄像机", "漫射", "光泽", "透射", "体积散射", "阴影"],
+          "六项的中文名与用户配图逐项对应",
+          [label for _name, label in declared])
+    check(all(re.match(r"^visible_[a-z_]+$", name) for name, _label in declared),
+          "六项属性名都是 visible_* 形式的纯 ASCII RNA 属性名",
+          [name for name, _label in declared])
+
+    ops_source = source_of(module, "ops.py")
+    for function_name, label in (
+            ("cutter_ray_visibility", "逐项开关"),
+            ("summarize_cutter_ray_visibility", "汇总"),
+            ("describe_ray_visibility", "报告文案"),
+            ("empty_ray_visibility_summary", "空汇总")):
+        check(not _bpy_references_in(ops_source, function_name),
+              "{} 的函数体里没有出现 bpy（可脱离 Blender 直接测）".format(label))
+
+    # ---- ① 六项本来就全开：不许谎报成「打开了」 ----
+    all_on = _FakeRayObject("全开刀", {name: True for name in _RAY_FLAG_NAMES})
+    result = apply_flags(all_on)
+    check(result["flags"] == 6, "六项本来就全开：flags 记 6 项", result)
+    check(result["opened"] == [] and len(result["already"]) == 6,
+          "六项本来就全开：opened 为空、已开的六项记进 already（不谎报成打开了）", result)
+    check(result["unsupported"] == [] and result["failed"] == [],
+          "六项本来就全开：没有「不支持」也没有「失败」", result)
+
+    # ---- ② 六项全关（Boxcutter 产物）：读原值 -> 写 -> 读回 ----
+    all_off = _FakeRayObject("全关刀", {name: False for name in _RAY_FLAG_NAMES})
+    result = apply_flags(all_off)
+    check(sorted(result["opened"]) == sorted(_RAY_FLAG_NAMES),
+          "六项本来全关：六项都记进 opened（说明原值真的被读了）", result)
+    check(all(getattr(all_off, name) is True for name in _RAY_FLAG_NAMES),
+          "六项本来全关：写完之后逐个读回都是 True（读回校验）")
+    check(result["failed"] == [], "六项本来全关：没有读回失败的项", result)
+
+    # ---- ③ 混合（摄像机 / 漫射 / 透射 关，光泽 / 体积散射 / 阴影 开）----
+    mixed = _FakeRayObject("混合刀", {
+        "visible_camera": False, "visible_diffuse": False, "visible_glossy": True,
+        "visible_transmission": False, "visible_volume_scatter": True,
+        "visible_shadow": True,
+    })
+    result = apply_flags(mixed)
+    check(sorted(result["opened"]) == ["visible_camera", "visible_diffuse",
+                                       "visible_transmission"],
+          "混合状态：只有原本关着的那三项进 opened", result)
+    check(sorted(result["already"]) == ["visible_glossy", "visible_shadow",
+                                        "visible_volume_scatter"],
+          "混合状态：原本开着的三项进 already", result)
+    check(all(getattr(mixed, name) is True for name in _RAY_FLAG_NAMES),
+          "混合状态：六项最终都是 True")
+
+    # ---- ④ 目标版本上不存在某一项：跳过并计入 unsupported，不整体崩 ----
+    missing = _FakeRayObject("缺一项刀", missing=("visible_shadow",))
+    result = apply_flags(missing)
+    check(result["unsupported"] == ["visible_shadow"],
+          "属性不存在时用 hasattr 判定，记进 unsupported 并跳过", result)
+    check(result["flags"] == 5, "不存在的项不算进 flags（不假装处理过）", result)
+    check(not hasattr(missing, "visible_shadow"),
+          "不存在的属性确实没被写出来（不是伪造一个）")
+    check(all(getattr(missing, name) is True
+              for name in _RAY_FLAG_NAMES if name != "visible_shadow"),
+          "一个属性缺失不拖垮其余五项（其余五项照样全开）")
+
+    # ---- ⑤ 写入抛异常：记进 failed，不整体崩，也不报成已打开 ----
+    broken = _FakeRayObject("只读刀", {"visible_camera": False},
+                            broken=("visible_camera",))
+    result = apply_flags(broken)
+    check(result["failed"] == ["visible_camera"],
+          "写入抛异常时记进 failed（不整体崩）", result)
+    check(broken.visible_camera is False,
+          "写不进去的那项保持原值（没有假装成功）", broken.visible_camera)
+    check("visible_camera" not in result["opened"],
+          "写失败的项不会被记成「已打开」", result)
+    check(all(getattr(broken, name) is True
+              for name in _RAY_FLAG_NAMES if name != "visible_camera"),
+          "一项写入失败不拖垮其余五项")
+
+    # ---- 汇总：X 个物体 / Y 项遮挡标志 ----
+    off_again = apply_flags(_FakeRayObject("全关刀二", {n: False for n in _RAY_FLAG_NAMES}))
+    one_again = apply_flags(_FakeRayObject("只关摄像机", {"visible_camera": False}))
+    summary = summarize([off_again, one_again])
+    check(summary["objects"] == 2 and summary["flags"] == 12,
+          "汇总：2 个物体、12 项标志", summary)
+    check(summary["opened"] == 7,
+          "汇总：原本关着的项数 = 6 + 1 = 7（报告里的 Y）", summary)
+    check(summary["objects_with_blocking"] == 2,
+          "汇总：两个物体都至少有一项原本关着（报告里的 X）", summary)
+    check(summarize([]) == empty_summary(), "汇总：空输入返回空汇总")
+    check(summarize(None)["opened"] == 0, "汇总：None 输入也安全")
+    check(empty_summary() is not empty_summary(),
+          "空汇总每次返回新字典（两次运行不会互相污染）")
+    only_none_blocking = summarize([apply_flags(_FakeRayObject("全开刀二"))])
+    check(only_none_blocking["objects_with_blocking"] == 0
+          and only_none_blocking["opened"] == 0,
+          "汇总：六项本来就全开时 X 与 Y 都是 0（幂等的判据）", only_none_blocking)
+    with_unsupported = summarize([apply_flags(_FakeRayObject("借刀", missing=("visible_shadow",)))])
+    check(with_unsupported["unsupported"] == ["visible_shadow"],
+          "汇总：不支持项按属性名去重后留档", with_unsupported)
+    duplicated = summarize([{"flags": 0, "opened": [], "unsupported": ["visible_shadow"]},
+                            {"flags": 0, "opened": [], "unsupported": ["visible_shadow"]}])
+    check(duplicated["unsupported"] == ["visible_shadow"],
+          "汇总：多个物体同一项不支持时只留一条", duplicated)
+
+    # ---- 报告文案 ----
+    text = describe_ray(summary)
+    check(text == "射线可见性已全开（其中 2 个原本有 7 项遮挡标志）",
+          "报告就是「射线可见性已全开（其中 X 个原本有 Y 项遮挡标志）」", text)
+    check("\u00b7" not in text, "射线可见性报告里没有中点号 U+00B7")
+    text = describe_ray(with_unsupported)
+    check("1 项在该版本上不存在，已跳过" in text and "visible_shadow" in text,
+          "有属性缺失时报告里如实点名并写明已跳过（不假装全部打开）", text)
+    check("\u00b7" not in text, "带「不支持」的报告里也没有中点号 U+00B7")
+    broken_summary = summarize([apply_flags(_FakeRayObject("坏二", broken=("visible_glossy",)))])
+    text = describe_ray(broken_summary)
+    check("1 项写入失败" in text and "visible_glossy" in text,
+          "有写入失败时报告里如实点名", text)
+    check("\u00b7" not in text, "带「写入失败」的报告里也没有中点号 U+00B7")
+
+    # ---- 与既有的「恢复正常物体」报告拼接 ----
+    counts = {"restored": 2, "textured": 1, "already_textured": 1, "render_on": 0,
+              "skipped_non_mesh": 0, "failed": 0}
+    without_ray = describe_restore(counts, [])
+    check("射线可见性" not in without_ray,
+          "不带 ray 汇总时输出与 2.23.0 逐字相同（不多加那一段）", without_ray)
+    counts_with_ray = dict(counts)
+    counts_with_ray["ray"] = summary
+    with_ray = describe_restore(counts_with_ray, [])
+    check(with_ray == "{}；射线可见性已全开（其中 2 个原本有 7 项遮挡标志）".format(
+        without_ray), "带上 ray 汇总时在末尾追加一段（与既有文案用「；」隔开）", with_ray)
+    check("\u00b7" not in with_ray, "拼起来的完整报告里也没有中点号 U+00B7")
+    blocked_text = describe_restore(
+        counts_with_ray, [{"name": "刀一", "collections": ["不渲染组"],
+                           "in_view_layer": True}])
+    check("不可渲染" in blocked_text and "需单独处理" in blocked_text
+          and "射线可见性已全开" in blocked_text,
+          "既有的「集合不可渲染」那段与新的射线段能共存", blocked_text)
+
+
 def test_show_cutters(module):
     section("功能：一键把刀具变回正常物体（往返对称 + 同一套判据 + 集合不可渲染如实报告）")
     ops = module.ops
@@ -2541,6 +2736,284 @@ def test_show_cutters(module):
     check(not [obj for obj in bpy.data.objects
                if "Cutter" in obj.name or "刀具" in obj.name],
           "收尾清理：测试建的刀具物体已删掉")
+
+
+def test_show_cutters_ray_visibility(module):
+    section("功能：刀具恢复必须打开射线可见性六项（缺陷：Boxcutter 产物在 Cycles 里拍不到）")
+    ops = module.ops
+    declared = list(getattr(ops, "CUTTER_RAY_VISIBILITY_FLAGS", ()) or ())
+    check(len(declared) == 6, "六项射线可见性清单存在且正好六项", declared)
+    if len(declared) != 6:
+        return
+    attribute_names = [name for name, _label in declared]
+
+    reset_scene()
+    bpy.context.view_layer.active_layer_collection = (
+        bpy.context.view_layer.layer_collection)
+
+    # ================= 构造真实缺陷场景 =================
+    body = add_cube("RayBody被切主体")
+    cutter_all_on = add_cube("RayCutter全开")
+    cutter_all_off = add_cube("RayCutter全关")
+    cutter_mixed = add_cube("RayCutter混合")
+    cutters = [cutter_all_on, cutter_all_off, cutter_mixed]
+    for obj in cutters:
+        obj.display_type = 'WIRE'          # 判据 B：线框 + 名字像刀具
+    boolean = body.modifiers.new("射线布尔", 'BOOLEAN')
+    boolean.operation = 'DIFFERENCE'
+    boolean.operand_type = 'OBJECT'
+    boolean.object = cutter_all_on          # 判据 A：被布尔引用
+
+    plain_block = add_cube("Ray普通实体块")
+    plain_wire = add_cube("Ray普通线框显示")
+    plain_wire.display_type = 'WIRE'
+    light = make_light("RayCutterLightHelper")
+    empty = bpy.data.objects.new("RayCutterEmptyHelper", None)
+    bpy.context.collection.objects.link(empty)
+    non_cutters = [body, plain_block, plain_wire, light, empty]
+
+    # 该版本上实际存在的六项（4.0.2 / 5.2.2 实测都有；缺了就 [skip] 并如实标注）
+    available = [name for name in attribute_names if hasattr(cutter_all_on, name)]
+    missing = [name for name in attribute_names if name not in available]
+    if missing:
+        skip("Blender {} 上不存在这些射线可见性属性，逐项断言按实际存在的 {} 项跑，"
+             "缺失项如实标注、不假装通过：{}".format(
+                 bpy.app.version_string, len(available), "、".join(missing)))
+    check(all(hasattr(cutter_all_on, name) for name in available),
+          "本版本上可用的 {} 项射线可见性属性逐个用 hasattr 确认存在".format(
+              len(available)), available)
+
+    def set_flags(obj, state):
+        """按 ``{属性名: 期望值}`` 摆好某个物体的六项（缺的属性跳过）。"""
+        for name in available:
+            setattr(obj, name, bool(state.get(name, True)))
+
+    # ① 六项已全开；② 六项全关（模拟 Boxcutter 产物）；③ 混合
+    set_flags(cutter_all_on, {name: True for name in available})
+    set_flags(cutter_all_off, {name: False for name in available})
+    mixed_off = [name for name in ("visible_camera", "visible_diffuse",
+                                   "visible_transmission") if name in available]
+    set_flags(cutter_mixed, {name: name not in mixed_off for name in available})
+
+    # 非刀具故意给各种状态（全 False / 全 True 混着放），确保「没被碰」是可证的
+    set_flags(body, {name: True for name in available})
+    set_flags(plain_block, {name: False for name in available})
+    set_flags(plain_wire, {name: True for name in available})
+    set_flags(light, {name: False for name in available})
+    set_flags(empty, {name: True for name in available})
+
+    def ray_snapshot(objects):
+        return {obj.name: {name: bool(getattr(obj, name)) for name in available}
+                for obj in objects}
+
+    before_cutters = ray_snapshot(cutters)
+    before_non_cutters = ray_snapshot(non_cutters)
+    # 预期值**从跑之前真实读到的原值算**，不写死（这样才是对报告的独立交叉校验）
+    expected_opened = sum(1 for obj in cutters for name in available
+                          if not before_cutters[obj.name][name])
+    expected_objects_with = sum(
+        1 for obj in cutters
+        if any(not before_cutters[obj.name][name] for name in available))
+    check(expected_opened == len(available) * 1 + len(mixed_off),
+          "场景摆对了：全关那把 {} 项 + 混合那把 {} 项 = 本来关着 {} 项".format(
+              len(available), len(mixed_off), expected_opened),
+          (expected_opened, len(available), len(mixed_off)))
+    check(expected_objects_with == 2,
+          "场景摆对了：三把刀里有两把带遮挡标志（全关 / 混合）", expected_objects_with)
+
+    select_only(cutters + non_cutters)
+    result = bpy.ops.hhz.show_cutters()
+    run_summary = ops._LAST_CUTTER_RUN
+    check(result == {'FINISHED'}, "射线可见性场景：恢复返回 FINISHED", result)
+    check(run_summary.get("kind") == "show", "汇总里标记了这次是「恢复」",
+          run_summary.get("kind"))
+    recognised = sorted(item["name"] for item in run_summary.get("details", ()))
+    check(recognised == sorted(obj.name for obj in cutters),
+          "只把这三把识别成刀具（非刀具不在识别结果里）", recognised)
+    reasons = {item["name"]: item["reason"] for item in run_summary.get("details", ())}
+    check(reasons.get(cutter_all_on.name) == ops.CUTTER_BY_MODIFIER
+          and reasons.get(cutter_all_off.name) == ops.CUTTER_BY_WIRE_NAME
+          and reasons.get(cutter_mixed.name) == ops.CUTTER_BY_WIRE_NAME,
+          "判据仍是原来那一套（A 布尔引用 / B 线框+命名），没有被改掉", reasons)
+
+    # ---- 3 x 6 = 18：每个刀具的六项逐个 is True ----
+    per_flag_checked = 0
+    for obj in cutters:
+        for name in available:
+            check(getattr(obj, name) is True,
+                  "恢复后 {} 的 {} is True（写后读回校验）".format(obj.name, name),
+                  getattr(obj, name))
+            per_flag_checked += 1
+    check(per_flag_checked == len(cutters) * len(available),
+          "逐物体逐项断言覆盖 3 把刀具 x {} 项 = {} 条（六项齐全时就是 18 条）".format(
+              len(available), per_flag_checked), per_flag_checked)
+
+    # ---- 非刀具 5 个物体 x 六项 = 30：与跑之前逐项相同 ----
+    after_non_cutters = ray_snapshot(non_cutters)
+    per_non_cutter_checked = 0
+    for obj in non_cutters:
+        for name in available:
+            check(after_non_cutters[obj.name][name]
+                  == before_non_cutters[obj.name][name],
+                  "非刀具 {} 的 {} 与跑之前逐项相同（一个都没被碰）".format(obj.name, name),
+                  (before_non_cutters[obj.name][name],
+                   after_non_cutters[obj.name][name]))
+            per_non_cutter_checked += 1
+    check(per_non_cutter_checked == len(non_cutters) * len(available),
+          "非刀具逐项断言覆盖 5 个物体 x {} 项 = {} 条".format(
+              len(available), per_non_cutter_checked), per_non_cutter_checked)
+    check(before_non_cutters == after_non_cutters,
+          "非刀具五件套的射线可见性整份快照也完全一致（没误伤）",
+          {name: (before_non_cutters[name], after_non_cutters[name])
+           for name in before_non_cutters
+           if before_non_cutters[name] != after_non_cutters[name]})
+
+    # ---- 计数与报告：X / Y 与真实原值一致 ----
+    ray_summary = run_summary.get("ray") or {}
+    check(ray_summary.get("objects") == 3,
+          "汇总：处理了 3 个刀具的射线可见性", ray_summary)
+    check(ray_summary.get("flags") == 3 * len(available),
+          "汇总：每个刀具的 {} 项都逐项处理过（{} 项）".format(
+              len(available), 3 * len(available)), ray_summary)
+    check(ray_summary.get("opened") == expected_opened,
+          "报告里的 Y（原本有 Y 项遮挡标志）== 跑之前真实读到的关闭项数 {}".format(
+              expected_opened), (ray_summary.get("opened"), expected_opened))
+    check(ray_summary.get("objects_with_blocking") == expected_objects_with,
+          "报告里的 X（X 个原本有遮挡标志）== 跑之前真实带遮挡的物体数 {}".format(
+              expected_objects_with),
+          (ray_summary.get("objects_with_blocking"), expected_objects_with))
+    check(run_summary.get("ray_opened") == expected_opened
+          and run_summary.get("ray_objects_with_blocking") == expected_objects_with,
+          "顶层 ray_opened / ray_objects_with_blocking 与汇总一致",
+          (run_summary.get("ray_opened"),
+           run_summary.get("ray_objects_with_blocking")))
+    check(run_summary.get("ray_unsupported") == []
+          and run_summary.get("ray_failed") == [],
+          "这个场景没有「不支持」也没有「写入失败」",
+          (run_summary.get("ray_unsupported"), run_summary.get("ray_failed")))
+    report = run_summary.get("report") or ""
+    expected_text = "射线可见性已全开（其中 {} 个原本有 {} 项遮挡标志）".format(
+        expected_objects_with, expected_opened)
+    check(expected_text in report,
+          "报告里写着「{}」".format(expected_text), report)
+    check("\u00b7" not in report, "报告里没有中点号 U+00B7")
+    for obj in cutters:
+        detail = {item["name"]: item for item in run_summary.get("details", ())}
+        detail_ray = (detail.get(obj.name) or {}).get("ray") or {}
+        expected_off = [name for name in available
+                        if not before_cutters[obj.name][name]]
+        check(sorted(detail_ray.get("opened") or ()) == sorted(expected_off),
+              "{} 的逐物体明细 opened 就是原本关着的那几项".format(obj.name),
+              (detail_ray.get("opened"), expected_off))
+
+    # ---- hide_cutters 绝不动这六个标志 ----
+    select_only(cutters)
+    before_hide = ray_snapshot(cutters)
+    hide_result = bpy.ops.hhz.hide_cutters()
+    hide_run = ops._LAST_CUTTER_RUN
+    check(hide_result == {'FINISHED'}, "隐藏刀具返回 FINISHED", hide_result)
+    check(sorted(obj.name for obj in cutters if obj.hide_get())
+          == sorted(obj.name for obj in cutters),
+          "三把刀具确实被隐藏了（隐藏本身生效）",
+          [obj.name for obj in cutters if obj.hide_get()])
+    after_hide = ray_snapshot(cutters)
+    for obj in cutters:
+        for name in available:
+            check(after_hide[obj.name][name] == before_hide[obj.name][name],
+                  "hide_cutters 之后 {} 的 {} 逐项不变（隐藏不动射线可见性）".format(
+                      obj.name, name),
+                  (before_hide[obj.name][name], after_hide[obj.name][name]))
+    check(before_hide == after_hide,
+          "hide_cutters 前后三把刀具的射线可见性整份快照完全一致",
+          {name: (before_hide[name], after_hide[name]) for name in before_hide
+           if before_hide[name] != after_hide[name]})
+    check(hide_run.get("kind") == "hide" and "ray" not in hide_run
+          and "ray_opened" not in hide_run,
+          "隐藏算符的汇总里根本没有射线可见性字段（结构上就没有这一步）",
+          sorted(hide_run))
+
+    # ---- 幂等：连跑两次，第二次「原本遮挡标志」必须是 0 ----
+    again_result = bpy.ops.hhz.show_cutters()
+    again_run = ops._LAST_CUTTER_RUN
+    check(again_result == {'FINISHED'}, "第二次恢复返回 FINISHED", again_result)
+    check(again_run.get("ray_opened") == 0,
+          "第二次运行「原本遮挡标志」计数为 0（第一次已全部打开）",
+          again_run.get("ray_opened"))
+    check(again_run.get("ray_objects_with_blocking") == 0,
+          "第二次运行没有物体再带遮挡标志",
+          again_run.get("ray_objects_with_blocking"))
+    check(again_run.get("ray_flags") == 3 * len(available),
+          "第二次仍然逐项处理了 3 x {} 项（不是跳过不查）".format(len(available)),
+          again_run.get("ray_flags"))
+    again_report = again_run.get("report") or ""
+    check("其中 0 个原本有 0 项遮挡标志" in again_report,
+          "第二次报告里那两个数字都是 0", again_report)
+    again_checked = 0
+    for obj in cutters:
+        for name in available:
+            check(getattr(obj, name) is True,
+                  "第二次运行后 {} 的 {} 仍是 True".format(obj.name, name),
+                  getattr(obj, name))
+            again_checked += 1
+    check(again_checked == 3 * len(available),
+          "第二次恢复后 3 x {} 项逐个复查通过".format(len(available)), again_checked)
+
+    # ---- 源码级：恢复算符里有这一步、隐藏算符里没有 ----
+    ops_source = ops_source_of(module)
+    show_src = class_source(ops_source, "HHZ_OT_show_cutters")
+    hide_src = class_source(ops_source, "HHZ_OT_hide_cutters")
+    apply_src = function_source(ops_source, "cutter_ray_visibility")
+    check("cutter_ray_visibility(" in show_src,
+          "源码级：恢复算符的恢复动作里真的调用了 cutter_ray_visibility")
+    check("detect_cutters(" in show_src and "include_hidden=True" in show_src,
+          "源码级：判据仍是同一个 detect_cutters（这一步只是追加，没有另写识别逻辑）")
+    for kept in ("display_type = 'TEXTURED'", "show_wire = False", "hide_set(False)",
+                 "hide_viewport = False", "hide_render = False"):
+        check(kept in show_src, "原来那五项一字未改：{}".format(kept), kept)
+    check("cutter_ray_visibility" not in hide_src and "ray" not in hide_src,
+          "源码级：隐藏算符里完全没提射线可见性")
+    for name in attribute_names:
+        check(name not in hide_src,
+              "源码级：隐藏算符里不出现 {}".format(name))
+    check(bool(apply_src), "能按函数边界取到 cutter_ray_visibility 的源码段")
+    # 六项属性名在模块级常量里（一份清单），函数遍历它 —— 两边都要核（按 AST 取字面量）
+    literal = []
+    for node in ast.walk(ast.parse(ops_source)):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name)
+                   and target.id == "CUTTER_RAY_VISIBILITY_FLAGS"
+                   for target in node.targets):
+            continue
+        if not isinstance(node.value, ast.Tuple):
+            continue
+        for element in node.value.elts:
+            if (isinstance(element, ast.Tuple) and element.elts
+                    and isinstance(element.elts[0], ast.Constant)):
+                literal.append(element.elts[0].value)
+    check(literal == list(_RAY_FLAG_NAMES),
+          "源码级：CUTTER_RAY_VISIBILITY_FLAGS 的字面量就是那六项、顺序一致", literal)
+    check("CUTTER_RAY_VISIBILITY_FLAGS" in apply_src,
+          "源码级：cutter_ray_visibility 遍历的是同一份六项清单（没有另写一套）",
+          apply_src[:120])
+    check("hasattr(obj, attribute)" in apply_src,
+          "源码级：用 hasattr 判断属性是否存在（缺了就跳过而不是崩）")
+    read_at = apply_src.find("was_on = bool(getattr(obj, attribute))")
+    write_at = apply_src.find("setattr(obj, attribute, True)")
+    readback_at = apply_src.find("readback = getattr(obj, attribute)")
+    check(0 <= read_at < write_at < readback_at,
+          "源码级：先读原值 -> 再写 -> 再读回校验，顺序固定",
+          (read_at, write_at, readback_at))
+    check("try:" in apply_src and "except Exception" in apply_src,
+          "源码级：逐项读 / 写 / 读回都包在 try/except 里（单个失败不整体崩）")
+
+    # ---- 收尾清理 ----
+    reset_scene()
+    check(not [obj for obj in bpy.data.objects
+               if obj.name.startswith("Ray") or "RayCutter" in obj.name],
+          "收尾清理：测试建的物体已删掉",
+          [obj.name for obj in bpy.data.objects])
+    reset_scene()
 
 
 def ops_source_of(module):
@@ -8765,7 +9238,11 @@ def main():
     run("纯函数：刀具识别（布尔引用 / 线框+命名 / 仅名字）", test_hide_cutters_pure, module)
     run("一键隐藏刀具（饼项按偏好 / 面板两种显式目标）", test_hide_cutters, module)
     run("纯函数：刀具恢复（同一套判据 / 集合不可渲染只读报告）", test_show_cutters_pure, module)
+    run("纯函数：射线可见性六项（原值 / 读回 / 缺失跳过 / 汇总报告）",
+        test_ray_visibility_pure, module)
     run("一键恢复正常刀具（往返对称 / 三种目标 / 集合不可渲染）", test_show_cutters, module)
+    run("刀具恢复必须打开射线可见性六项（Boxcutter 产物在 Cycles 里拍不到）",
+        test_show_cutters_ray_visibility, module)
     run("检查并修复缺失文件", test_fix_missing_files, module)
     run("保存到偏好设置", test_save_preferences, module)
     run("一键楼梯（相对偏移阵列）", test_stairs, module)
