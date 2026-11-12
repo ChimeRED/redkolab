@@ -446,12 +446,16 @@ class HHZ_MT_pie(bpy.types.Menu):
         # 2.23.0：槽位 7（右下）由「一键查看面朝向」换成「一键恢复正常刀具」
         # （面朝向仍在 N 面板 ▸ 建模页，只是不再占饼菜单槽位）；其余 7 个槽位
         # 的位置与图标一字未动。同样**不传 target_mode**（走 PREF）。
+        # 2.23.2：槽位 5（右上）与「灰度滤镜」**换位归位** —— 灰度滤镜从 N 面板 ▸ 建模
+        # 回到饼菜单右上（它本来就只该有一处按钮）；「一键隐藏刀具」退出饼菜单，
+        # 只在 N 面板 ▸ 建模页留那两个显式模式按钮。其余 6 个槽位的位置与图标
+        # 一字未动，仍然是 8 个算符 + 0 个占位项。饼项**不传参数**（走 PREF）。
         pie.operator("hhz.apply_all_modifiers", icon='MODIFIER')       # 0 左
         pie.operator("hhz.flip_normals", icon='NORMALS_FACE')         # 1 右
         pie.operator("hhz.remove_all_materials", icon='MATERIAL')     # 2 下
         pie.operator("hhz.stairs", icon='MOD_ARRAY')                  # 3 上（需求：保持不动）
         pie.operator("hhz.select_active_camera", icon='CAMERA_DATA')  # 4 左上
-        pie.operator("hhz.hide_cutters", icon='HIDE_ON')              # 5 右上（2.22.1 起）
+        pie.operator("hhz.grayscale_filter", icon='COLOR')            # 5 右上（2.23.2 起）
         pie.operator("hhz.remove_all_modifiers", icon='TRASH')        # 6 左下
         pie.operator("hhz.show_cutters", icon='MESH_CUBE')            # 7 右下（2.23.0 起）
 
@@ -483,24 +487,24 @@ class HHZ_PT_main(bpy.types.Panel):
         layout.label(text="一键楼梯：鼠标换方向 滚轮改节数", icon='INFO')
 
         # 翻面 / 检测反面 / 查看面朝向放在同一个 column 里、按钮相邻（没有新增面板）。
-        # 2.22.1：灰度滤镜从饼菜单右上（槽位 5）挪到这里 —— 同一个 column、紧挨着一组，
-        # **不新增面板**，而且全插件只有这一处画灰度滤镜按钮。
+        # 2.22.1：灰度滤镜曾从饼菜单右上（槽位 5）挪到这里；**2.23.2 起它又回到
+        # 饼菜单槽位 5**（全插件只有那一处按钮），所以这里不再画它 —— 同一段护栏、
+        # 同一个 column，**不新增面板**。
         column.separator()
         try:
             column.operator("hhz.flip_normals", icon='NORMALS_FACE')
             column.operator("hhz.detect_flipped", icon='INFO')
             column.operator("hhz.toggle_face_orientation", icon='OVERLAY')
-            column.operator("hhz.grayscale_filter", icon='COLOR')
         except Exception as error:  # draw 绝不能让异常冒给 Blender
             column.label(text="建模按钮画不出来：{}".format(error), icon='ERROR')
         layout.label(text="检测：闭合网格看体积 非闭合只报疑似", icon='INFO')
         layout.label(text="查看面朝向：朝外蓝 朝内红（再点一次收起）", icon='INFO')
-        layout.label(text="灰度滤镜：会一起影响最终渲染输出（再点一次还原）", icon='INFO')
 
         # 刀具组：仍在同一个 column 里紧挨着翻面那一组（没有新增面板）。
         # 两个按钮是**同一个算符**的两种**显式**目标模式 —— 选中的物体 / 当前高亮的集合
-        # （「组」= 集合，含子集合）。饼菜单右上那一格调同一个算符但**不传参数**：
-        # 算符默认 'PREF'，回落到项目既有的目标机制（按偏好设置）。
+        # （「组」= 集合，含子集合）。
+        # 2.23.2：「一键隐藏刀具」退出饼菜单（槽位 5 换回灰度滤镜），只剩 N 面板 ▸ 建模页
+        # 这两个显式模式按钮；算符默认值仍是 'PREF'，不带参数调用的路径照旧可用。
         # 2.23.0：旁边加一个「恢复刀具为正常物体」按钮 —— 同一个 column、不新增面板。
         # 它**不传 target_mode**（走 PREF）：恢复的候选除了选中物体，还会自动带上
         # 当前视图层里隐藏的物体，所以刚被藏起来的那批刀具也能一把恢复。
