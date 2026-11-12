@@ -1001,22 +1001,21 @@ Windows 上默认输入法是中文时，Blender 一打开就是中文组字模�
 > **从 2.16.1 起，常规矩阵只测两条版本线**：用户实际使用的 **Blender 4.0** 与**最新稳定版**。
 > 4.2 LTS / 4.5 LTS 等中间版本**不再纳入常规矩阵**（依据是聚焦实际使用环境；代价见本节末尾「矩阵收窄的代价」）。
 
-同一份 `redkolab-2.24.0.zip`，真机无头测试：真的装包、真启用、真建场景、真跑功能并断言。
-（每条之前都清干净隔离沙箱 `%TEMP%\redkolab_tests`，并显式指定被测的包 `-Zip dist\redkolab-2.24.0.zip`。）
+同一份 `redkolab-2.24.1.zip`，真机无头测试：真的装包、真启用、真建场景、真跑功能并断言。
+（每条之前都清干净隔离沙箱 `%TEMP%\redkolab_tests`，并显式指定被测的包 `-Zip dist\redkolab-2.24.1.zip`。）
 
 | Blender | 安装入口 | 装成的模块 | 断言 | 结果 |
 | --- | --- | --- | --- | --- |
-| **4.0.2**（用户实际使用的版本） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **2598** | ✔ |
-| **5.2.2 LTS**（最新稳定版） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **2591** | ✔ |
-| **5.2.2 LTS**（最新稳定版） | 扩展页 Install from Disk（`extensions.package_install_files`） | `bl_ext.user_default.redkolab` | **2570** | ✔ |
+| **4.0.2**（用户实际使用的版本） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **2633** | ✔ |
+| **5.2.2 LTS**（最新稳定版） | 插件页 Install from Disk（`preferences.addon_install`） | `redkolab` | **2626** | ✔ |
+| **5.2.2 LTS**（最新稳定版） | 扩展页 Install from Disk（`extensions.package_install_files`） | `bl_ext.user_default.redkolab` | **2605** | ✔ |
 
-> **三条全部 `PASS`，`0 项失败`（退出码 0）** —— 以上 2598 / 2591 / 2570 是 2.24.0 逐条实跑抄下来的结果行。
-> **需求给定的下限是 2385 / 2378 / 2357**（= 2.23.1 的基线）：2.24.0 三条分别比它多 **213 / 213 / 213** 条；
-> 相对上一版 2.23.2 的 **2388 / 2381 / 2360** 各多 **210** 条（同一台机器、同一套沙箱清理方式）。
-> 新增的 210 条来自 2.24.0 的三部分（P1 导出 / P2 导入 / P3 恢复出厂启动布局）+ 两处过期文案修复：
-> 纯函数计划表、JSON 往返、凭据扫描、假 keymap 数据结构上的导出与键位去重、
-> 执行器「只做 apply 项 + 逐项独立失败」、P3 的「先备份后重建」顺序与「绝不写偏好设置」源码级断言、
-> 文案与饼菜单实际项数的机械核对。三条都高于下限（断言数只增不减）。
+> **三条全部 `PASS`，`0 项失败`（退出码 0）** —— 以上 2633 / 2626 / 2605 是 2.24.1 逐条实跑抄下来的结果行。
+> **需求给定的下限是 2598 / 2591 / 2570**（= 2.24.0 的基线）：2.24.1 三条分别比它多 **35 / 35 / 35** 条，
+> 一条没减。新增的 35 条全部来自 2.24.1 的「算符返回值契约」回归防线
+> （AST 全量扫描 32 个算符类 / 39 个 `invoke`+`execute`+`modal` 方法、假上下文直调 8 个自有 `invoke`、
+> 弹窗回退链与兜底分支、以及 2.24.0 崩溃那一行的源码级断言）。
+> **2.24.0 的 2598 / 2591 / 2570** = 2.23.1 基线 2385 / 2378 / 2357 各加 **213** 条（跨版本迁移 + 恢复出厂启动布局）。
 > **2.23.2 的 2388 / 2381 / 2360** 是 2.23.1 基线 2385 / 2378 / 2357 各加 3 条。
 > （历史：2.23.1 相对 2.23.0 的基线 2204 / 2197 / 2176 新增 **181 / 181 / 181** 条 —— 刀具恢复的射线可见性六项。）
 > 2.23.0 相对 2.22.1 的基线 2019 / 2012 / 1991 新增/改写 **185 / 185 / 185** 条
@@ -1034,8 +1033,8 @@ Windows 上默认输入法是中文时，Blender 一打开就是中文组字模�
 > 收窄的只是**被测版本面**。
 >
 > 同一版在 CI（Ubuntu runner，打 tag 时触发）上同样 **0 项失败**，但条数比本机少：
-> **2.24.0 的 CI 条数本版未验证** —— 它只会在 `v2.24.0` 这个 tag 推上去之后才由 CI 实跑出来，
-> 届时按实测补记（2.23.2 那次同样是发布后才由 CI 实跑；CI 与本机差值的成因见下）。
+> **2.24.1 的 CI 条数本版未验证** —— 它只会在 `v2.24.1` 这个 tag 推上去之后才由 CI 实跑出来，
+> 届时按实测补记（2.24.0 / 2.23.2 那两次同样是发布后才由 CI 实跑；CI 与本机差值的成因见下）。
 > 以下历史读数用来证明差值可复现、且不是功能少测：
 > **2.22.1 实测三条各少 5 条** —— 本机 2019 / 2012 / 1991，CI 是 **2014 / 2007 / 1986**
 > （run 39916786995，5 个 job 全绿：打包 + 结构自检 / 4.0.2 auto / 5.2.2 auto / 5.2.2 extensions / 发布并归档）。
@@ -1055,6 +1054,9 @@ Windows 上默认输入法是中文时，Blender 一打开就是中文组字模�
 > 再加上上面说的沙箱 E2E 段（19 条）在扩展安装下整段 `[skip]`，所以 5.2.2 的扩展页比同版本的插件页少 21；
 > 5.x 上另有几条 4.x 独有的断言（时间线当前帧色那几项、5.x 无头环境下 `is_dirty` 造不出真的那一组）
 > 换成了对应的 5.x 断言 —— 那些颜色项在 5.x 里已经被 Blender 删掉，面板上会自动隐藏。功能断言一项不少。
+>
+> **2.24.1** 新增的断言（**35 / 35 / 35** 条净增，三个组合一样多）：
+> 见本节「2.24.1：算符返回值契约（`invoke` 返回 None 的崩溃）的实测与断言」。
 >
 > **2.24.0** 新增/加强的断言（**210 / 210 / 210** 条净增，三个组合一样多）：
 > 见本节「2.24.0：跨版本迁移（导出 / 导入）+ 恢复出厂启动布局的实测与断言」。
@@ -1154,6 +1156,98 @@ Windows 上默认输入法是中文时，Blender 一打开就是中文组字模�
 blender --factory-startup --command extension validate dist/redkolab-2.12.2.zip
 # -> Success parsing TOML in "dist\redkolab-2.12.2.zip"    # 两个版本输出相同
 ```
+
+### 2.24.1：算符返回值契约（`invoke` 返回 None 的崩溃）的实测与断言
+
+**用户实测报错（原样）**：
+
+```text
+Python: RuntimeError: class HHZ_OT_migrate_import, function invoke: incompatible return value 
+, TypeError(, Function.result expected a set, not a NoneType)
+```
+
+在 **Blender 5.2** 里点「导入跨版本迁移包」**必然触发**（本机用沙箱化 5.2.2 GUI 复现，报错文字逐字一致）。
+
+**确切根因**（`redkolab/ops.py`，2.24.0）：
+
+```python
+    def invoke(self, context, event):                       # L6333
+        ...
+        except Exception:
+            self._confirm_lines = []
+        return context.window_manager.fileselect_add(self)   # L6345  <-- 病根
+```
+
+`window_manager.fileselect_add()` 的返回值是 **`None`**：它只是"打开文件选择器"，**不是算符结果集合**。
+所以 `invoke` 返回了 `None`，而 Blender 的 `Operator.invoke` 只接受集合（`{'RUNNING_MODAL'}` 等），
+于是抛 `Function.result expected a set, not a NoneType`。
+
+判据（不是猜的，两条独立证据）：
+
+1. Blender 自己的 `bpy_extras/io_utils.py` 里 `ImportHelper.invoke` / `ExportHelper.invoke`
+   就是**先调用 `fileselect_add(self)`、再自己 `return {'RUNNING_MODAL'}`**
+   （5.2.2 的 `scripts/modules/bpy_extras/io_utils.py:139-140`、`4.0.2` 同款），**从不 `return` 它的返回值**；
+2. 假上下文直调时把 `fileselect_add` 写成 `return None`（与真机一致），2.24.0 的写法立刻返回 `None`。
+
+> 注：症状像"漏写 `return`"，但**实际是"return 了一个返回 None 的 API"** —— 方法体最后一条语句
+> *确实*是 `return`，所以"末尾必须是 return"这一条机械判据**抓不住它**；真正抓得住的是
+> "`return` 的值不得是返回 None 的 API"这一条（本版已加进断言）。
+
+**修复**（只补返回值与兜底，不改任何行为语义）：
+
+| 位置 | 2.24.0 | 2.24.1 |
+| --- | --- | --- |
+| `HHZ_OT_migrate_import.invoke` | `return context.window_manager.fileselect_add(self)` | `context.window_manager.fileselect_add(self)` + `return {'RUNNING_MODAL'}` |
+| `HHZ_OT_zml_lab_update.invoke` | 末尾是 `try/except`，"末尾必须是 return"这条判据过不了 | 弹窗调用抽到 `_invoke_confirm_dialog()`（每条路径都 `return` 集合），`invoke` 末尾 `return result`；弹窗 API 给 `None` 时兜底 `{'CANCELLED'}` + `report({'ERROR'})` |
+| `HHZ_OT_reset_startup_layout.invoke` | 同上 | 同上（同样的 `_invoke_confirm_dialog()` + 兜底） |
+
+`HHZ_OT_font_pick.invoke`（`ops.py:3072-3074`）本来就是正确写法（`fileselect_add(self)` + `return {'RUNNING_MODAL'}`），
+**未改动**，作为对照组留在断言里。
+
+**全量排查**（AST 扫插件包 9 个模块）：**32 个算符类 / 39 个 `invoke`+`execute`+`modal` 方法**，
+同类问题 **3 处**（`migrate_import.invoke` 是真崩溃；`zml_lab_update.invoke` 与 `reset_startup_layout.invoke`
+是"末尾不是 return"的同类隐患，改动即为消除）。其余 36 个方法每一条 `return` 都返回集合，
+没有 `return None` / 无值 `return`。
+
+**新增断言（35 条，三个组合一样多）**：
+
+* **AST 级**（`tools/blender_test.py` 的 `test_operator_return_values`）：
+  所有算符的 `invoke`/`execute`/`modal` —— ① 方法体最后一条语句必须是 `ast.Return`；
+  ② 任何 `return` 都不得是无值 `return` / `return None` / **`return` 一个返回 None 的 API**
+  （`fileselect_add` / `tag_redraw` / `popup_menu` / `popup_menu_pie` / `modal_handler_add`）；
+  ③ `invoke_props_dialog` / `invoke_confirm` / `invoke_popup` 这些**返回集合**的弹窗 API
+  必须出现在 `return` 里（"调了但不 return"正是这类崩溃的另一个变体）。
+  `draw`（无返回值）与 `poll`（返回 bool）按契约**排除**。
+* **单元级（假上下文直调未绑定方法）**：`window_manager` 替身里 `fileselect_add` **如实返回 `None`**、
+  `invoke_props_dialog` / `invoke_confirm` 返回 `{'RUNNING_MODAL'}` —— 于是
+  `HHZ_OT_migrate_import.invoke(...)` 必须返回**非 None 且是 set**；再构造"迁移包解析失败（文件不存在）"
+  分支也必须是 set；`execute` 在该分支必须 `{'CANCELLED'}` + `report({'ERROR'})`。
+  同类覆盖：`migrate_export.invoke`（继承 Blender 的 `ExportHelper`）、`reset_startup_layout.invoke`
+  （属性弹窗 → 确认框 → 兜底三条路径）、`zml_lab_update.invoke`（`invoke_confirm` 抛 `TypeError` 退回属性弹窗；
+  没有 `window_manager` 时退回 `execute`）、`font_pick.invoke`、`stairs.invoke` 与 `capture_hotkey.invoke` 的早退分支、
+  `layout_save_startup.invoke`。
+  **"`show_cutters.invoke` 若有"** —— 实测 `HHZ_OT_show_cutters` **没有自己的 `invoke`**
+  （只定义了 `execute`），所以没有这一项；它由 AST 判据全覆盖。
+  `_DragReorderBase.invoke` 需要真实 UI 区域与事件流，只由 AST 判据守住（用例里显式 `[skip]` 说明）。
+
+**真机结果（3 组合，0 项失败）**：
+
+| Blender | `-Mode` | 断言 | 结果 |
+| --- | --- | --- | --- |
+| 4.0.2 | `auto` | **2633** | `PASS` |
+| 5.2.2 LTS | `auto` | **2626** | `PASS` |
+| 5.2.2 LTS | `extensions` | **2605** | `PASS` |
+
+（下限 2598 / 2591 / 2570 是 2.24.0 的基线；本版三条各多 35 条，一条没减。）
+
+**5.2.2 GUI 级复核（沙箱化启动，不碰真实配置）**：
+
+* 修复前：`bpy.ops.hhz.migrate_import('INVOKE_DEFAULT')` → `RuntimeError: class HHZ_OT_migrate_import,
+  function invoke: incompatible return value, TypeError(..., Function.result expected a set, not a NoneType)`（逐字复现）；
+* 修复后：同一条调用 → **`{'RUNNING_MODAL'}`**，无异常（文件选择器正常打开）。
+
+**未验证 / 待用户实测**：在真实 5.2 GUI 里**手动点**「导入跨版本迁移包」→ 选文件 → 确认框这一步，
+只在无头与假上下文里验过，**没有在用户真实操作路径上验**（见下节"已知限制"）。
 
 ### 2.24.0：跨版本迁移（导出 / 导入）+ 恢复出厂启动布局的实测与断言
 

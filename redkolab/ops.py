@@ -4901,10 +4901,9 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         for line in text.split("\n"):
             layout.label(text=line)
 
-    def invoke(self, context, event):
-        window_manager = getattr(context, "window_manager", None)
-        if window_manager is None:
-            return self.execute(context)
+    def _invoke_confirm_dialog(self, context, event):
+        """弹二次确认框；每一条路径都把弹窗结果**原样返回**（末尾不留无返回值路径）。"""
+        window_manager = context.window_manager
         _module, _version, _installed, _decision, text = self._confirm_text(context)
         try:
             # 5.x 的 invoke_confirm 支持 message：确认框里能列出全部细节
@@ -4918,6 +4917,17 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
                 return window_manager.invoke_props_dialog(self, width=560)
             except TypeError:
                 return window_manager.invoke_props_dialog(self)
+
+    def invoke(self, context, event):
+        window_manager = getattr(context, "window_manager", None)
+        if window_manager is None:
+            return self.execute(context)
+        result = self._invoke_confirm_dialog(context, event)
+        if result is None:
+            # 弹窗 API 一个集合都没给：绝不把 None 交给 Blender（invoke 必须返回集合）
+            self.report({'ERROR'}, "打不开确认框，已取消")
+            return {'CANCELLED'}
+        return result
 
     # -- 执行 ------------------------------------------------------------
 
@@ -6342,7 +6352,15 @@ class HHZ_OT_migrate_import(bpy.types.Operator, ImportHelper):
                     pack, actions, bpy.app.version_string)
         except Exception:
             self._confirm_lines = []
-        return context.window_manager.fileselect_add(self)
+        # fileselect_add() 的返回值是 None（它不是算符结果集合）：
+        # 2.24.0 这里写成 ``return context.window_manager.fileselect_add(self)``，
+        # 于是 invoke 返回 None，5.2 里点「导入跨版本迁移包」直接报
+        # "class HHZ_OT_migrate_import, function invoke: incompatible return value,
+        #  TypeError(..., Function.result expected a set, not a NoneType)"。
+        # 与 Blender 自带 bpy_extras/io_utils.py 的 ImportHelper.invoke 对齐：
+        # 先打开文件选择器，再自己返回集合。
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         pack, problem = load_migration_pack(self.filepath)
@@ -6506,12 +6524,21 @@ class HHZ_OT_reset_startup_layout(bpy.types.Operator):
             lines.append("当前文件没有未保存改动")
         return lines
 
-    def invoke(self, context, event):
-        self._confirm_lines = self._confirm_warning(context)
+    def _invoke_confirm_dialog(self, context, event):
+        """弹二次确认框；每一条路径都把弹窗结果**原样返回**（末尾不留无返回值路径）。"""
         try:
             return context.window_manager.invoke_props_dialog(self, width=520)
         except Exception:
             return context.window_manager.invoke_confirm(self, event)
+
+    def invoke(self, context, event):
+        self._confirm_lines = self._confirm_warning(context)
+        result = self._invoke_confirm_dialog(context, event)
+        if result is None:
+            # 弹窗 API 一个集合都没给：绝不把 None 交给 Blender（invoke 必须返回集合）
+            self.report({'ERROR'}, "打不开确认框，已取消")
+            return {'CANCELLED'}
+        return result
 
     def execute(self, context):
         dirty_before = bool(getattr(bpy.data, "is_dirty", False))

@@ -9832,6 +9832,388 @@ def test_migration_import(module):
               (pref_mtime, now_mtime, started))
 
 
+# ============ 2.24.1：算符 invoke / execute / modal 必须返回集合（崩溃回归防线）
+#
+# 事故：2.24.0 的 ``HHZ_OT_migrate_import.invoke`` 写成
+#     return context.window_manager.fileselect_add(self)
+# ``fileselect_add()`` 的返回值是 **None**（它不是算符结果集合），于是 invoke 返回
+# None，在 5.2 里点「导入跨版本迁移包」立刻报
+#     RuntimeError: class HHZ_OT_migrate_import, function invoke: incompatible
+#     return value, TypeError(..., Function.result expected a set, not a NoneType)
+# 这一节把「每条路径都返回集合」固化成 AST 断言 + 假上下文单元断言。
+
+#: 返回值**是**算符结果集合的 window_manager 弹窗 API：直接 return 它的返回值才合法
+WM_SET_RETURNING = (
+    "invoke_props_dialog", "invoke_props_popup", "invoke_popup",
+    "invoke_confirm", "invoke_search_popup",
+)
+
+#: 返回值**不是**算符结果集合的 window_manager API：直接 return 它 = invoke 返回 None
+#: （2.24.0 的崩溃就是 ``return ...fileselect_add(self)`` 这一种）
+WM_NONE_RETURNING = (
+    "fileselect_add", "tag_redraw", "popup_menu", "popup_menu_pie",
+    "modal_handler_add",
+)
+
+#: 必须返回集合的方法（draw 无返回值、poll 返回 bool，都不在契约内）
+SET_METHODS = ("invoke", "execute", "modal")
+
+#: 插件包内的模块文件（算符可能分布在任意一个里，全都要扫）
+PACKAGE_SOURCE_FILES = (
+    "__init__.py", "compat.py", "pages.py", "layout.py", "stairs.py",
+    "theme.py", "panels.py", "ops.py", "ui.py",
+)
+
+#: 自己实现 invoke 的算符（契约表：新增 / 删除算符时这里要同步）
+EXPECTED_INVOKE_OWNERS = (
+    "HHZ_OT_capture_hotkey", "HHZ_OT_font_pick", "HHZ_OT_layout_save_startup",
+    "HHZ_OT_migrate_import", "HHZ_OT_reset_startup_layout", "HHZ_OT_stairs",
+    "HHZ_OT_zml_lab_update", "_DragReorderBase",
+)
+
+
+def _is_operator_class(node):
+    """是不是 ``bpy.types.Operator`` 的子类（``Operator`` / ``bpy.types.Operator`` 都认）。"""
+    for base in node.bases:
+        if isinstance(base, ast.Attribute) and base.attr == "Operator":
+            return True
+        if isinstance(base, ast.Name) and base.id == "Operator":
+            return True
+    return False
+
+
+def _called_name(node):
+    """``a.b.fileselect_add(...)`` / ``fileselect_add(...)`` -> ``'fileselect_add'``。"""
+    if not isinstance(node, ast.Call):
+        return None
+    function = node.func
+    return getattr(function, "attr", None) or getattr(function, "id", None)
+
+
+def operator_methods(source, names):
+    """按 AST 取出算符类里的方法：``[(类名, 方法名, 函数节点)]``。"""
+    found = []
+    if isinstance(names, (tuple, list, set, frozenset)):
+        wanted = tuple(names)
+    else:
+        wanted = (names,)
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ClassDef) or not _is_operator_class(node):
+            continue
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef) and item.name in wanted:
+                found.append((node.name, item.name, item))
+    return found
+
+
+def method_source(source, class_name, method_name):
+    """按「类 + 方法」边界取源码段（同名方法在不同类里不会混）。"""
+    lines = source.splitlines()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == method_name:
+                    return "\n".join(lines[item.lineno - 1:item.end_lineno])
+    return ""
+
+
+_UNSET = object()
+
+
+class _StubBlendData(object):
+    filepath = ""
+
+
+class _StubWindowManager(object):
+    """假 window_manager：弹窗 API 返回集合；fileselect_add 返回 None（与真机一致）。"""
+
+    def __init__(self, dialog_result=_UNSET, props_error=None, confirm_error=None,
+                 fileselect_error=None):
+        self.calls = []
+        self.dialog_result = {'RUNNING_MODAL'} if dialog_result is _UNSET else dialog_result
+        self.props_error = props_error
+        self.confirm_error = confirm_error
+        self.fileselect_error = fileselect_error
+
+    def fileselect_add(self, operator):
+        self.calls.append("fileselect_add")
+        if self.fileselect_error is not None:
+            raise self.fileselect_error
+        # 真机就是 None：所以 ``return fileselect_add(...)`` 等于让 invoke 返回 None
+        return None
+
+    def invoke_props_dialog(self, operator, width=None):
+        self.calls.append("invoke_props_dialog")
+        if self.props_error is not None:
+            raise self.props_error
+        return self.dialog_result
+
+    def invoke_confirm(self, operator, event=None, **kwargs):
+        self.calls.append("invoke_confirm")
+        if self.confirm_error is not None:
+            raise self.confirm_error
+        return self.dialog_result
+
+    def modal_handler_add(self, operator):
+        self.calls.append("modal_handler_add")
+        return None
+
+
+class _StubOperator(object):
+    """假算符实例：只填 invoke / execute 真会读到的那几个属性。"""
+
+    def __init__(self, **values):
+        self.filepath = ""
+        self.filename_ext = ".json"
+        self.confirmed = False
+        self._confirm_lines = []
+        self.reports = []
+        for name, value in values.items():
+            setattr(self, name, value)
+
+    def report(self, level, message):
+        self.reports.append((set(level), str(message)))
+
+
+def operator_stub(operator_cls, **values):
+    """假算符实例：把该算符类**自己在 ops.py 里定义的方法**原样绑到替身上。
+
+    ``invoke`` 里会调用 ``self._confirm_warning(context)`` / ``self._invoke_confirm_dialog``
+    这类真方法，所以不能只用一个空对象：这里按 MRO 逐层把纯 Python 方法 ``__get__``
+    到替身上（RNA 自带的东西不会被绑），``report`` 与属性仍由替身提供。
+    ``values`` 在绑定**之后**写入，所以同名关键字可以覆盖掉某个真方法（造分支用）。
+    """
+    stub = _StubOperator()
+    for parent in operator_cls.__mro__:
+        if not str(getattr(parent, "__module__", "")).endswith("ops"):
+            continue
+        for name, attribute in list(parent.__dict__.items()):
+            if hasattr(attribute, "__code__"):      # 普通函数 / lambda
+                setattr(stub, name, attribute.__get__(stub, operator_cls))
+    for name, value in values.items():
+        setattr(stub, name, value)
+    return stub
+
+
+def test_operator_return_values(module):
+    section("算符返回值契约（invoke / execute / modal 必须返回集合，2.24.0 崩溃回归）")
+    ops = module.ops
+
+    # ---- ① AST 全量扫描：插件包内**所有**算符类的 invoke / execute / modal ----
+    total_class = 0
+    total_method = 0
+    invoke_owners = []
+    violations = []
+    scanned_files = []
+    for filename in PACKAGE_SOURCE_FILES:
+        try:
+            text = source_of(module, filename)
+        except OSError:
+            continue
+        scanned_files.append(filename)
+        methods = operator_methods(text, set(SET_METHODS + ("draw", "poll")))
+        total_class += len(set(name for name, _method, _node in methods))
+        for class_name, method_name, node in methods:
+            if method_name == "invoke":
+                invoke_owners.append(class_name)
+            if method_name not in SET_METHODS:
+                continue        # draw 无返回值、poll 返回 bool：不在契约内
+            total_method += 1
+            where = "{}:{}.{}".format(filename, class_name, method_name)
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Return):
+                    continue
+                if inner.value is None:
+                    violations.append("{} L{} 无值 return".format(where, inner.lineno))
+                elif isinstance(inner.value, ast.Constant) and inner.value.value is None:
+                    violations.append("{} L{} return None 字面量".format(where, inner.lineno))
+                elif _called_name(inner.value) in WM_NONE_RETURNING:
+                    violations.append("{} L{} return {}().返回值是 None".format(
+                        where, inner.lineno, _called_name(inner.value)))
+            # 机械判据：方法体最后一条语句必须是 return（防「漏 return」）
+            last = node.body[-1]
+            if not isinstance(last, ast.Return):
+                violations.append("{} L{} 最后一条语句不是 return（{}）".format(
+                    where, node.lineno, type(last).__name__))
+            # 弹窗 API 的返回值必须原样交回给 Blender
+            returned_values = set(
+                id(inner.value) for inner in ast.walk(node)
+                if isinstance(inner, ast.Return) and inner.value is not None)
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Call) and _called_name(inner) in WM_SET_RETURNING
+                        and id(inner) not in returned_values):
+                    violations.append("{} L{} 调了 {}() 但不在 return 里".format(
+                        where, inner.lineno, _called_name(inner)))
+
+    check(len(scanned_files) == len(PACKAGE_SOURCE_FILES),
+          "扫了插件包全部 {} 个模块文件".format(len(PACKAGE_SOURCE_FILES)),
+          scanned_files)
+    check(total_class >= 30, "AST 扫到算符类 {} 个".format(total_class), total_class)
+    check(total_method >= 30,
+          "AST 扫到 invoke / execute / modal 方法 {} 个（draw / poll 已按契约排除）".format(
+              total_method), total_method)
+    check(sorted(invoke_owners) == sorted(EXPECTED_INVOKE_OWNERS),
+          "自己实现 invoke 的算符与契约表一致（{} 个）".format(len(EXPECTED_INVOKE_OWNERS)),
+          invoke_owners)
+    check(not violations,
+          "所有算符的 invoke / execute / modal 都没有「返回 None / 无值 return / 末尾不是 return / 弹窗值没交回」",
+          violations[:6])
+
+    # ---- ② 源码级：2.24.0 崩溃的那一行已经不存在 ----
+    ops_source = source_of(module, "ops.py")
+    migrate_invoke = method_source(ops_source, "HHZ_OT_migrate_import", "invoke")
+    check(bool(migrate_invoke), "按类 + 方法边界取到了 HHZ_OT_migrate_import.invoke 源码段")
+    # 用 AST 判「有没有把 fileselect_add() 的返回值当结果交出去」，注释里提到旧写法不算
+    migrate_node = None
+    for node in ast.walk(ast.parse(ops_source)):
+        if isinstance(node, ast.ClassDef) and node.name == "HHZ_OT_migrate_import":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "invoke":
+                    migrate_node = item
+    bad_returns = [] if migrate_node is None else [
+        inner.lineno for inner in ast.walk(migrate_node)
+        if isinstance(inner, ast.Return) and _called_name(inner.value) == "fileselect_add"]
+    check(migrate_node is not None and not bad_returns,
+          "invoke 里没有任何一条 return 直接把 fileselect_add() 的返回值交出去（2.24.0 的崩溃写法）",
+          bad_returns)
+    check("fileselect_add(self)" in migrate_invoke,
+          "invoke 仍然打开文件选择器（行为不变）")
+    check(migrate_invoke.rstrip().endswith("return {'RUNNING_MODAL'}"),
+          "invoke 的最后一条语句就是兜底 return {'RUNNING_MODAL'}",
+          migrate_invoke.strip().splitlines()[-1:])
+    for class_name in ("HHZ_OT_reset_startup_layout", "HHZ_OT_zml_lab_update"):
+        body = method_source(ops_source, class_name, "invoke")
+        check(body.rstrip().splitlines()[-1].strip() == "return result",
+              "{}.invoke 末尾是一条兜底 return（不把 None 交出去）".format(class_name),
+              body.strip().splitlines()[-1:])
+        check("if result is None" in body and "return {'CANCELLED'}" in body,
+              "{}.invoke 有「弹窗没给集合 -> 返回 CANCELLED」的兜底分支".format(class_name))
+
+    # ---- ③ 假上下文直调未绑定方法：必须返回集合（不是 None）----
+    # 关键：替身的 fileselect_add 如实返回 None —— 2.24.0 就是在这里漏成 None 的
+    check(_StubWindowManager().fileselect_add(None) is None,
+          "替身如实模拟真机：fileselect_add() 的返回值是 None")
+    window_manager = _StubWindowManager()
+    result = ops.HHZ_OT_migrate_import.invoke(
+        operator_stub(ops.HHZ_OT_migrate_import),
+        _FakeContext(window_manager=window_manager), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "HHZ_OT_migrate_import.invoke 返回集合 {'RUNNING_MODAL'}（2.24.0 这里返回 None）",
+          (type(result).__name__, result))
+    check(window_manager.calls == ["fileselect_add"],
+          "调用顺序：只打开一次文件选择器", window_manager.calls)
+
+    # 分支：迁移包解析失败（文件不存在）也必须是集合，不是 None
+    window_manager = _StubWindowManager()
+    broken = operator_stub(ops.HHZ_OT_migrate_import, filepath=os.path.join(
+        tempfile.gettempdir(), "hhz_no_such_migration_pack_2_24_1.json"))
+    result = ops.HHZ_OT_migrate_import.invoke(
+        broken, _FakeContext(window_manager=window_manager), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "包解析失败的分支同样返回集合（不会漏成 None）",
+          (type(result).__name__, result))
+    check(broken._confirm_lines == [],
+          "包解析失败时确认框文案为空且没有抛异常", broken._confirm_lines)
+    broken_exec = operator_stub(ops.HHZ_OT_migrate_import, filepath=broken.filepath)
+    result = ops.HHZ_OT_migrate_import.execute(
+        broken_exec, _FakeContext(window_manager=_StubWindowManager()))
+    check(result == {'CANCELLED'},
+          "execute：迁移包不存在时返回 {'CANCELLED'} 并报错", result)
+    check(any("ERROR" in level for level, _message in broken_exec.reports),
+          "execute 早退时确实 report 了 ERROR", broken_exec.reports)
+
+    # 同类覆盖：导出算符的 invoke 来自 Blender 自带的 ExportHelper
+    window_manager = _StubWindowManager()
+    result = ops.HHZ_OT_migrate_export.invoke(
+        _StubOperator(), _FakeContext(window_manager=window_manager,
+                                      blend_data=_StubBlendData()), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "HHZ_OT_migrate_export.invoke（继承 ExportHelper）返回集合",
+          (type(result).__name__, result))
+    check(window_manager.calls == ["fileselect_add"],
+          "导出算符也只打开一次文件选择器", window_manager.calls)
+
+    # 同类覆盖：恢复出厂启动布局（属性弹窗 -> 确认框 -> 兜底 三条路径）
+    reset_stub = lambda: operator_stub(ops.HHZ_OT_reset_startup_layout)
+
+    window_manager = _StubWindowManager()
+    result = ops.HHZ_OT_reset_startup_layout.invoke(
+        reset_stub(), _FakeContext(window_manager=window_manager), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "HHZ_OT_reset_startup_layout.invoke 返回集合",
+          (type(result).__name__, result))
+    window_manager = _StubWindowManager(props_error=RuntimeError("这个版本没有属性弹窗"))
+    result = ops.HHZ_OT_reset_startup_layout.invoke(
+        reset_stub(), _FakeContext(window_manager=window_manager), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "属性弹窗不可用时退回 invoke_confirm，返回值仍是集合",
+          (type(result).__name__, result))
+    check(window_manager.calls == ["invoke_props_dialog", "invoke_confirm"],
+          "回退链顺序：先属性弹窗，再确认框", window_manager.calls)
+    window_manager = _StubWindowManager(dialog_result=None)
+    null_self = reset_stub()
+    result = ops.HHZ_OT_reset_startup_layout.invoke(
+        null_self, _FakeContext(window_manager=window_manager), None)
+    check(isinstance(result, set) and result == {'CANCELLED'},
+          "弹窗 API 一个集合都没给时兜底 {'CANCELLED'}（绝不把 None 交给 Blender）",
+          (type(result).__name__, result))
+    check(any("ERROR" in level for level, _message in null_self.reports),
+          "兜底分支 report 了 ERROR 说明原因", null_self.reports)
+
+    # 同类覆盖：一键更新ZML_LAB（5.x 确认框 -> 4.0/4.1 属性弹窗 -> 无 wm 退回 execute）
+    zml_self = operator_stub(
+        ops.HHZ_OT_zml_lab_update,
+        _confirm_text=lambda context=None: ("mod", "1.0", "0", {}, "确认文本"))
+    window_manager = _StubWindowManager(confirm_error=TypeError("旧版本 invoke_confirm 不吃 message"))
+    result = ops.HHZ_OT_zml_lab_update.invoke(
+        zml_self, _FakeContext(window_manager=window_manager), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "HHZ_OT_zml_lab_update.invoke（旧版本退回属性弹窗）返回集合",
+          (type(result).__name__, result))
+    check(window_manager.calls == ["invoke_confirm", "invoke_props_dialog"],
+          "回退链顺序：先 invoke_confirm，再属性弹窗", window_manager.calls)
+    execute_self = operator_stub(
+        ops.HHZ_OT_zml_lab_update, execute=lambda context: {'FINISHED'})
+    result = ops.HHZ_OT_zml_lab_update.invoke(
+        execute_self, _FakeContext(window_manager=None), None)
+    check(isinstance(result, set) and result == {'FINISHED'},
+          "没有 window_manager 时退回 execute()，返回值仍是集合", result)
+
+    # 同类覆盖：字体选择器（本来就是正确写法，作为对照）
+    result = ops.HHZ_OT_font_pick.invoke(
+        operator_stub(ops.HHZ_OT_font_pick),
+        _FakeContext(window_manager=_StubWindowManager()), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "HHZ_OT_font_pick.invoke 返回集合（对照组：一直是 fileselect_add + 自己 return）",
+          (type(result).__name__, result))
+
+    # 早退分支：楼梯没有选中物体 / 按键捕获读不到偏好设置
+    result = ops.HHZ_OT_stairs.invoke(
+        operator_stub(ops.HHZ_OT_stairs),
+        _FakeContext(window_manager=_StubWindowManager()), None)
+    check(result == {'CANCELLED'},
+          "HHZ_OT_stairs.invoke 没有可用物体时返回 {'CANCELLED'}",
+          (type(result).__name__, result))
+    result = ops.HHZ_OT_capture_hotkey.invoke(
+        operator_stub(ops.HHZ_OT_capture_hotkey),
+        _FakeContext(window_manager=_StubWindowManager()), None)
+    check(result == {'CANCELLED'},
+          "HHZ_OT_capture_hotkey.invoke 读不到偏好设置时返回 {'CANCELLED'}",
+          (type(result).__name__, result))
+    result = ops.HHZ_OT_layout_save_startup.invoke(
+        operator_stub(ops.HHZ_OT_layout_save_startup),
+        _FakeContext(window_manager=_StubWindowManager()), None)
+    check(isinstance(result, set) and result == {'RUNNING_MODAL'},
+          "HHZ_OT_layout_save_startup.invoke 返回集合",
+          (type(result).__name__, result))
+
+    # 覆盖完整性：自有 invoke 的算符要么被假上下文覆盖，要么只是抽象基类
+    covered = set(EXPECTED_INVOKE_OWNERS) - {"_DragReorderBase"}
+    check(covered <= set(invoke_owners),
+          "契约表里的算符都在源码里真的实现了 invoke", sorted(set(invoke_owners)))
+    skip("_DragReorderBase.invoke 需要真实 UI 区域与事件流，只用 AST 判据守住")
+
+
 def test_reset_startup_layout(module):
     section("恢复出厂启动布局（先备份后重建 / 绝不写偏好设置）")
     ops = module.ops
@@ -10262,6 +10644,8 @@ def main():
     run("跨版本迁移：纯函数计划（apply / skip / fail 与原因）", test_migration_plan, module)
     run("跨版本迁移：5.2 侧导入（先计划后执行 / 确认框 / 只保存一次偏好）",
         test_migration_import, module)
+    run("算符返回值契约（invoke / execute / modal 必须返回集合）",
+        test_operator_return_values, module)
     run("算符 poll", test_poll)
     # 放在最后：它真的会重建启动文件并切换文件（read_homefile + append + open_mainfile），
     # 会清掉当前场景，所以后面只剩"卸载清理"这种不吃场景数据的用例
