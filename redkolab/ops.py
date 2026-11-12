@@ -16,10 +16,21 @@
 
 另外还有菜单/面板用到的辅助算符：打开偏好设置、捕获快捷键、恢复默认快捷键、
 检查并修复缺失文件，以及 N 面板「主题颜色」用的几个算符（主题功能不进饼菜单）。
+
+2.24.0 起还有三个跨版本工具算符（都放在 N 面板 ▸ 工具页 ▸ 「页面布局」面板里）：
+
+* :class:`HHZ_OT_migrate_export`      4.0 侧：导出 JSON 跨版本迁移包（只读）
+* :class:`HHZ_OT_migrate_import`      5.2 侧：读迁移包逐项重建（先纯函数计划，再执行）
+* :class:`HHZ_OT_reset_startup_layout` 两侧通用：先备份再恢复出厂启动布局（绝不写偏好设置）
+
+⚠ 硬边界：``userpref.blend`` **不能**跨大版本直拷（RNA 属性树 + 存储格式都变过），
+所以只做语义迁移；启动布局两侧都改用 Blender **出厂默认**，不做跨版本布局拷贝。
 """
 
 import ast
+import datetime
 import hashlib
+import json
 import math
 import os
 import re
@@ -32,6 +43,7 @@ import zipfile
 import addon_utils
 import bmesh
 import bpy
+from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from . import compat, layout, panels, stairs, theme, ui
 
@@ -5146,6 +5158,1410 @@ class HHZ_OT_zml_lab_update(bpy.types.Operator):
         detail = "；".join(problems) if problems else "备份已还原，源压缩包已归位"
         self.report({'ERROR'}, "{}；已回滚：{}".format(reason, detail))
         return {'CANCELLED'}
+
+
+# =============================== 跨版本迁移 + 恢复出厂启动布局（2.24.0）
+#
+# ---- 硬边界（README「已知限制」与交付报告里都写了这一条）----
+# **4.0 的 userpref.blend 不能直接给 5.2 用。** 偏好设置是 RNA 属性树 +
+# Blender 自有存储格式，跨大版本（4.0 -> 5.2）属性的增删 / 改名 / 类型变化都
+# 真实发生过；把 4.0 的配置文件直接覆盖到 5.2 的配置目录，最轻的结果是被静默
+# 忽略（用户的设置看起来没搬过去），最重的结果是 Blender 启动即崩。
+# 所以这里**只做语义迁移**：
+#   * 4.0 侧：把「已启用插件 / 自定义键位 / 界面偏好 / 主题 / 本插件偏好」
+#     导出成一个**纯 JSON** 迁移包（不含任何凭据）；
+#   * 5.2 侧：**逐项重建**，每一项都如实给出「已应用 / 跳过 / 失败 + 原因」。
+# 启动布局两侧都改成 Blender **出厂默认**（见 HHZ_OT_reset_startup_layout），
+# **不做**跨版本布局拷贝 —— 布局是 .blend 数据，跨大版本同样不能直拷。
+
+MIGRATE_SCHEMA = 1
+MIGRATE_FILE_EXT = ".json"
+
+#: 动作状态：apply = 要执行，skip = 本机不需要 / 不支持（有原因），fail = 结构或类型有问题
+MIGRATE_STATUS_APPLY = "apply"
+MIGRATE_STATUS_SKIP = "skip"
+MIGRATE_STATUS_FAIL = "fail"
+
+#: 动作种类（同时也是执行器表里的键）
+MIGRATE_KIND_PACK = "pack"
+MIGRATE_KIND_ADDON = "addon"
+MIGRATE_KIND_KEYMAP = "keymap"
+MIGRATE_KIND_VIEW = "view"
+MIGRATE_KIND_THEME_PRESET = "theme_preset"
+MIGRATE_KIND_THEME_COLORS = "theme_colors"
+MIGRATE_KIND_THEME_VIEW = "theme_view"
+MIGRATE_KIND_ADDON_PREFS = "addon_prefs"
+
+#: 界面偏好（preferences.view）里允许迁移的子集。
+#: 导出时逐项 ``hasattr`` 判断，只导出**真实存在且可读**的项（4.0 与 5.2 的项集不完全相同）。
+MIGRATE_VIEW_KEYS = (
+    "ui_scale",
+    "font_size",
+    "translation",
+    "language",
+    "show_tooltips",
+    "show_tooltips_python",
+    "use_region_overlap",
+    "show_splash",
+    "use_save_prompt",
+)
+
+#: 色彩管理（场景 view_settings）里可迁移的项
+MIGRATE_THEME_VIEW_KEYS = ("view_transform", "look", "exposure", "gamma")
+
+#: 迁移包里**绝不允许**出现的凭据类字段（导出写盘前、导入读入后各扫一遍）
+MIGRATE_CREDENTIAL_WORDS = (
+    "token", "password", "passwd", "secret", "api_key", "apikey",
+    "credential", "login", "email",
+)
+
+#: 插件偏好设置里允许迁移的 RNA 类型（跳过 PointerProperty / 集合 / 向量）
+MIGRATE_SIMPLE_TYPES = ("BOOLEAN", "INT", "FLOAT", "STRING", "ENUM")
+
+#: 最近一次迁移的结果（真机测试直接断言它，不新增设置项）
+LAST_MIGRATION_RESULT = {}
+
+#: 最近一次「恢复出厂启动布局」的结果
+LAST_STARTUP_RESET_RESULT = {}
+
+#: 启动文件备份名的前缀，最终形如 ``startup.blend.bak-20260101-101010``
+STARTUP_BACKUP_PREFIX = "startup.blend.bak-"
+
+
+# ------------------------------------------------------ 纯函数：键位与凭据扫描
+
+
+def migrate_keymap_key(entry):
+    """键位去重键：``idname + type + 四个修饰键``（需求里给的判据就是这三个部分）。
+
+    ``key_modifier`` **不进**去重键：它只是"再按哪个键"的附加条件，
+    两个完全独立的组合键可能只差这一项；把它算进去会让本该覆盖的键位被当成
+    新键位再追加一条。属性级差异（``props``）同样不做比对 —— 这条限制在
+    README「已知限制」里如实写了。
+    """
+    entry = entry or {}
+    return (
+        str(entry.get("idname") or ""),
+        str(entry.get("type") or ""),
+        bool(entry.get("shift")),
+        bool(entry.get("ctrl")),
+        bool(entry.get("alt")),
+        bool(entry.get("oskey")),
+    )
+
+
+def migrate_keymap_label(entry):
+    """键位的人类可读文本（报告 / 确认框用），例如 ``Ctrl + E -> wm.call_menu_pie``。"""
+    entry = entry or {}
+    label = compat.key_label(
+        str(entry.get("type") or ""),
+        bool(entry.get("ctrl")), bool(entry.get("shift")),
+        bool(entry.get("alt")), bool(entry.get("oskey")),
+    )
+    return "{} -> {}".format(label, entry.get("idname") or "?")
+
+
+def migration_credential_hits(text):
+    """一段文本里命中的凭据类关键字（大小写不敏感）。正常迁移包必须是空列表。"""
+    low = (text or "").lower()
+    return sorted(word for word in MIGRATE_CREDENTIAL_WORDS if word in low)
+
+
+def migration_action(kind, target, value, status, reason=""):
+    """一条迁移动作（纯数据，纯函数与执行器之间唯一的接口）。"""
+    return {
+        "kind": str(kind),
+        "target": str(target),
+        "value": value,
+        "status": str(status),
+        "reason": str(reason or ""),
+    }
+
+
+# ------------------------------------------------------- 纯函数：包的构建与校验
+
+
+def build_migration_pack(version_string, version, created, addons, keymaps, view,
+                         theme_pack, addon_prefs, notes=None):
+    """纯函数：把已经采集好的各部分拼成迁移包（schema 形状只在这里定）。
+
+    **包里不含任何凭据**：这里只放模块名、键位、界面数值、颜色与插件偏好，
+    没有任何账号 / token / 邮件字段（``validate_migration_pack`` 会再扫一遍）。
+    """
+    return {
+        "schema": MIGRATE_SCHEMA,
+        "source": {
+            "blender": str(version_string or ""),
+            "version": [int(part) for part in (version or ())],
+        },
+        "created": str(created or ""),
+        "addons": list(addons or []),
+        "keymaps": list(keymaps or []),
+        "view": dict(view or {}),
+        "theme": dict(theme_pack or {}),
+        "addon_prefs": dict(addon_prefs or {}),
+        "notes": list(notes or []),
+    }
+
+
+def validate_migration_pack(pack):
+    """纯函数：结构校验，返回 ``(是否通过, 问题列表)``。
+
+    缺字段、schema 版本不符、容器类型不对、出现凭据类字段 —— 都给出**明确原因**，
+    绝不静默放行（原因会原样出现在"失败 + 原因"报告里）。
+    """
+    if not isinstance(pack, dict):
+        return False, ["迁移包不是 JSON 对象"]
+    problems = []
+    schema = pack.get("schema")
+    if schema is None:
+        problems.append("缺少 schema 字段")
+    elif schema != MIGRATE_SCHEMA:
+        problems.append("schema 不支持：{}（本插件只认 {}）".format(schema, MIGRATE_SCHEMA))
+    source = pack.get("source")
+    if not isinstance(source, dict):
+        problems.append("缺少 source 字段（来源 Blender 版本）")
+    else:
+        if not isinstance(source.get("version"), (list, tuple)):
+            problems.append("source.version 缺失或不是列表")
+        if not str(source.get("blender") or ""):
+            problems.append("source.blender 缺失")
+    if not isinstance(pack.get("created"), str) or not pack.get("created"):
+        problems.append("缺少 created 字段")
+    for key, want in (("addons", list), ("keymaps", list), ("view", dict),
+                      ("theme", dict), ("addon_prefs", dict)):
+        if not isinstance(pack.get(key), want):
+            problems.append("{} 缺失或类型不对（应为 {}）".format(key, want.__name__))
+    try:
+        text = json.dumps(pack, ensure_ascii=False, default=str)
+    except Exception as error:
+        problems.append("迁移包无法序列化成 JSON：{}".format(error))
+        text = ""
+    hits = migration_credential_hits(text)
+    if hits:
+        problems.append("迁移包里出现凭据类字段：{}".format("、".join(hits)))
+    return (not problems), problems
+
+
+def dump_migration_pack(pack):
+    """纯函数：迁移包 → JSON 文本（UTF-8、缩进 2、键排序，便于 diff）。"""
+    return json.dumps(pack, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def load_migration_pack(path):
+    """读一份迁移包，返回 ``(包, 问题)``；有问题时包为 ``None``。"""
+    if not path:
+        return None, "没有指定迁移包文件"
+    if not os.path.exists(path):
+        return None, "找不到迁移包：{}".format(os.path.basename(str(path)))
+    try:
+        with open(path, encoding="utf-8") as handle:
+            pack = json.load(handle)
+    except Exception as error:
+        return None, "迁移包不是合法 JSON：{}".format(error)
+    ok, problems = validate_migration_pack(pack)
+    if not ok:
+        return None, "；".join(problems)
+    return pack, ""
+
+
+# ------------------------------------------------------- 纯函数：迁移计划（核心）
+
+
+def build_migration_plan(pack, current_state):
+    """纯函数：迁移包 + 本机现状 → 动作清单（**完全不碰 bpy**）。
+
+    返回的每一条都是 ``{kind, target, value, status, reason}``，status 取
+    :data:`MIGRATE_STATUS_APPLY` / :data:`MIGRATE_STATUS_SKIP` /
+    :data:`MIGRATE_STATUS_FAIL`。判据一律"本机确实有这个东西才 apply"：
+
+    * 插件：本机有该模块才启用；**已启用** → skip；本机没有 → skip（绝不硬装、绝不猜包名）
+    * 键位：``idname + type + 修饰键`` 已存在 → skip（原因写清楚）；否则 apply
+    * 界面项 / 色彩管理项 / 插件偏好项：本版本没有这项 → skip（原因写明）
+    * 主题颜色：本版本没有那条颜色路径 → 单独一条 skip 动作，列出前几项
+    * 结构问题（缺字段 / 缺 idname / 值不是简单类型）：fail + 原因
+    """
+    actions = []
+    ok, problems = validate_migration_pack(pack)
+    if not ok:
+        for problem in problems:
+            actions.append(migration_action(
+                MIGRATE_KIND_PACK, "pack", None, MIGRATE_STATUS_FAIL, problem))
+        return actions
+
+    state = current_state or {}
+    modules = set(str(name) for name in (state.get("modules") or ()))
+    enabled_modules = set(str(name) for name in (state.get("enabled_modules") or ()))
+    keymaps = state.get("keymaps") or {}
+    view_keys = set(str(name) for name in (state.get("view_keys") or ()))
+    theme_paths = set(str(name) for name in (state.get("theme_paths") or ()))
+    theme_view_keys = set(str(name) for name in (state.get("theme_view_keys") or ()))
+    preset_names = set(str(name) for name in (state.get("preset_names") or ()))
+    pref_keys = set(str(name) for name in (state.get("addon_pref_keys") or ()))
+
+    # ---- 1. 已启用插件 ----
+    for raw in pack.get("addons") or []:
+        entry = raw or {}
+        module = str(entry.get("module") or "")
+        if not module:
+            actions.append(migration_action(
+                MIGRATE_KIND_ADDON, "?", entry, MIGRATE_STATUS_FAIL,
+                "迁移包里的插件项没有模块名"))
+        elif module not in modules:
+            actions.append(migration_action(
+                MIGRATE_KIND_ADDON, module, entry, MIGRATE_STATUS_SKIP,
+                "本机没有这个插件模块（不硬装、不猜包名）"))
+        elif module in enabled_modules:
+            actions.append(migration_action(
+                MIGRATE_KIND_ADDON, module, entry, MIGRATE_STATUS_SKIP,
+                "本机已经启用（无需重复启用）"))
+        else:
+            actions.append(migration_action(
+                MIGRATE_KIND_ADDON, module, entry, MIGRATE_STATUS_APPLY, ""))
+
+    # ---- 2. 键位自定义 ----
+    for raw in pack.get("keymaps") or []:
+        block = raw or {}
+        name = str(block.get("name") or "")
+        items = block.get("items") or []
+        if not name:
+            actions.append(migration_action(
+                MIGRATE_KIND_KEYMAP, "?", block, MIGRATE_STATUS_FAIL,
+                "键位分组没有名字"))
+            continue
+        known = set()
+        for existing in keymaps.get(name) or []:
+            known.add(migrate_keymap_key(existing))
+        for raw_item in items:
+            item = raw_item or {}
+            if not str(item.get("idname") or "") or not str(item.get("type") or ""):
+                actions.append(migration_action(
+                    MIGRATE_KIND_KEYMAP, name, item, MIGRATE_STATUS_FAIL,
+                    "键位项缺少 idname 或 type"))
+                continue
+            if migrate_keymap_key(item) in known:
+                actions.append(migration_action(
+                    MIGRATE_KIND_KEYMAP, name, item, MIGRATE_STATUS_SKIP,
+                    "本机已有同 idname + type + 修饰键的键位（{}）".format(
+                        migrate_keymap_label(item))))
+                continue
+            # 包内自重复也按"已存在"处理，避免一次导入加两条一模一样的键位
+            known.add(migrate_keymap_key(item))
+            actions.append(migration_action(
+                MIGRATE_KIND_KEYMAP, name, item, MIGRATE_STATUS_APPLY, ""))
+
+    # ---- 3. 界面偏好 ----
+    for key in sorted(pack.get("view") or {}):
+        value = (pack.get("view") or {})[key]
+        if str(key) not in view_keys:
+            actions.append(migration_action(
+                MIGRATE_KIND_VIEW, key, value, MIGRATE_STATUS_SKIP,
+                "本版本没有这个界面设置项"))
+        elif not isinstance(value, (bool, int, float, str)):
+            actions.append(migration_action(
+                MIGRATE_KIND_VIEW, key, value, MIGRATE_STATUS_FAIL,
+                "值不是简单类型（bool / int / float / str）"))
+        else:
+            actions.append(migration_action(MIGRATE_KIND_VIEW, key, value,
+                                            MIGRATE_STATUS_APPLY, ""))
+
+    # ---- 4. 主题（预设名 + 颜色表 + 色彩管理）----
+    theme_pack = pack.get("theme") or {}
+    preset = str(theme_pack.get("preset") or "")
+    if preset:
+        status = MIGRATE_STATUS_APPLY if preset in preset_names else MIGRATE_STATUS_SKIP
+        reason = "" if preset in preset_names else "本机没有这个配色预设（颜色表仍按项导入）"
+        actions.append(migration_action(MIGRATE_KIND_THEME_PRESET, preset, preset,
+                                        status, reason))
+
+    colors = theme_pack.get("colors") or {}
+    if colors:
+        supported = {}
+        dropped = []
+        for path in sorted(colors):
+            value = colors[path]
+            if str(path) not in theme_paths:
+                dropped.append(str(path))
+                continue
+            if not isinstance(value, (list, tuple)) or len(value) not in (3, 4):
+                dropped.append(str(path))
+                continue
+            try:
+                supported[str(path)] = [float(component) for component in value]
+            except (TypeError, ValueError):
+                dropped.append(str(path))
+        if supported:
+            actions.append(migration_action(MIGRATE_KIND_THEME_COLORS, "theme.colors",
+                                            supported, MIGRATE_STATUS_APPLY, ""))
+        if dropped:
+            actions.append(migration_action(
+                MIGRATE_KIND_THEME_COLORS, "theme.colors", {"paths": dropped},
+                MIGRATE_STATUS_SKIP,
+                "{} 项主题颜色在本版本不存在（{}）".format(
+                    len(dropped), "、".join(dropped[:STATUS_ITEM_LIMIT]))))
+
+    for key in sorted(theme_pack.get("view_settings") or {}):
+        value = (theme_pack.get("view_settings") or {})[key]
+        if str(key) not in theme_view_keys:
+            actions.append(migration_action(
+                MIGRATE_KIND_THEME_VIEW, key, value, MIGRATE_STATUS_SKIP,
+                "本版本没有这个色彩管理项"))
+        elif not isinstance(value, (bool, int, float, str)):
+            actions.append(migration_action(
+                MIGRATE_KIND_THEME_VIEW, key, value, MIGRATE_STATUS_FAIL,
+                "值不是简单类型（bool / int / float / str）"))
+        else:
+            actions.append(migration_action(MIGRATE_KIND_THEME_VIEW, key, value,
+                                            MIGRATE_STATUS_APPLY, ""))
+
+    # ---- 5. 本插件偏好设置（白名单：简单属性）----
+    for key in sorted(pack.get("addon_prefs") or {}):
+        value = (pack.get("addon_prefs") or {})[key]
+        if str(key) not in pref_keys:
+            actions.append(migration_action(
+                MIGRATE_KIND_ADDON_PREFS, key, value, MIGRATE_STATUS_SKIP,
+                "本版本没有这个偏好设置项"))
+        elif not isinstance(value, (bool, int, float, str)):
+            actions.append(migration_action(
+                MIGRATE_KIND_ADDON_PREFS, key, value, MIGRATE_STATUS_FAIL,
+                "值不是简单类型（bool / int / float / str）"))
+        else:
+            actions.append(migration_action(MIGRATE_KIND_ADDON_PREFS, key, value,
+                                            MIGRATE_STATUS_APPLY, ""))
+
+    return actions
+
+
+def migration_counts(actions):
+    """按状态统计动作条数（纯函数）。"""
+    counts = {MIGRATE_STATUS_APPLY: 0, MIGRATE_STATUS_SKIP: 0, MIGRATE_STATUS_FAIL: 0}
+    for action in actions or ():
+        status = (action or {}).get("status")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _migration_reasons(results, limit=STATUS_ITEM_LIMIT):
+    """把几条结果的「目标：原因」拼成一行（原因列表只列前 ``limit`` 条）。"""
+    parts = []
+    for result in list(results)[:max(0, limit)]:
+        target = str(result.get("target") or "?")
+        reason = str(result.get("reason") or "未给出原因")
+        parts.append("{}：{}".format(target, reason))
+    return "；".join(parts)
+
+
+def migration_summary(counts, results):
+    """结束报告文案：已应用 X 项 / 跳过 Y 项（前几条原因）/ 失败 Z 项（原因）。"""
+    applied = counts.get(MIGRATE_STATUS_APPLY, 0)
+    parts = ["已应用 {} 项".format(applied)]
+    skipped = [item for item in results or () if item.get("status") == MIGRATE_STATUS_SKIP]
+    if skipped:
+        parts.append("跳过 {} 项（{}）".format(len(skipped), _migration_reasons(skipped)))
+    else:
+        parts.append("跳过 0 项")
+    failed = [item for item in results or () if item.get("status") == MIGRATE_STATUS_FAIL]
+    if failed:
+        parts.append("失败 {} 项（{}）".format(
+            len(failed), _migration_reasons(failed, len(failed))))
+    else:
+        parts.append("失败 0 项")
+    return "；".join(parts)
+
+
+def migrate_confirm_lines(pack, actions, current_version=""):
+    """二次确认框要列的摘要（纯函数，便于断言）。
+
+    需求要求确认框里明确列出：**将从哪个版本迁移几项、其中几项预计跳过**。
+    """
+    source = (pack or {}).get("source") or {}
+    source_text = str(source.get("blender") or "未知版本")
+    counts = migration_counts(actions)
+    total = counts[MIGRATE_STATUS_APPLY] + counts[MIGRATE_STATUS_SKIP]
+    keymap_total = 0
+    for block in (pack or {}).get("keymaps") or []:
+        keymap_total += len((block or {}).get("items") or [])
+    theme_colors = len(((pack or {}).get("theme") or {}).get("colors") or {})
+    return [
+        "将从 Blender {} 迁移 {} 项到本机（Blender {}）".format(
+            source_text, total, current_version or "本机"),
+        "预计应用 {} 项 / 跳过 {} 项 / 失败 {} 项".format(
+            counts[MIGRATE_STATUS_APPLY], counts[MIGRATE_STATUS_SKIP],
+            counts[MIGRATE_STATUS_FAIL]),
+        "包内容：插件 {} 个 / 键位 {} 条 / 界面 {} 项 / 主题颜色 {} 项 / 插件偏好 {} 项".format(
+            len((pack or {}).get("addons") or []), keymap_total,
+            len((pack or {}).get("view") or {}), theme_colors,
+            len((pack or {}).get("addon_prefs") or {})),
+        "偏好设置文件不能跨大版本直拷，这里按项语义重建；点「确定」= 同意写入本机偏好",
+        "完成后会保存一次偏好设置，需要重启 Blender 才完全生效",
+    ]
+
+
+# ---------------------------------------------------------- 执行（只做 apply 项）
+
+
+def apply_migration_plan(actions, handlers):
+    """按计划执行：**只做 apply 项**，每项独立 try/except，一项失败不影响其它。
+
+    ``handlers`` 是 ``{kind: callable(action)}``；返回 ``(结果列表, 计数)``。
+    结果列表里每条都带最终状态与原因，直接喂给 :func:`migration_summary`。
+    """
+    results = []
+    counts = {MIGRATE_STATUS_APPLY: 0, MIGRATE_STATUS_SKIP: 0, MIGRATE_STATUS_FAIL: 0}
+    for raw in actions or ():
+        action = raw or {}
+        kind = action.get("kind")
+        target = action.get("target")
+        status = action.get("status")
+        reason = str(action.get("reason") or "")
+        if status == MIGRATE_STATUS_SKIP:
+            counts[MIGRATE_STATUS_SKIP] += 1
+            results.append({"kind": kind, "target": target,
+                            "status": MIGRATE_STATUS_SKIP,
+                            "reason": reason or "计划里标为跳过"})
+            continue
+        if status != MIGRATE_STATUS_APPLY:
+            counts[MIGRATE_STATUS_FAIL] += 1
+            results.append({"kind": kind, "target": target,
+                            "status": MIGRATE_STATUS_FAIL,
+                            "reason": reason or "计划里标为失败"})
+            continue
+        handler = (handlers or {}).get(kind)
+        if handler is None:
+            counts[MIGRATE_STATUS_FAIL] += 1
+            results.append({"kind": kind, "target": target,
+                            "status": MIGRATE_STATUS_FAIL,
+                            "reason": "没有对应的执行器：{}".format(kind)})
+            continue
+        try:
+            detail = handler(action)
+        except Exception as error:
+            counts[MIGRATE_STATUS_FAIL] += 1
+            results.append({"kind": kind, "target": target,
+                            "status": MIGRATE_STATUS_FAIL,
+                            "reason": str(error)})
+        else:
+            counts[MIGRATE_STATUS_APPLY] += 1
+            results.append({"kind": kind, "target": target,
+                            "status": MIGRATE_STATUS_APPLY,
+                            "reason": str(detail or "")})
+    return results, counts
+
+
+# ---------------------------------------------------------- 采集（只读，读 bpy）
+
+
+def _module_version(module_name):
+    """读一个插件模块的版本号，返回 ``(版本文本, 说明)``；读不到就如实标注。"""
+    module = None
+    try:
+        module = sys.modules.get(str(module_name))
+    except Exception:
+        module = None
+    bl_info = getattr(module, "bl_info", None)
+    if isinstance(bl_info, dict):
+        version = bl_info.get("version")
+        if isinstance(version, (list, tuple)) and version:
+            return ".".join(str(part) for part in version), ""
+        if isinstance(version, str) and version:
+            return version, ""
+    return "", "读不到版本（扩展清单里的版本没暴露给 Python）"
+
+
+def collect_enabled_addons(context):
+    """已启用的插件（只读）→ ``(列表, 说明)``；每项 ``{module, version, version_note}``。
+
+    ``preferences.addons`` **只装着已启用的插件**（这是 Blender 的既有语义，官方文档与
+    几十年的插件代码都这么用），所以不用再看 ``Addon.enabled`` —— 实测 4.0.2 的
+    ``Addon`` 根本没有 ``enabled`` 属性（那是 4.2 引入扩展体系之后才有的），
+    照 ``getattr(addon, "enabled", False)`` 判断会把已启用插件全漏掉。
+    """
+    notes = []
+    result = []
+    addons = getattr(getattr(context, "preferences", None), "addons", None)
+    if addons is None:
+        return result, ["读不到 preferences.addons，本次没有导出插件清单"]
+    try:
+        entries = list(addons.items())
+    except Exception as error:
+        return result, ["读不到插件清单（{}）".format(error)]
+    seen = set()
+    for key, addon in entries:
+        module = str(getattr(addon, "module", "") or key or "")
+        if not module or module in seen:
+            continue
+        seen.add(module)
+        version, note = _module_version(module)
+        result.append({"module": module, "version": version, "version_note": note})
+    result.sort(key=lambda item: item["module"])
+    if not result:
+        notes.append("当前没有启用任何插件")
+    return result, notes
+
+
+def _keymap_item_signature(item):
+    """只读一条 keymap item 的去重签名（不碰 properties，快）。"""
+    return migrate_keymap_key({
+        "idname": getattr(item, "idname", ""),
+        "type": getattr(item, "type", ""),
+        "shift": getattr(item, "shift", False),
+        "ctrl": getattr(item, "ctrl", False),
+        "alt": getattr(item, "alt", False),
+        "oskey": getattr(item, "oskey", False),
+    })
+
+
+def _keymap_item_props(item):
+    """keymap item 上**能序列化**的简单属性（算符的 RNA 属性）；读不到就给空 dict。"""
+    props = {}
+    source = getattr(item, "properties", None)
+    if source is None:
+        return props
+    try:
+        rna = source.bl_rna.properties
+    except Exception:
+        return props
+    for prop in rna:
+        name = getattr(prop, "identifier", "")
+        if not name or name == "rna_type":
+            continue
+        if getattr(prop, "is_array", False):
+            continue
+        if getattr(prop, "type", "") not in MIGRATE_SIMPLE_TYPES:
+            continue
+        try:
+            value = getattr(source, name)
+        except Exception:
+            continue
+        if isinstance(value, (bool, int, float, str)):
+            props[name] = value
+    return props
+
+
+def _keymap_item_record(item):
+    """把一条 keymap item 变成纯数据（导出用；props 序列化失败就记空）。"""
+    return {
+        "idname": str(getattr(item, "idname", "") or ""),
+        "type": str(getattr(item, "type", "") or ""),
+        "shift": bool(getattr(item, "shift", False)),
+        "ctrl": bool(getattr(item, "ctrl", False)),
+        "alt": bool(getattr(item, "alt", False)),
+        "oskey": bool(getattr(item, "oskey", False)),
+        "key_modifier": str(getattr(item, "key_modifier", "") or ""),
+        "active": bool(getattr(item, "active", True)),
+        "props": _keymap_item_props(item),
+    }
+
+
+def collect_user_keymaps(context):
+    """用户自定义键位（**只读**）→ ``(键位分组列表, 说明)``。
+
+    只导 ``is_user_modified`` 为真的 keymap 里**与出厂不同**的 items：
+    判据是"同一 keymap 里，出厂键位表没有这个 ``idname + type + 修饰键`` 组合"。
+    出厂键位表读不到（后台 / 无默认 keyconfig）时**不猜**，整套键位如实标注跳过。
+    """
+    notes = []
+    result = []
+    keyconfigs = getattr(getattr(context, "window_manager", None), "keyconfigs", None)
+    user = getattr(keyconfigs, "user", None)
+    if user is None:
+        return result, ["读不到用户键位配置（后台模式或还没生成 user keyconfig），本次没有导出键位"]
+    default = getattr(keyconfigs, "default", None)
+    if default is None:
+        return result, ["读不到出厂键位表，无法判断哪些键位是自定义的，本次没有导出键位"]
+
+    for keymap in user.keymaps:
+        if not getattr(keymap, "is_user_modified", False):
+            continue
+        name = str(getattr(keymap, "name", "") or "")
+        if not name:
+            continue
+        try:
+            default_keymap = default.keymaps.get(name)
+        except Exception:
+            default_keymap = None
+        known = set()
+        if default_keymap is not None:
+            for item in default_keymap.keymap_items:
+                known.add(_keymap_item_signature(item))
+        items = []
+        for item in keymap.keymap_items:
+            if _keymap_item_signature(item) in known:
+                continue
+            items.append(_keymap_item_record(item))
+        if items:
+            items.sort(key=lambda record: (record["idname"], record["type"]))
+            result.append({"name": name, "items": items})
+    result.sort(key=lambda block: block["name"])
+    if not result:
+        notes.append("用户键位表里没有与出厂不同的自定义键位")
+    return result, notes
+
+
+def collect_view_settings(context):
+    """界面偏好里可迁移的子集（**只读**）→ ``(字典, 说明)``。
+
+    逐项 ``hasattr`` 判断：只导出**真实存在且可读**的项，不存在的写进说明。
+    """
+    data = {}
+    notes = []
+    view = getattr(getattr(context, "preferences", None), "view", None)
+    if view is None:
+        return data, ["读不到 preferences.view，本次没有导出界面偏好"]
+    for key in MIGRATE_VIEW_KEYS:
+        if not hasattr(view, key):
+            notes.append("本版本没有界面设置项 {}".format(key))
+            continue
+        try:
+            value = getattr(view, key)
+        except Exception as error:
+            notes.append("读不到界面设置项 {}（{}）".format(key, error))
+            continue
+        if isinstance(value, (bool, int, float, str)):
+            data[key] = value
+        else:
+            notes.append("界面设置项 {} 不是简单类型，跳过".format(key))
+    return data, notes
+
+
+def collect_theme_pack(context, preferences):
+    """当前主题（预设名 + 渲染出的颜色表 + 色彩管理，**只读**）→ ``(字典, 说明)``。"""
+    notes = []
+    data = {"preset": "", "colors": {}, "view_settings": {}}
+    if preferences is not None:
+        try:
+            data["preset"] = theme.active_preset(preferences)
+        except Exception as error:
+            notes.append("读不到当前配色预设名（{}）".format(error))
+    current = None
+    try:
+        current = theme.current_theme(context)
+    except Exception as error:
+        notes.append("读不到当前主题（{}）".format(error))
+    if current is None:
+        notes.append("读不到当前主题，本次没有导出主题颜色")
+        colors = None
+    else:
+        colors = None
+        if data["preset"]:
+            try:
+                # 复用 redkolab 既有的「预设 + 四个调整」渲染入口，不另写一套
+                colors = theme.render_preset_colors(data["preset"], preferences)
+            except Exception as error:
+                notes.append("渲染预设颜色失败（{}）".format(error))
+        if colors:
+            captured = {}
+            for path in sorted(colors):
+                try:
+                    exists = theme.get_color(current, path) is not None
+                except Exception:
+                    exists = False
+                if not exists:
+                    notes.append("主题颜色项 {} 在本版本不存在，未导出".format(path))
+                    continue
+                try:
+                    captured[str(path)] = [float(component) for component in colors[path]]
+                except (TypeError, ValueError):
+                    notes.append("主题颜色项 {} 无法序列化，未导出".format(path))
+            data["colors"] = captured
+        else:
+            notes.append("没有可导出的主题颜色表")
+    view_settings = getattr(getattr(context, "scene", None), "view_settings", None)
+    if view_settings is None:
+        notes.append("读不到场景色彩管理（view_settings），本次没有导出")
+    else:
+        for key in MIGRATE_THEME_VIEW_KEYS:
+            if not hasattr(view_settings, key):
+                notes.append("本版本没有色彩管理项 {}".format(key))
+                continue
+            try:
+                value = getattr(view_settings, key)
+            except Exception as error:
+                notes.append("读不到色彩管理项 {}（{}）".format(key, error))
+                continue
+            if isinstance(value, (bool, int, float, str)):
+                data["view_settings"][key] = value
+    return data, notes
+
+
+def collect_addon_preferences(preferences):
+    """本插件自己的偏好设置里可迁移的简单项（**只读**）→ ``(字典, 说明)``。
+
+    白名单：bool / int / float / string / enum 五类。
+    **跳过** PointerProperty、集合与向量（``is_array``）—— 它们跨版本没有语义。
+    """
+    data = {}
+    notes = []
+    if preferences is None:
+        return data, ["读不到本插件偏好设置，本次没有导出插件偏好"]
+    try:
+        rna = preferences.bl_rna.properties
+    except Exception as error:
+        return data, ["读不到偏好设置结构（{}）".format(error)]
+    for prop in rna:
+        name = getattr(prop, "identifier", "")
+        if not name or name == "rna_type":
+            continue
+        if getattr(prop, "is_array", False):
+            notes.append("{} 是向量 / 集合，不迁移".format(name))
+            continue
+        if getattr(prop, "is_readonly", False):
+            continue
+        prop_type = getattr(prop, "type", "")
+        if prop_type not in MIGRATE_SIMPLE_TYPES:
+            notes.append("{} 是 {} 类型（指针 / 集合），不迁移".format(name, prop_type or "?"))
+            continue
+        try:
+            value = getattr(preferences, name)
+        except Exception:
+            continue
+        if isinstance(value, (bool, int, float, str)):
+            data[name] = value
+    return data, notes
+
+
+def migration_pack_from_context(context):
+    """采集本机现状 → 迁移包（**纯只读**：一个偏好设置都不写）。"""
+    preferences = compat.get_preferences(context)
+    notes = []
+    addons, addon_notes = collect_enabled_addons(context)
+    notes.extend(addon_notes)
+    keymaps, keymap_notes = collect_user_keymaps(context)
+    notes.extend(keymap_notes)
+    view, view_notes = collect_view_settings(context)
+    notes.extend(view_notes)
+    theme_pack, theme_notes = collect_theme_pack(context, preferences)
+    notes.extend(theme_notes)
+    addon_prefs, prefs_notes = collect_addon_preferences(preferences)
+    notes.extend(prefs_notes)
+    created = datetime.datetime.now().replace(microsecond=0).isoformat()
+    return build_migration_pack(
+        bpy.app.version_string, tuple(bpy.app.version), created,
+        addons, keymaps, view, theme_pack, addon_prefs, notes)
+
+
+def current_migration_state(context, pack=None):
+    """本机现状快照（只读），喂给纯函数 :func:`build_migration_plan`。
+
+    ``pack`` 只用来决定"要给哪些键位分组做去重比对"（避免把整套 keyconfig 都读一遍）。
+    """
+    state = {
+        "blender": bpy.app.version_string,
+        "version": [int(part) for part in bpy.app.version],
+        "modules": [],
+        "enabled_modules": [],
+        "keymaps": {},
+        "view_keys": [],
+        "theme_paths": [],
+        "theme_view_keys": [],
+        "preset_names": [],
+        "addon_pref_keys": [],
+    }
+    preferences = compat.get_preferences(context)
+
+    modules = set()
+    try:
+        for entry in addon_utils.modules(refresh=False):
+            name = getattr(entry, "__name__", "")
+            if name:
+                modules.add(str(name))
+    except Exception:
+        pass
+    enabled = set()
+    try:
+        # preferences.addons 只装已启用的插件（Blender 既有语义；4.0 的 Addon 没有
+        # enabled 属性，所以不能用 addon.enabled 判断）
+        for key in context.preferences.addons.keys():
+            if key:
+                enabled.add(str(key))
+    except Exception:
+        enabled = set()
+    modules |= enabled
+    state["modules"] = sorted(modules)
+    state["enabled_modules"] = sorted(enabled)
+
+    keyconfigs = getattr(getattr(context, "window_manager", None), "keyconfigs", None)
+    user = getattr(keyconfigs, "user", None)
+    wanted_names = []
+    for block in (pack or {}).get("keymaps") or []:
+        name = str((block or {}).get("name") or "")
+        if name and name not in wanted_names:
+            wanted_names.append(name)
+    if user is not None:
+        for name in wanted_names:
+            try:
+                keymap = user.keymaps.get(name)
+            except Exception:
+                keymap = None
+            records = []
+            if keymap is not None:
+                for item in keymap.keymap_items:
+                    records.append({
+                        "idname": str(getattr(item, "idname", "") or ""),
+                        "type": str(getattr(item, "type", "") or ""),
+                        "shift": bool(getattr(item, "shift", False)),
+                        "ctrl": bool(getattr(item, "ctrl", False)),
+                        "alt": bool(getattr(item, "alt", False)),
+                        "oskey": bool(getattr(item, "oskey", False)),
+                    })
+            state["keymaps"][name] = records
+
+    view = getattr(getattr(context, "preferences", None), "view", None)
+    state["view_keys"] = [key for key in MIGRATE_VIEW_KEYS
+                          if view is not None and hasattr(view, key)]
+
+    current = None
+    try:
+        current = theme.current_theme(context)
+    except Exception:
+        current = None
+    if current is not None:
+        paths = []
+        for path in theme.available_paths(context):
+            try:
+                if theme.get_color(current, path) is not None:
+                    paths.append(path)
+            except Exception:
+                continue
+        state["theme_paths"] = sorted(paths)
+    try:
+        state["preset_names"] = list(theme.preset_button_names())
+    except Exception:
+        state["preset_names"] = []
+
+    view_settings = getattr(getattr(context, "scene", None), "view_settings", None)
+    state["theme_view_keys"] = [key for key in MIGRATE_THEME_VIEW_KEYS
+                                if view_settings is not None and hasattr(view_settings, key)]
+    state["addon_pref_keys"] = sorted(collect_addon_preferences(preferences)[0])
+    return state
+
+
+# ------------------------------------------------------------ 执行器（会写状态）
+
+
+def _bind_migration_handler(context, function):
+    """把 ``function(context, action)`` 绑成执行器表要的 ``callable(action)``。"""
+    def handler(action):
+        return function(context, action)
+    return handler
+
+
+def migration_handlers(context):
+    """执行器表：键 = 动作 kind，值 = ``callable(action)``（只有这些会写本机状态）。"""
+    pairs = (
+        (MIGRATE_KIND_ADDON, _apply_migration_addon),
+        (MIGRATE_KIND_KEYMAP, _apply_migration_keymap),
+        (MIGRATE_KIND_VIEW, _apply_migration_view),
+        (MIGRATE_KIND_THEME_PRESET, _apply_migration_theme_preset),
+        (MIGRATE_KIND_THEME_COLORS, _apply_migration_theme_colors),
+        (MIGRATE_KIND_THEME_VIEW, _apply_migration_theme_view),
+        (MIGRATE_KIND_ADDON_PREFS, _apply_migration_addon_prefs),
+    )
+    handlers = {}
+    for kind, function in pairs:
+        handlers[kind] = _bind_migration_handler(context, function)
+    return handlers
+
+
+def _apply_migration_addon(context, action):
+    """启用一个插件模块：**只启用本机确实有的**，验证它真的变成 enabled。"""
+    entry = action.get("value") or {}
+    module = str(entry.get("module") or action.get("target") or "")
+    if not module:
+        raise RuntimeError("插件模块名为空")
+    try:
+        available, loaded = addon_utils.check(module)
+    except Exception as error:
+        raise RuntimeError("addon_utils.check 失败：{}".format(error))
+    if not available and not loaded:
+        raise RuntimeError("本机没有这个模块（不硬装）")
+    addon_utils.enable(module, default_set=True)
+    try:
+        _available, enabled_now = addon_utils.check(module)
+    except Exception as error:
+        raise RuntimeError("addon_utils.check 失败：{}".format(error))
+    if not enabled_now:
+        raise RuntimeError("addon_utils.enable 没有真正启用它")
+    return "已启用 {}".format(module)
+
+
+def _migration_keymap(context, name):
+    """取（或新建）用户键位表里的同名 keymap；读不到 user keyconfig 时返回 None。"""
+    keyconfigs = getattr(getattr(context, "window_manager", None), "keyconfigs", None)
+    user = getattr(keyconfigs, "user", None)
+    if user is None:
+        return None
+    keymap = None
+    try:
+        keymap = user.keymaps.get(str(name))
+    except Exception:
+        keymap = None
+    if keymap is not None:
+        return keymap
+    try:
+        return user.keymaps.new(name=str(name))
+    except Exception:
+        return None
+
+
+def _apply_migration_keymap(context, action):
+    """在用户键位表里按 ``idname + type + 修饰键`` 去重后追加一条键位。"""
+    item = action.get("value") or {}
+    idname = str(item.get("idname") or "")
+    key_type = str(item.get("type") or "")
+    if not idname or not key_type:
+        raise RuntimeError("键位项缺少 idname 或 type")
+    keymap = _migration_keymap(context, str(action.get("target") or ""))
+    if keymap is None:
+        raise RuntimeError("读不到用户键位配置（后台模式没有 user keyconfig）")
+    for existing in keymap.keymap_items:
+        if _keymap_item_signature(existing) == migrate_keymap_key(item):
+            return "已存在同名同组合的键位，未重复添加"
+    kwargs = {
+        "type": key_type,
+        "value": 'PRESS',
+        "shift": bool(item.get("shift")),
+        "ctrl": bool(item.get("ctrl")),
+        "alt": bool(item.get("alt")),
+        "oskey": bool(item.get("oskey")),
+        "any": False,
+    }
+    key_modifier = str(item.get("key_modifier") or "")
+    if key_modifier:
+        kwargs["key_modifier"] = key_modifier
+    added = keymap.keymap_items.new(idname, **kwargs)
+    added.active = bool(item.get("active", True))
+    for name, value in (item.get("props") or {}).items():
+        try:
+            setattr(added.properties, name, value)
+        except Exception:
+            # 属性级差异（例如某个算符属性在本版本改名）如实忽略，不当成整条失败
+            continue
+    return "已追加 {}".format(migrate_keymap_label(item))
+
+
+def _apply_migration_view(context, action):
+    """写一项界面偏好（值非法时 setattr 自己会抛，交给上层记失败）。"""
+    view = getattr(getattr(context, "preferences", None), "view", None)
+    key = str(action.get("target") or "")
+    if view is None:
+        raise RuntimeError("读不到 preferences.view")
+    if not hasattr(view, key):
+        raise RuntimeError("本版本没有 {} 这个界面设置项".format(key))
+    setattr(view, key, action.get("value"))
+    return "已设置 {} = {}".format(key, action.get("value"))
+
+
+def _apply_migration_theme_preset(context, action):
+    """套用本机这一套配色预设（复用 theme.render_preset_colors，不另写一套）。"""
+    name = str(action.get("target") or "")
+    preferences = compat.get_preferences(context)
+    current = theme.current_theme(context)
+    if preferences is None or current is None:
+        raise RuntimeError("读不到偏好设置或主题")
+    colors = theme.render_preset_colors(name, preferences)
+    if not colors:
+        raise RuntimeError("这套配色预设在本机没有可用颜色")
+    applied = theme.apply_colors(current, colors)
+    theme.apply_sizes(current, theme.preset_sizes(name))
+    preferences.last_preset = name
+    return "已套用配色「{}」（{} 项）".format(name, applied)
+
+
+def _apply_migration_theme_colors(context, action):
+    """把迁移包里的颜色表写进当前主题；预设名不可用时固化成「自定义预设」。"""
+    colors = action.get("value") or {}
+    if not isinstance(colors, dict) or not colors:
+        raise RuntimeError("颜色表为空")
+    current = theme.current_theme(context)
+    if current is None:
+        raise RuntimeError("读不到当前主题")
+    applied = theme.apply_colors(current, colors)
+    if not applied:
+        raise RuntimeError("没有可写入的主题颜色项")
+    preferences = compat.get_preferences(context)
+    if preferences is not None:
+        text = getattr(preferences, "theme_custom", "")
+        stored = theme.preset_colors(theme.CUSTOM_PRESET_NAME, text)
+        if stored is None:
+            # 预设名在本机不存在（例如 4.0 的自定义预设）→ 把颜色表固化成「自定义预设」，
+            # 以后还能一键重套。只动内存，落盘由外层统一的那一次 save_userpref 负责。
+            updated, saved = theme.custom_save(text, theme.CUSTOM_PRESET_NAME, colors)
+            if saved:
+                preferences.theme_custom = updated
+    return "已写入 {} 项主题颜色".format(applied)
+
+
+def _apply_migration_theme_view(context, action):
+    """写一项色彩管理（view_transform / look / exposure / gamma）。"""
+    view_settings = getattr(getattr(context, "scene", None), "view_settings", None)
+    key = str(action.get("target") or "")
+    if view_settings is None:
+        raise RuntimeError("读不到场景色彩管理")
+    if not hasattr(view_settings, key):
+        raise RuntimeError("本版本没有 {} 这个色彩管理项".format(key))
+    setattr(view_settings, key, action.get("value"))
+    return "已设置色彩管理 {} = {}".format(key, action.get("value"))
+
+
+def _apply_migration_addon_prefs(context, action):
+    """写一项本插件偏好设置（枚举项在本版本不存在时记失败，不硬塞）。"""
+    preferences = compat.get_preferences(context)
+    key = str(action.get("target") or "")
+    if preferences is None:
+        raise RuntimeError("读不到本插件偏好设置")
+    try:
+        prop = preferences.bl_rna.properties.get(key)
+    except Exception:
+        prop = None
+    if prop is None:
+        raise RuntimeError("本版本没有 {} 这个偏好设置项".format(key))
+    value = action.get("value")
+    if getattr(prop, "type", "") == "ENUM":
+        names = [item.identifier for item in getattr(prop, "enum_items", [])]
+        if names and value not in names:
+            raise RuntimeError("枚举项 {} 在本版本不存在".format(value))
+    setattr(preferences, key, value)
+    return "已设置 {}".format(key)
+
+
+# ---------------------------------------------------------------- 两个迁移算符
+
+
+class HHZ_OT_migrate_export(bpy.types.Operator, ExportHelper):
+    """导出跨版本迁移包（4.0 侧用；5.x 也能导，用来备份当前状态）。
+
+    **只读**：整个 ``execute`` 一个偏好设置都不写，也不调用任何 save / install 类算子。
+    """
+
+    bl_idname = "hhz.migrate_export"
+    bl_label = "导出跨版本迁移包"
+    bl_description = (
+        "把本机的已启用插件、自定义键位、界面偏好、主题与插件偏好导出成一个 JSON 迁移包，"
+        "供另一个大版本的 Blender 逐项重建。偏好设置文件本身不能跨版本直拷，所以走这条路"
+    )
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+
+    def execute(self, context):
+        path = ""
+        if self.filepath:
+            path = bpy.path.ensure_ext(self.filepath, self.filename_ext)
+        if not path:
+            self.report({'ERROR'}, "没有指定导出文件")
+            return {'CANCELLED'}
+        try:
+            pack = migration_pack_from_context(context)
+        except Exception as error:
+            self.report({'ERROR'}, "采集本机现状失败：{}".format(error))
+            return {'CANCELLED'}
+        ok, problems = validate_migration_pack(pack)
+        if not ok:
+            self.report({'ERROR'}, "迁移包结构不合格：{}".format("；".join(problems)))
+            return {'CANCELLED'}
+        text = dump_migration_pack(pack)
+        hits = migration_credential_hits(text)
+        if hits:
+            self.report({'ERROR'}, "迁移包里出现凭据类字段，已中止写入：{}".format(
+                "、".join(hits)))
+            return {'CANCELLED'}
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(text)
+        except Exception as error:
+            self.report({'ERROR'}, "写迁移包失败：{}".format(error))
+            return {'CANCELLED'}
+
+        keymap_total = 0
+        for block in pack.get("keymaps") or []:
+            keymap_total += len(block.get("items") or [])
+        LAST_MIGRATION_RESULT.clear()
+        LAST_MIGRATION_RESULT.update({
+            "action": "export",
+            "path": path,
+            "addons": len(pack.get("addons") or []),
+            "keymaps": keymap_total,
+            "view": len(pack.get("view") or {}),
+            "colors": len((pack.get("theme") or {}).get("colors") or {}),
+            "addon_prefs": len(pack.get("addon_prefs") or {}),
+            "notes": list(pack.get("notes") or []),
+        })
+        self.report({'INFO'}, "已导出迁移包：{} 个插件 / {} 条键位 / {} 项界面 / {} 项主题颜色".format(
+            len(pack.get("addons") or []), keymap_total,
+            len(pack.get("view") or {}),
+            len((pack.get("theme") or {}).get("colors") or {})))
+        return {'FINISHED'}
+
+
+class HHZ_OT_migrate_import(bpy.types.Operator, ImportHelper):
+    """导入跨版本迁移包（5.2 侧用）：先算**纯函数计划**，再逐项执行。
+
+    * 执行前**二次确认**（列出：从哪个版本迁移几项、其中几项预计跳过）；
+    * 只有用户点按钮（= 显式同意）才保存一次偏好设置；
+    * 结束报告必须列出 已应用 X 项 / 跳过 Y 项（原因）/ 失败 Z 项（原因）。
+    """
+
+    bl_idname = "hhz.migrate_import"
+    bl_label = "导入跨版本迁移包"
+    bl_description = (
+        "读入另一个大版本导出的 JSON 迁移包，逐项重建已启用插件、键位、界面偏好、主题与插件偏好；"
+        "每一项都如实报告已应用 / 跳过 / 失败。最后保存一次偏好设置，重启 Blender 才完全生效"
+    )
+    bl_options = {'REGISTER'}
+
+    filename_ext = ".json"
+    filter_glob: bpy.props.StringProperty(default="*.json", options={'HIDDEN'})
+    confirmed: bpy.props.BoolProperty(
+        name="已确认",
+        description="二次确认标记：用户点过确定之后才真正执行迁移",
+        default=False,
+        options={'HIDDEN'},
+    )
+
+    def draw(self, context):
+        """二次确认框正文：把"迁什么、几项、预计跳过几项"逐行列出来。"""
+        try:
+            lines = getattr(self, "_confirm_lines", None) or []
+            for line in lines:
+                self.layout.label(text=str(line))
+        except Exception:
+            pass
+
+    def invoke(self, context, event):
+        # 选文件之前先把摘要算好（只读计划），这样确认框一出现就有真实数字
+        self._confirm_lines = []
+        try:
+            pack, _problem = load_migration_pack(self.filepath)
+            if pack is not None:
+                actions = build_migration_plan(
+                    pack, current_migration_state(context, pack))
+                self._confirm_lines = migrate_confirm_lines(
+                    pack, actions, bpy.app.version_string)
+        except Exception:
+            self._confirm_lines = []
+        return context.window_manager.fileselect_add(self)
+
+    def execute(self, context):
+        pack, problem = load_migration_pack(self.filepath)
+        if pack is None:
+            self.report({'ERROR'}, problem)
+            return {'CANCELLED'}
+        try:
+            state = current_migration_state(context, pack)
+        except Exception as error:
+            self.report({'ERROR'}, "读本机现状失败：{}".format(error))
+            return {'CANCELLED'}
+        actions = build_migration_plan(pack, state)
+        if not self.confirmed:
+            # 执行前的二次确认：把预计要做什么列清楚，用户点确定才算同意
+            self.confirmed = True
+            self._confirm_lines = migrate_confirm_lines(
+                pack, actions, bpy.app.version_string)
+            try:
+                return context.window_manager.invoke_props_dialog(self, width=560)
+            except Exception:
+                return context.window_manager.invoke_confirm(self, None)
+
+        results, counts = apply_migration_plan(actions, migration_handlers(context))
+        summary = migration_summary(counts, results)
+        # 用户点了这个按钮 = 显式同意：这里（且只有这里）保存一次偏好设置
+        saved = False
+        try:
+            bpy.ops.wm.save_userpref()
+            saved = True
+        except Exception as error:
+            summary += "；保存偏好设置失败：{}".format(error)
+        else:
+            summary += "。已保存偏好；需重启 Blender 生效"
+        LAST_MIGRATION_RESULT.clear()
+        LAST_MIGRATION_RESULT.update({
+            "action": "import",
+            "path": self.filepath,
+            "source": str((pack.get("source") or {}).get("blender") or ""),
+            "applied": counts.get(MIGRATE_STATUS_APPLY, 0),
+            "skipped": counts.get(MIGRATE_STATUS_SKIP, 0),
+            "failed": counts.get(MIGRATE_STATUS_FAIL, 0),
+            "results": [dict(item) for item in results],
+            "summary": summary,
+            "saved": saved,
+        })
+        level = {'WARNING'} if counts.get(MIGRATE_STATUS_FAIL, 0) else {'INFO'}
+        self.report(level, summary)
+        try:
+            compat.tag_redraw(context)
+        except Exception:
+            pass
+        return {'FINISHED'}
+
+
+# ------------------------------------------------- 恢复出厂启动布局（两侧通用）
+
+
+def _user_config_dir():
+    """Blender 用户配置目录（不存在就建出来）；读不到返回空串。"""
+    try:
+        config = bpy.utils.user_resource('CONFIG')
+    except Exception:
+        return ""
+    if not config:
+        return ""
+    config = os.path.abspath(config)
+    try:
+        os.makedirs(config, exist_ok=True)
+    except Exception:
+        return ""
+    return config
+
+
+def startup_backup_name(stamp=None):
+    """启动文件备份名：``startup.blend.bak-<YYYYmmdd-HHMMSS>``（纯函数，可测）。"""
+    if stamp is None:
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return "{}{}".format(STARTUP_BACKUP_PREFIX, str(stamp))
+
+
+def backup_startup_file(config_dir, stamp=None):
+    """把 ``startup.blend`` **先**备份到同目录；返回 ``(是否成功, 备份路径, 说明)``。
+
+    **备份失败必须中止**：启动文件是用户界面布局的唯一副本，没有备份就不重建。
+    ``startup.blend`` 本来就不存在（从没改过启动布局）不算失败，如实说明即可。
+    """
+    config_dir = config_dir or ""
+    if not config_dir or not os.path.isdir(config_dir):
+        return False, "", "读不到 Blender 配置目录"
+    source = os.path.join(config_dir, "startup.blend")
+    if not os.path.exists(source):
+        return True, "", "本机还没有自定义启动文件，无需备份"
+    target = os.path.join(config_dir, startup_backup_name(stamp))
+    try:
+        shutil.copy2(source, target)
+    except Exception as error:
+        return False, target, "备份启动文件失败：{}".format(error)
+    try:
+        same_size = os.path.getsize(target) == os.path.getsize(source)
+    except Exception:
+        same_size = False
+    if not same_size:
+        return False, target, "备份校验失败（备份文件大小与源文件不一致）"
+    return True, target, ""
+
+
+class HHZ_OT_reset_startup_layout(bpy.types.Operator):
+    """恢复出厂启动布局（4.0 与 5.2 都能用）。
+
+    顺序是硬要求：**先备份 startup.blend → 再加载出厂启动文件 → 再写启动文件**。
+    备份不成功就中止，绝不重建。
+
+    **绝不保存偏好设置**：一旦保存，内存里的出厂值就会覆盖用户的真实偏好设置文件。
+    本算符一次都不写偏好设置（真机测试里有源码级断言守着）。
+
+    ---- 为什么用 ``read_homefile(use_factory_startup=True)`` 而不是 ``read_factory_settings`` ----
+    需求原本写的是 ``bpy.ops.wm.read_factory_settings(use_empty=False)``。实测（4.0.2 真机、
+    沙箱配置目录）在**本插件自己的算符里**调用它会让 Blender 直接
+    ``EXCEPTION_ACCESS_VIOLATION``（进程退出码 11）—— 因为它会把偏好设置重置成出厂值，
+    从而在算符**执行中**把插件自己卸载掉，之后任何 ``self.report`` / 返回值都踩在已释放的
+    RNA 上。``read_homefile(use_factory_startup=True)`` 加载的是同一份出厂启动文件
+    （真正的 Blender 默认启动布局：Layout / Modeling / 8 个工作区 + 出厂场景），
+    但**不重置偏好设置**，所以插件不会被卸载，用户偏好也一个字都不动 ——
+    与非要求里的「偏好设置未改动」完全一致。
+    """
+
+    bl_idname = "hhz.reset_startup_layout"
+    bl_label = "恢复出厂启动布局"
+    bl_description = (
+        "把启动文件重建成 Blender 出厂布局：先备份现有的 startup.blend，再按出厂布局重写。"
+        "只重建启动布局，偏好设置文件一个字都不动；建议重建后重启 Blender"
+    )
+    # UNDO 是名义上的：重建会重新加载文件、撤销栈随之清空（README 已知限制里写了）
+    bl_options = {'REGISTER', 'UNDO'}
+
+    confirmed: bpy.props.BoolProperty(
+        name="已确认",
+        description="二次确认标记：用户点过确定之后才重建启动文件",
+        default=False,
+        options={'HIDDEN'},
+    )
+
+    def draw(self, context):
+        """确认框正文：有未保存改动时**明确警告**（但不替用户保存）。"""
+        try:
+            lines = getattr(self, "_confirm_lines", None) or []
+            for line in lines:
+                self.layout.label(text=str(line), icon='ERROR')
+        except Exception:
+            pass
+
+    def _confirm_warning(self, context):
+        """确认框文案（有未保存改动时明确警告，绝不替用户保存文件）。"""
+        lines = [
+            "将把启动文件重建为 Blender 出厂布局（重建前先备份 startup.blend）",
+            "偏好设置文件不会被本操作写入（本算符不保存偏好设置）",
+        ]
+        if getattr(bpy.data, "is_dirty", False):
+            lines.append("注意：当前文件有未保存改动，本操作会重设界面，建议先保存文件")
+        else:
+            lines.append("当前文件没有未保存改动")
+        return lines
+
+    def invoke(self, context, event):
+        self._confirm_lines = self._confirm_warning(context)
+        try:
+            return context.window_manager.invoke_props_dialog(self, width=520)
+        except Exception:
+            return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        dirty_before = bool(getattr(bpy.data, "is_dirty", False))
+        if not self.confirmed:
+            self.confirmed = True
+            self._confirm_lines = self._confirm_warning(context)
+            try:
+                return context.window_manager.invoke_props_dialog(self, width=520)
+            except Exception:
+                return context.window_manager.invoke_confirm(self, None)
+
+        config_dir = _user_config_dir()
+        if not config_dir:
+            self.report({'ERROR'}, "读不到 Blender 配置目录，已中止（没有改动任何文件）")
+            return {'CANCELLED'}
+
+        # ① 先备份：备份不成绝不重建
+        ok, backup_path, backup_note = backup_startup_file(config_dir)
+        if not ok:
+            self.report({'ERROR'}, "{}，已中止（启动文件没有改动）".format(backup_note))
+            return {'CANCELLED'}
+
+        # ② 再按出厂布局重建启动文件
+        #    用 read_homefile(use_factory_startup=True)：加载同一份出厂启动文件，但
+        #    **不重置偏好设置**，所以插件不会被卸载（read_factory_settings 会在算符
+        #    执行中把插件自己卸掉，实测直接 EXCEPTION_ACCESS_VIOLATION）。
+        try:
+            bpy.ops.wm.read_homefile(use_factory_startup=True)
+            bpy.ops.wm.save_homefile()
+        except Exception as error:
+            self.report({'ERROR'}, "重建启动文件失败：{}（备份仍在：{}）".format(
+                error, backup_path or "无"))
+            return {'CANCELLED'}
+
+        LAST_STARTUP_RESET_RESULT.clear()
+        LAST_STARTUP_RESET_RESULT.update({
+            "config": config_dir,
+            "backup": backup_path,
+            "backup_note": backup_note,
+            "dirty_before": dirty_before,
+            "startup": os.path.join(config_dir, "startup.blend"),
+        })
+        message = "已用 Blender 默认布局重建启动文件（备份：{}）；偏好设置未改动；建议重启 Blender".format(
+            backup_path or "无（本机还没有自定义启动文件）")
+        self.report({'INFO'}, message)
+        try:
+            compat.tag_redraw(context)
+        except Exception:
+            pass
+        return {'FINISHED'}
 
 
 # --------------------------------------- 打开 Blender 自动切英文输入法（Windows）

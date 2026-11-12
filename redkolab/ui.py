@@ -576,7 +576,7 @@ class HHZ_PT_hotkey(bpy.types.Panel):
         call = layout.operator("wm.call_menu_pie", text="呼出饼菜单", icon='COLLAPSEMENU')
         call.name = PIE_IDNAME
 
-        layout.label(text="饼菜单里就这四个功能", icon='INFO')
+        layout.label(text="饼菜单共 8 个功能，按方位排列（顺序与内容见 README）", icon='INFO')
 
 
 class HHZ_PT_settings(bpy.types.Panel):
@@ -960,6 +960,30 @@ class HHZ_PT_layout(bpy.types.Panel):
         box.operator("hhz.layout_save_startup", icon='FILE_TICK')
         box.label(text="会覆盖 Blender 启动文件（点之前会弹确认）", icon='ERROR')
         region.label(text="「使用」只改当前文件；启动布局管的是新建文件", icon='INFO')
+
+        # ---- 2.24.0：跨版本迁移 + 恢复出厂启动布局 ----
+        # 整个区块一个 column、一个 try/except：任何一项在某个版本上不可用，
+        # 都只影响这一段，不会把整块「页面布局」面板画崩（面板里画崩就是一片空白）。
+        # 4.0 侧用「导出」，5.2 侧用「导入」：按 bpy.app.version 排先后，
+        # 两个按钮都画（同一个包通吃 4.0 ~ 5.x，版本判断只决定推荐顺序）。
+        box = region.box()
+        try:
+            box.label(text="跨版本迁移（4.0 与 5.2 之间）")
+            column = box.column(align=True)
+            if bpy.app.version[0] >= 5:
+                column.operator("hhz.migrate_import", icon='IMPORT')
+                column.operator("hhz.migrate_export", icon='EXPORT')
+            else:
+                column.operator("hhz.migrate_export", icon='EXPORT')
+                column.operator("hhz.migrate_import", icon='IMPORT')
+            column.label(text="4.0 里导出 JSON，到 5.2 里导入后重启", icon='INFO')
+            column.label(text="偏好设置文件不能跨版本直拷，按项语义重建", icon='INFO')
+            column.separator()
+            column.operator("hhz.reset_startup_layout", icon='LOOP_BACK')
+            column.label(text="先备份 startup.blend，再重建为 Blender 出厂布局", icon='ERROR')
+            column.label(text="不动偏好设置文件；重建后建议重启 Blender", icon='INFO')
+        except Exception:
+            region.label(text="跨版本迁移区块绘制失败（其余功能不受影响）", icon='ERROR')
 
 
 # --------------------------------------------------------------- 偏好设置
